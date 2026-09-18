@@ -48,7 +48,13 @@ set_perm "$MODPATH/uninstall.sh" 0 0 0755
 [ -f "$MODPATH/bin/lsposed-path-sync.jar" ] && set_perm "$MODPATH/bin/lsposed-path-sync.jar" 0 0 0644
 [ -f "$MODPATH/hook/PenBridge-Hook.apk" ] && set_perm "$MODPATH/hook/PenBridge-Hook.apk" 0 0 0644
 
-if [ -f /data/adb/lspd/config/modules_config.db ] && \
+# NOTE: the LSPosed path-sync below is DISABLED on Vector: the lspd config db
+# is Vector's live database (API 102, different schema) and writing it with
+# LsposedPathSync risks corrupting Vector's module table. Module enabling and
+# scoping are done through `vector-cli` instead. The block only runs if the
+# user explicitly opts back in by creating $MODPATH/enable-lsposed-path-sync.
+if [ -f "$MODPATH/enable-lsposed-path-sync" ] && \
+        [ -f /data/adb/lspd/config/modules_config.db ] && \
         [ -f "$MODPATH/bin/lsposed-path-sync.jar" ] && \
         [ -f "$MODPATH/hook/PenBridge-Hook.apk" ]; then
     chcon u:object_r:system_file:s0 "$MODPATH/bin/lsposed-path-sync.jar" \

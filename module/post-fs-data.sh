@@ -61,13 +61,25 @@ run_bounded() {
     return 124
 }
 
-# LSPosed parses enabled modules before PackageManager restores random
-# /data/app paths on this port. Pin the Pen Hook to the signed copy embedded
-# in this KernelSU module before zygote/system_server requests its module list.
+# LSPosed-style path pinning is DISABLED for Vector.
+#
+# /data/adb/lspd/config/modules_config.db is Vector's live database (Vector
+# reuses the lspd path; the -wal/-shm mtimes move whenever vector-cli runs).
+# LsposedPathSync was written against the LSPosed schema (API 93/100) and
+# Vector is API 102 — writing to it risks corrupting Vector's module table.
+# Vector enables modules and scopes through its own daemon + CLI, which
+# replaces this entire block:
+#   /data/adb/modules/zygisk_vector/cli modules enable com.aclaniakea.lenovopenbridge
+#   /data/adb/modules/zygisk_vector/cli scope set com.aclaniakea.lenovopenbridge \
+#       android/0 com.coloros.note/0 ... (see docs/install-lsposed-route.md)
+# Only re-enable this block if the device actually runs LSPosed again.
 LSP_DB=/data/adb/lspd/config/modules_config.db
 LSP_APK="$MODDIR/hook/PenBridge-Hook.apk"
 LSP_SYNC="$MODDIR/bin/lsposed-path-sync.jar"
-if [ -f "$LSP_DB" ] && [ -f "$LSP_APK" ] && [ -f "$LSP_SYNC" ]; then
+# Disabled on Vector (see comment above). Kept behind an explicit opt-in so
+# restoring LSPosed only needs `touch $MODDIR/enable-lsposed-path-sync`.
+if [ -f "$MODDIR/enable-lsposed-path-sync" ] &&
+        [ -f "$LSP_DB" ] && [ -f "$LSP_APK" ] && [ -f "$LSP_SYNC" ]; then
     chown 0:0 "$LSP_APK" "$LSP_SYNC" 2>/dev/null
     chmod 0644 "$LSP_APK" "$LSP_SYNC" 2>/dev/null
     chcon u:object_r:system_file:s0 "$LSP_APK" "$LSP_SYNC" 2>/dev/null

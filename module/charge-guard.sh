@@ -17,7 +17,9 @@
 #
 # 硬件接口（实测）：
 #   /sys/bus/i2c/devices/11-0041/tx_status   写裸数字 0/1（带字样会被判 0！）
-#   /sys/devices/virtual/hall/och1909/hall3  形如 "hall3 value = 0"
+#   /sys/devices/virtual/hall/och1909/hall3  实际内容为 "hall13 value = 0"
+#     （驱动格式串 bug：前缀是 hall13 不是 hall3。解析只取行尾数字，
+#      两种前缀都兼容，勿依赖前缀判断。）
 # 注意：adb/shell 直接内联引号会丢失，一律以脚本文件执行本脚本。
 # ============================================================================
 

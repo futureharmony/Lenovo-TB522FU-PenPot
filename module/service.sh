@@ -420,7 +420,9 @@ echo "[$(date '+%F %T')] stable LSPosed Pen Hook payload expected"
 # still come from the CPS/GATT-backed settings and uevent; this monitor only
 # repairs the physical magnetic edge.
 read_hall_state() {
-    # TB522FU: och1909 hall3, file format "hall3 value = N" (N=0 docked).
+    # TB522FU: och1909 hall3. Driver writes prefix "hall13" (its own
+    # format-string bug), so file content is "hall13 value = N" (N=0 docked).
+    # The trailing-digit extraction is prefix-agnostic: fine either way.
     # The trailing-digit extraction avoids spawning tr/awk per sample.
     hall=
     [ -r "$PEN1_HALL" ] && IFS= read -r hall <"$PEN1_HALL"
