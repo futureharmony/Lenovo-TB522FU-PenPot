@@ -13,7 +13,7 @@ from pathlib import Path
 INCLUDE = (
     "README.md",
     "action.sh",
-    "bin/pen-cps-gpio",
+    "charge-guard.sh",
     "customize.sh",
     "module.prop",
     "post-fs-data.sh",
@@ -25,12 +25,12 @@ INCLUDE = (
 
 EXTERNAL = {
     "bin/lsposed-path-sync.jar": "fix-module/module/bin/lsposed-path-sync.jar",
-    "hook/PenBridge-Hook.apk": "releases/PenBridge-Hook-v4.1.3.apk",
+    "hook/PenBridge-Hook.apk": "releases/PenBridge-Hook-tb522fu-v4.1.3.apk",
 }
 
 
 def build(module_dir: Path, output: Path) -> None:
-    repo = module_dir.parents[1]
+    repo = module_dir.parents[0]  # tb522fu-pen-port layout: module/ at repo root
     # Keep release packaging possible on a host without the Android/Smali
     # toolchain.  The synchronized helper is deterministic and the checked-in
     # artifact is the validated fallback used by FixModule as well; fail only

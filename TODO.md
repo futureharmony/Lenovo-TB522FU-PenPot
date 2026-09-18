@@ -40,3 +40,13 @@
 - [ ] 实机验证 ipe_pencil_charging_state 在低于 100% 吸附时被修正为 1
 - [ ] P1 Hook APK 中实现 SHOW_PENCIL_CAPSULE 接收端（弹胶囊/发通知）
 - [x] service.sh：inkdye 禁用改为仅当 hook APK 就位时执行（消除触觉反馈空窗）
+
+## P1 构建（2026-09-18 完成）
+- [x] Hook APK：`releases/PenBridge-Hook-tb522fu-v4.1.3.apk`（DeviceGate=SM8750P/sun，213KB，Xposed API 已正确从 dex 剔除）
+- [x] PenHidCtl：`releases/PenHidCtl-tb522fu-1.1.0.apk`（17KB）
+- [x] 模块包：`releases/tb522fu-pen-bridge-v0.1.0.zip`（含 charge-guard.sh、service.sh、PenHidCtl priv-app、lsposed-path-sync、hook 副本）
+- [x] 构建脚本本地化：build_hook_source/build_penhid（alias/out env 化、libpeninput.so 可选）、build_root（repo 布局适配、去 CPS GPIO、加 charge-guard）
+- [x] 本机工具链：/tmp/android-sdk（build-tools android-15 + platform-35），自签 keys/tb522fu.jks（不入库）
+- [ ] 刷入模块 zip + 重启
+- [ ] LSPosed 勾选作用域（android/ipemanager/mydevices/note/exsystemservice/healthservice/wirelesssettings/screenshot）
+- [ ] 验证 hook 加载（logcat LSPosed + charge-guard 与 hook 联动）

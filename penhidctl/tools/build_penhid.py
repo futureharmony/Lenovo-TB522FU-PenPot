@@ -36,10 +36,10 @@ def _android_jar(sdk: Path) -> Path:
 ANDROID_JAR = _android_jar(SDK)
 KEYSTORE = Path(os.environ.get("ACL_KS", "/tmp/aclaniakea.jks"))
 KS_PASS = os.environ.get("ACL_KS_PASS", "changeit")
-ALIAS = "aclaniakea"
+ALIAS = os.environ.get("ACL_ALIAS", "aclaniakea")
 
 OUT_DIR = ROOT.parents[1] / "releases"
-OUT_APK = OUT_DIR / "PenHidCtl-v4.1.3.apk"
+OUT_APK = Path(os.environ.get("ACL_OUT", str(ROOT.parents[1] / "releases" / "PenHidCtl-tb522fu-1.1.0.apk")))
 
 
 def run(cmd: list[str]) -> None:

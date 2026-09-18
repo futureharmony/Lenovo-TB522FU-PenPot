@@ -23,7 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SOURCES = ROOT / "source" / "sources"
 COMPILE_STUBS = ROOT / "source" / "stubs"
-XPOSED_STUB_PATCHES = ROOT.parents[1] / "base-fix" / "hook" / "stub-patches"
+XPOSED_STUB_PATCHES = ROOT / "source" / "stub-patches"
 RES = ROOT / "source" / "resources" / "res"
 MANIFEST = ROOT / "source" / "resources" / "AndroidManifest.xml"
 XPOSED_INIT = ROOT / "source" / "resources" / "assets" / "xposed_init"
@@ -53,10 +53,10 @@ ANDROID_JAR = _android_jar(SDK)
 STUBS = Path(os.environ.get("XPOSED_STUBS", "/tmp/acdb/stubs"))
 KEYSTORE = Path(os.environ.get("ACL_KS", "/run/media/ACLaniakea/IXUNICS/pad/keys/aclaniakea.jks"))
 KS_PASS = os.environ.get("ACL_KS_PASS", "changeit")
-ALIAS = "aclaniakea"
+ALIAS = os.environ.get("ACL_ALIAS", "aclaniakea")
 
-OUT_DIR = ROOT.parents[1] / "releases"
-OUT_APK = OUT_DIR / "PenBridge-Hook-v4.1.3.apk"
+OUT_DIR = Path(os.environ.get("ACL_OUT", str(ROOT.parents[1] / "releases")))
+OUT_APK = OUT_DIR / "PenBridge-Hook-tb522fu-v4.1.3.apk"
 
 
 def run(cmd: list[str]) -> None:
@@ -125,7 +125,8 @@ def main() -> None:
             for info in src.infolist():
                 dst.writestr(info, src.read(info))
             write_aligned_stored(dst, "classes.dex", dex.read_bytes())
-            write_aligned_stored(dst, "lib/arm64-v8a/libpeninput.so", PEN_SO.read_bytes())
+            if PEN_SO.is_file():
+                write_aligned_stored(dst, "lib/arm64-v8a/libpeninput.so", PEN_SO.read_bytes())
             dst.writestr("assets/xposed_init", XPOSED_INIT.read_bytes(),
                          compress_type=zipfile.ZIP_DEFLATED)
             dst.writestr("META-INF/xposed/scope.list", SCOPE_LIST.read_bytes(),
