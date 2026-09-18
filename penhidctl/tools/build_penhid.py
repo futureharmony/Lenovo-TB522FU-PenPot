@@ -34,12 +34,28 @@ def _android_jar(sdk: Path) -> Path:
 
 
 ANDROID_JAR = _android_jar(SDK)
-KEYSTORE = Path(os.environ.get("ACL_KS", "/tmp/aclaniakea.jks"))
-KS_PASS = os.environ.get("ACL_KS_PASS", "changeit")
-ALIAS = os.environ.get("ACL_ALIAS", "aclaniakea")
 
-OUT_DIR = ROOT.parents[1] / "releases"
-OUT_APK = Path(os.environ.get("ACL_OUT", str(ROOT.parents[1] / "releases" / "PenHidCtl-tb522fu-1.1.0.apk")))
+# Repo-local signing defaults (keys/ is gitignored). Password is read from
+# <repo>/keys/tb522fu.pass so rebuilds don't depend on remembering it.
+REPO = ROOT.parents[0]  # penhidctl/ -> repo root
+KEYSTORE = Path(os.environ.get("ACL_KS", str(REPO / "keys" / "tb522fu.jks")))
+ALIAS = os.environ.get("ACL_ALIAS", "tb522fu")
+
+
+def _ks_pass() -> str:
+    env = os.environ.get("ACL_KS_PASS")
+    if env:
+        return env
+    pw_file = KEYSTORE.parent / "tb522fu.pass"
+    if pw_file.is_file():
+        return pw_file.read_text(encoding="utf-8").strip()
+    return "changeit"
+
+
+KS_PASS = _ks_pass()
+
+OUT_APK = Path(os.environ.get("ACL_OUT", str(REPO / "releases" / "PenHidCtl-tb522fu-1.1.0.apk")))
+OUT_DIR = OUT_APK.parent
 
 
 def run(cmd: list[str]) -> None:

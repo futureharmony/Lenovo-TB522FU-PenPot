@@ -1268,7 +1268,9 @@ monitor_real_bt_state &
 
 # TB522FU: 充满断电 + 充电通知 + IPeManager 充电状态修正。
 # 独立脚本，可用 `touch $MODDIR/disable-charge-guard` 临时停用。
-[ -x "$MODDIR/charge-guard.sh" ] && sh "$MODDIR/charge-guard.sh" &
+# 用 -f + `sh` 而不是 -x：模块文件权限由打包时的 set_perm 决定，
+# 早先漏配导致 charge-guard.sh 为 0644 → -x 判定失败 → 守护静默不启动。
+[ -f "$MODDIR/charge-guard.sh" ] && sh "$MODDIR/charge-guard.sh" &
 
 monitor_hid_latch &
 

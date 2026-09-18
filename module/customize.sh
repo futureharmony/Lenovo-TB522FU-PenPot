@@ -43,6 +43,7 @@ set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/post-fs-data.sh" 0 0 0755
 set_perm "$MODPATH/action.sh" 0 0 0755
 set_perm "$MODPATH/panic.sh" 0 0 0755
+set_perm "$MODPATH/charge-guard.sh" 0 0 0755
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
 [ -f "$MODPATH/bin/pen-cps-gpio" ] && set_perm "$MODPATH/bin/pen-cps-gpio" 0 0 0755
 [ -f "$MODPATH/bin/lsposed-path-sync.jar" ] && set_perm "$MODPATH/bin/lsposed-path-sync.jar" 0 0 0644

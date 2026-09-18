@@ -51,11 +51,28 @@ def _android_jar(sdk: Path) -> Path:
 
 ANDROID_JAR = _android_jar(SDK)
 STUBS = Path(os.environ.get("XPOSED_STUBS", "/tmp/acdb/stubs"))
-KEYSTORE = Path(os.environ.get("ACL_KS", "/run/media/ACLaniakea/IXUNICS/pad/keys/aclaniakea.jks"))
-KS_PASS = os.environ.get("ACL_KS_PASS", "changeit")
-ALIAS = os.environ.get("ACL_ALIAS", "aclaniakea")
 
-OUT_DIR = Path(os.environ.get("ACL_OUT", str(ROOT.parents[1] / "releases")))
+# Repo-local defaults: the signing material lives in <repo>/keys (gitignored).
+# The store password is read from <repo>/keys/tb522fu.pass so rebuilds do not
+# depend on remembering it. Env vars still win when set.
+REPO = ROOT.parents[0]  # hook/ -> repo root
+KEYSTORE = Path(os.environ.get("ACL_KS", str(REPO / "keys" / "tb522fu.jks")))
+ALIAS = os.environ.get("ACL_ALIAS", "tb522fu")
+
+
+def _ks_pass() -> str:
+    env = os.environ.get("ACL_KS_PASS")
+    if env:
+        return env
+    pw_file = KEYSTORE.parent / "tb522fu.pass"
+    if pw_file.is_file():
+        return pw_file.read_text(encoding="utf-8").strip()
+    return "changeit"
+
+
+KS_PASS = _ks_pass()
+
+OUT_DIR = Path(os.environ.get("ACL_OUT", str(REPO / "releases")))
 OUT_APK = OUT_DIR / "PenBridge-Hook-tb522fu-v4.1.3.apk"
 
 

@@ -156,34 +156,53 @@ final class SystemStylusHooks {
         } catch (Throwable th) {
             HookUtils.log("OplusDisplayModeService getInstance hook failed: " + th);
         }
-        HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.policy.PhoneWindowManager", "interceptKeyBeforeQueueing", new XC_MethodHook() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.2
-            protected void beforeHookedMethod(XC_MethodHook.MethodHookParam methodHookParam) {
-                KeyEvent keyEvent;
-                Object[] objArr = methodHookParam.args;
-                int length = objArr.length;
-                int i = 0;
-                while (true) {
-                    if (i >= length) {
-                        keyEvent = null;
-                        break;
+        try {
+            HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.policy.PhoneWindowManager", "interceptKeyBeforeQueueing", new XC_MethodHook() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.2
+                protected void beforeHookedMethod(XC_MethodHook.MethodHookParam methodHookParam) {
+                    try {
+                        KeyEvent keyEvent;
+                        Object[] objArr = methodHookParam.args;
+                        int length = objArr.length;
+                        int i = 0;
+                        while (true) {
+                            if (i >= length) {
+                                keyEvent = null;
+                                break;
+                            }
+                            Object obj = objArr[i];
+                            if (obj instanceof KeyEvent) {
+                                keyEvent = (KeyEvent) obj;
+                                break;
+                            }
+                            i++;
+                        }
+                        if (keyEvent != null && SystemStylusHooks.isPen(keyEvent.getDevice()) && SystemStylusHooks.handle(HookUtils.context(methodHookParam.thisObject), keyEvent)) {
+                            methodHookParam.setResult(0);
+                        }
+                    } catch (Throwable th) {
+                        // Never let a pen-key handler break PhoneWindowManager's
+                        // input dispatch; input would die system-wide.
+                        HookUtils.log("interceptKeyBeforeQueueing handler skipped: " + th);
                     }
-                    Object obj = objArr[i];
-                    if (obj instanceof KeyEvent) {
-                        keyEvent = (KeyEvent) obj;
-                        break;
-                    }
-                    i++;
                 }
-                if (keyEvent != null && SystemStylusHooks.isPen(keyEvent.getDevice()) && SystemStylusHooks.handle(HookUtils.context(methodHookParam.thisObject), keyEvent)) {
-                    methodHookParam.setResult(0);
-                }
-            }
-        });
+            });
+        } catch (Throwable th) {
+            HookUtils.log("PhoneWindowManager hook failed: " + th);
+        }
         XC_MethodHook xC_MethodHook = new XC_MethodHook() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.3
             protected void afterHookedMethod(XC_MethodHook.MethodHookParam methodHookParam) {
-                Context context = HookUtils.context(methodHookParam.thisObject);
-                if (context != null) {
-                    SystemStylusHooks.init(context);
+                // CRITICAL: this callback runs inside SystemServer's boot
+                // sequence (startOtherServices / run). On Android 16 an
+                // uncaught throwable here aborts system_server bring-up and the
+                // device hangs on the boot animation with sys.boot_completed
+                // never set. Everything must be swallowed and logged.
+                try {
+                    Context context = HookUtils.context(methodHookParam.thisObject);
+                    if (context != null) {
+                        SystemStylusHooks.init(context);
+                    }
+                } catch (Throwable th) {
+                    HookUtils.log("system_server init skipped (boot safety): " + th);
                 }
             }
         };
