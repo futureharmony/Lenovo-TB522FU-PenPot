@@ -16,6 +16,7 @@ INCLUDE = (
     "charge-guard.sh",
     "customize.sh",
     "module.prop",
+    "panic.sh",
     "post-fs-data.sh",
     "service.sh",
     "system/etc/permissions/privapp-permissions-com.aclaniakea.penhidctl.xml",

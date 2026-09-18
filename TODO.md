@@ -54,3 +54,13 @@
 - [ ] LSPosed 勾选作用域（android/ipemanager/mydevices/note/exsystemservice/healthservice/wirelesssettings/screenshot）→ 二次重启
 - [ ] 验证 hook 加载（logcat LSPosed + charge-guard 与 hook 联动）
 - [ ] hook 生效确认后，手动 `action.sh disable` 关 inkdye（勿提前禁用，避免触觉空窗）
+
+## P1.5 启动失败自保（2026-09-18 实现）
+- [x] `post-fs-data.sh`：`app_process` 调用加 `timeout 20`（无 timeout 时回退后台+轮询），消除唯一会阻塞开机的无界调用
+- [x] `customize.sh`：同类调用加超时，避免安装器被挂住；修正过时的 ui_print（不再声称"首次开机禁用 inkdye"）
+- [x] boot guard：`post-fs-data.sh` 记账 → `service.sh` 确认 `boot_completed=1` 才清零 → 连续 >3 次失败自动生成 `disable`（计数文件 `/data/adb/tb522fu_pen_bridge.bootfail`）
+- [x] `module/panic.sh`：一键恢复（enable inkdye / 杀进程 / tx=1 / 清标记 / 默认停用模块），支持 `--keep`
+- [x] `uninstall.sh`：清理 boot-guard 计数与 `disable`，避免重装后立刻熔断
+- [x] `docs/install-lsposed-route.md` 增「启动失败与救援」分层说明（模块自保 + KSU 安全模式 + ksud + Recovery）
+- [ ] 实机验证：正常开机计数归零（`cat /data/adb/tb522fu_pen_bridge.bootfail` 应为空/0）
+- [ ] 实机验证：人为制造 4 次失败开机 → 确认自动熔断 + inkdye 自动恢复

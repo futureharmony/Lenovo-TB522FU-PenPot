@@ -96,6 +96,23 @@ case "$soc/$platform" in
     *) echo "unsupported device: soc=$soc platform=$platform" >"$LOGFILE"; exit 0;;
 esac
 
+# --- 启动失败自保：清除 post-fs-data 的失败计数 -----------------------------
+# post-fs-data.sh 每次开机先 +1 记账，连续失败超阈值就熔断（见该文件）。
+# 只有系统【真正】到达 sys.boot_completed=1 才清零——否则一个能跑到
+# late_start 但随后崩掉的坏镜像会被误判为“启动成功”，计数被白白清空。
+# 后台等待，不阻塞本服务启动。
+(
+    _n=0
+    while [ "$_n" -lt 180 ]; do
+        [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ] && break
+        sleep 2
+        _n=$((_n + 1))
+    done
+    if [ "$(getprop sys.boot_completed 2>/dev/null)" = "1" ]; then
+        rm -f /data/adb/tb522fu_pen_bridge.bootfail 2>/dev/null
+    fi
+) &
+
 # --- inkdye（系统内置笔桥）保留运行，由用户经 action.sh 手动切换 ---
 # 原因：Hook 需要 LSPosed 勾选作用域后才生效；自动禁用会在 Hook 未就绪时
 # 造成触觉反馈空窗。切换入口：KSU 管理器「执行」或 `sh $MODDIR/action.sh disable|enable`。

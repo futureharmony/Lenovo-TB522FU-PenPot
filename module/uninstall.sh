@@ -37,3 +37,8 @@ if [ -r "$CG_PID" ]; then
 fi
 [ -w /sys/bus/i2c/devices/11-0041/tx_status ] && \
     echo 1 >/sys/bus/i2c/devices/11-0041/tx_status 2>/dev/null
+
+# --- 清掉自保状态：失败计数与 disable 标记 ---
+# 否则重新安装时会带着旧的失败计数，可能一开机就被 boot guard 熔断。
+rm -f /data/adb/tb522fu_pen_bridge.bootfail 2>/dev/null
+rm -f "$MODDIR/disable" "$MODDIR/disable-charge-guard" 2>/dev/null

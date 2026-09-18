@@ -115,7 +115,71 @@ adb logcat -d | grep -iE "LSPosed|lenovopenbridge|colorosporttuning" | tail -40
   - `pm enable` 恢复 inkdye
   - 杀掉 charge-guard 进程
   - `echo 1 > tx_status` 恢复充电
+  - 清掉 boot-guard 计数与 `disable` 标记（避免重装后立刻熔断）
 - 临时禁用 hook：LSPosed 管理器里关掉本模块（不动模块本身）。
+
+## 6.5 启动失败与救援（分层）
+
+模块自身有**两级自保**，KernelSU 还提供**三层外部救援**。按严重程度从轻到重：
+
+### 第 0 层：模块自保（本项目实现）
+
+**A. 超时上限（防死机）**
+`post-fs-data.sh` 是全模块唯一会阻塞开机的脚本，其中 `app_process` 调用已用
+`timeout 20` 包住（无 `timeout` 时回退到后台+轮询）。任何一次卡住都不会把
+post-fs-data 拖成死机。`customize.sh` 里的同类调用也加了超时。
+
+**B. 启动失败熔断（boot guard）**
+- `post-fs-data.sh` 每次开机第一步就在 `/data/adb/tb522fu_pen_bridge.bootfail` 记账 +1。
+- `service.sh` 只在**确认 `sys.boot_completed=1`** 之后才把计数清零（不是一到
+  late_start 就清，避免"能跑到 late_start 但随后崩掉"的坏镜像被误判为成功）。
+- 连续 **>3 次**未启动完成 → 自动生成 `disable` 文件：
+  - KernelSU 下次开机直接跳过本模块；
+  - 同时 `pm enable` 交还 inkdye、恢复 `tx_status=1`、清掉进程 pidfile。
+- 结果：最坏情况是**丢 3 次开机**，然后系统自己恢复，不需要任何人工介入。
+
+**C. 一键 panic**
+还能拿到 root shell 时：
+```sh
+su -c 'sh /data/adb/modules/tb522fu_pen_bridge/panic.sh'          # 恢复状态 + 停用模块
+su -c 'sh /data/adb/modules/tb522fu_pen_bridge/panic.sh --keep'   # 只恢复状态，保留模块
+```
+它会立刻 `pm enable` inkdye、杀掉守护/服务进程、恢复 `tx_status=1`、清一次性标记，
+清掉失败计数，并（默认）标记模块停用。
+
+### 第 1 层：KernelSU 安全模式（内核级，最可靠）
+
+**开机首个画面出现后，连按「音量−」三次以上**（按下-抬起，不是长按）。
+进入后**所有模块被停用**，在 KSU 管理器里可卸载本模块。
+
+> ⚠️ 音量键监听在内核模块初始化时注册、在 `on_post_fs_data` 阶段注销，
+> 所以要**抢在开机动画前**按完。开机快或按得慢会错过。
+> 另外：安全模式只停用模块，不能挽救"initrc 里写了坏代码"的情况——本模块没有 initrc，不受影响。
+
+### 第 2 层：ksud 命令行
+
+能通过 adb 拿到 root shell 时，不依赖模块目录：
+```sh
+adb shell su -c 'ksud module list'
+adb shell su -c 'ksud module disable tb522fu_pen_bridge'
+adb shell su -c 'ksud module uninstall tb522fu_pen_bridge'
+adb reboot
+```
+
+### 第 3 层：Recovery（系统完全起不来，adb 也连不上）
+
+进 TWRP/第三方 Recovery → 挂载 `/data` → 直接删模块目录：
+```sh
+rm -rf /data/adb/modules/tb522fu_pen_bridge
+```
+删完重启，KernelSU 不会加载任何已删除的模块。
+
+### ⚠️ 本模块不会做的事
+
+- **不写 display/DSI/panel 节点**（黑屏根因已隔离到 fix 模块，本模块的
+  post-fs-data 明确不碰）。
+- **不注入 initrc / 不装自定义内核模块**（无 `.ko`）→ 安全模式对本模块有效。
+- **不改 vbmeta / boot 分区** → 本模块的问题不会导致需要重刷 boot。
 
 ## 7. 已知坑
 

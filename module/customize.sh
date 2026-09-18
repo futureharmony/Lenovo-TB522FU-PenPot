@@ -16,9 +16,11 @@ ui_print "- 连接状态只接受真实 ACL/GATT/Hall/CPS 事件，拒绝强制�
 ui_print "- 刷新率策略统一绑定：笔场景锁 120Hz，其余场景最高 144Hz"
 ui_print "- 内置签名 Hook 副本并固定 LSPosed 早期路径，消除冷启动随机路径竞态"
 ui_print "- TB522FU (sun/SM8750P) 移植版"
-ui_print "- 安装后首次开机将禁用系统内置笔桥 com.inkdye.lenovopentocoloros"
+ui_print "- inkdye 系统内置笔桥【保持启用】，由你确认 Hook 生效后手动切换"
+ui_print "- 切换指令：sh action.sh disable|enable|toggle"
+ui_print "- 启动自保：连续 3 次开机失败将自动停用本模块"
+ui_print "- 一键救援：sh panic.sh（恢复状态并停用模块）"
 ui_print "- 卸载本模块会自动恢复 inkdye，可随时回退"
-ui_print "- 磁吸/Hall 节点适配进行中，详见项目 TODO"
 
 # An older revision may have embedded the Hook APK in this same module.
 # Remove only those exact legacy paths during the split update. The new Root
@@ -40,6 +42,7 @@ set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/post-fs-data.sh" 0 0 0755
 set_perm "$MODPATH/action.sh" 0 0 0755
+set_perm "$MODPATH/panic.sh" 0 0 0755
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
 [ -f "$MODPATH/bin/pen-cps-gpio" ] && set_perm "$MODPATH/bin/pen-cps-gpio" 0 0 0755
 [ -f "$MODPATH/bin/lsposed-path-sync.jar" ] && set_perm "$MODPATH/bin/lsposed-path-sync.jar" 0 0 0644
@@ -50,7 +53,13 @@ if [ -f /data/adb/lspd/config/modules_config.db ] && \
         [ -f "$MODPATH/hook/PenBridge-Hook.apk" ]; then
     chcon u:object_r:system_file:s0 "$MODPATH/bin/lsposed-path-sync.jar" \
         "$MODPATH/hook/PenBridge-Hook.apk" 2>/dev/null
-    CLASSPATH="$MODPATH/bin/lsposed-path-sync.jar" app_process /system/bin \
+    # 加超时：安装器里 app_process 卡住会挂住整个 KSU 安装流程。
+    if command -v timeout >/dev/null 2>&1; then
+        SYNC_RUN="timeout 20"
+    else
+        SYNC_RUN=""
+    fi
+    $SYNC_RUN env CLASSPATH="$MODPATH/bin/lsposed-path-sync.jar" app_process /system/bin \
         com.aclaniakea.tools.LsposedPathSync \
         /data/adb/lspd/config/modules_config.db \
         "$MODPATH/hook/PenBridge-Hook.apk" \

@@ -30,6 +30,24 @@ releases/     构建产物（模块 zip / Hook APK / PenHidCtl APK）
 - **回退**：卸载模块 → `uninstall.sh` 自动 `pm enable` 恢复 inkdye、杀守护、恢复 TX=1。
   临时仅停守护：`touch $MODDIR/disable-charge-guard`。
 
+## 启动失败自保
+
+模块不再是"刷了就听天由命"。三层保护：
+
+1. **超时封顶**：`post-fs-data.sh`（唯一阻塞开机的脚本）里所有 `app_process` 调用带
+   `timeout 20`，卡住也不会拖死开机。
+2. **失败熔断**：连续 >3 次未到达 `sys.boot_completed=1` → 自动生成 `disable`，
+   下次开机跳过本模块，并自动交还 inkdye / 恢复充电。最坏代价是丢 3 次开机。
+3. **一键 panic**：`su -c 'sh /data/adb/modules/tb522fu_pen_bridge/panic.sh'`
+   立刻恢复运行时状态并停用模块（`--keep` 保留模块）。
+
+外部救援（KernelSU 自带）：开机连按**音量−三次**进安全模式；或 `ksud module disable
+tb522fu_pen_bridge`；或 Recovery 里删模块目录。详见
+[`docs/install-lsposed-route.md`](docs/install-lsposed-route.md) 第 6.5 节。
+
+> 本模块**不写 display/DSI/panel 节点、不注入 initrc、不装自定义 `.ko`、不改
+> boot/vbmeta**，所以安全模式始终有效，出问题不需要重刷 boot。
+
 ## 已完成的移植改动
 
 1. `hook/.../DeviceGate.java`：SM8650Q/PINEAPPLE → SM8750P/SUN
