@@ -61,10 +61,12 @@ pen_battery() {
 }
 
 notify() {
-    cmd notification post -S bigtext -t "手写笔" "pen_charge_guard" "$1" >/dev/null 2>&1
+    # 通知失败要留痕：cmd notification 在部分 SELinux 域下可能被拒
+    out=$(cmd notification post -S bigtext -t "手写笔" "pen_charge_guard" "$1" 2>&1)
+    rc=$?
+    log "notify rc=$rc out=$out msg=$1"
     am broadcast -a com.aclaniakea.lenovopenbridge.action.SHOW_PENCIL_CAPSULE \
         --es text "$1" >/dev/null 2>&1
-    log "notify: $1"
 }
 
 sync_ipe_state() {
