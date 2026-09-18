@@ -578,9 +578,36 @@ final class SystemStylusHooks {
     private static void swipeAction(Context context, boolean up) {
         int i;
         try {
-            i = Settings.Global.getInt(context.getContentResolver(),
-                    up ? "ipe_pencil_slide_up" : "ipe_pencil_slide_down",
-                    up ? 5 : 3);
+            if (up) {
+                // UI source of truth (设备中心 -> 手写笔), measured 2026-09-19
+                // by snapshotting Settings.Global around UI edits: the
+                // up-swipe row is a binary 随心圈/关闭 toggle persisted to
+                // ipe_pencil_long_click_v2 -- selecting 关闭 writes 0,
+                // selecting 随心圈 REMOVES the key. So: key absent or
+                // non-zero => collect (5); explicit 0 => disabled. Our own
+                // legacy ipe_pencil_slide_up stays as an adb-only override.
+                i = Settings.Global.getInt(context.getContentResolver(),
+                        "ipe_pencil_slide_up", -1);
+                if (i == -1) {
+                    i = Settings.Global.getInt(context.getContentResolver(),
+                            "ipe_pencil_long_click_v2", 5);
+                    if (i != 0) {
+                        i = 5;
+                    }
+                }
+            } else {
+                // The down-swipe row persists to ipe_pencil_single_click
+                // (misnamed: it is the OPPO-pen single-click slot, shared
+                // with the physical single click). Fall back to our legacy
+                // key, then palette. Measured: 下滑->最近工具切换 wrote
+                // single_click=2; 下滑->色盘 wrote single_click=3.
+                i = Settings.Global.getInt(context.getContentResolver(),
+                        "ipe_pencil_single_click", -1);
+                if (i == -1) {
+                    i = Settings.Global.getInt(context.getContentResolver(),
+                            "ipe_pencil_slide_down", 3);
+                }
+            }
         } catch (Throwable th) {
             i = up ? 5 : 3;
         }
