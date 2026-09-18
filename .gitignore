@@ -1,0 +1,6 @@
+*.zip
+*.log
+*.apk
+hook/build/
+module/out/
+.DS_Store

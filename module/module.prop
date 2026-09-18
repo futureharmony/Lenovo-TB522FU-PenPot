@@ -1,0 +1,6 @@
+id=tb522fu_pen_bridge
+name=TB522FU - 手写笔桥接移植版
+author=ACLaniakea (original) / TB522FU port
+version=0.1.0
+versionCode=10
+description=将 coloros-pad-fixes 的 lenovo_pen_bridge (v4.1.3, TB710FU) 移植到 Lenovo TB522FU (sun/SM8750P)。安装时自动禁用系统内置的 com.inkdye.lenovopentocoloros 笔桥（卸载模块可恢复）。磁吸/Hall 节点适配进行中，见 TODO.md。

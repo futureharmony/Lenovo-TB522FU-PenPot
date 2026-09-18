@@ -1,0 +1,1639 @@
+package com.aclaniakea.colorosporttuning;
+
+import android.bluetooth.BluetoothAdapter;
+import android.bluetooth.BluetoothDevice;
+import android.bluetooth.BluetoothProfile;
+import android.content.BroadcastReceiver;
+import android.content.Context;
+import android.content.Intent;
+import android.content.IntentFilter;
+import android.hardware.input.InputManager;
+import android.os.Build;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.HandlerThread;
+import android.os.IBinder;
+import android.os.Looper;
+import android.os.Parcel;
+import android.os.SystemClock;
+import android.os.VibrationEffect;
+import android.os.Vibrator;
+import android.provider.Settings;
+import android.net.Uri;
+import android.view.Choreographer;
+import android.view.InputDevice;
+import android.view.InputEvent;
+import android.view.KeyEvent;
+import android.view.MotionEvent;
+import de.robv.android.xposed.XC_MethodHook;
+import de.robv.android.xposed.callbacks.XC_LoadPackage;
+import java.io.BufferedReader;
+import java.io.FileReader;
+import java.lang.reflect.InvocationHandler;
+import java.lang.reflect.Method;
+import java.lang.reflect.Proxy;
+import java.util.HashSet;
+
+/* loaded from: classes.dex */
+final class SystemStylusHooks {
+    private static final int HID_HOST_PROFILE = 4;
+    private static final String PEN1_HALL = "/sys/devices/virtual/factory/interface/hw_info/pen1_hall";
+    private static final String PEN2_HALL = "/sys/devices/virtual/factory/interface/hw_info/pen2_hall";
+    private static int hallCandidateSamples;
+    private static boolean hallReadFailed;
+    private static boolean hapticControlReady;
+    private static boolean hidConnectPending;
+    private static boolean initialized;
+    private static Object inputMonitor;
+    private static Object inputReceiver;
+    private static boolean kernelWakeReady;
+    private static boolean kernelWakeDisabledLogged;
+    private static long lastButtonAt;
+    private static int lastButtons;
+    private static long lastLong;
+    private static long lastOemPresentAt;
+    private static long lastTapUp;
+    private static boolean longLatched;
+    private static boolean magneticListenerReady;
+    private static boolean monitorReady;
+    private static Runnable pendingTap;
+    private static boolean refreshActive;
+    private static Context refreshContext;
+    /*
+     * The vendor panel resumes before OplusRefreshRateService finishes
+     * rebuilding its votes. Replaying the pen state from SCREEN_ON here
+     * used to race that restore and could leave the panel with no frame.
+     */
+    private static boolean stateReceiverReady;
+    private static long suppressNvtHotplugUntil;
+    private static long suppressPenKeysUntil;
+    private static boolean touchscreenHapticsReady;
+    private static boolean writing;
+    private static final Handler main = new Handler(Looper.getMainLooper());
+    private static final HandlerThread pollThread = new HandlerThread("LenovoPenHall");
+    private static Handler pollHandler;
+    private static boolean screenOn = true;
+    private static int lastPenHall = -1;
+    private static int hallCandidate = -1;
+    private static final HashSet<Integer> nvtDeviceIds = new HashSet<>();
+    private static final Runnable STOP_WRITING = new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda15
+        @Override // java.lang.Runnable
+        public final void run() {
+            SystemStylusHooks.stopWriting();
+        }
+    };
+    private static final Runnable EXPIRE_LONG = new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda16
+        @Override // java.lang.Runnable
+        public final void run() {
+            SystemStylusHooks.lambda$static$0();
+        }
+    };
+    private static final Runnable HID_CONNECT_TIMEOUT = new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda17
+        @Override // java.lang.Runnable
+        public final void run() {
+            SystemStylusHooks.lambda$static$1();
+        }
+    };
+    private static final Runnable POLL_PEN_HALL = new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.1
+        @Override // java.lang.Runnable
+        public void run() {
+            Context context = SystemStylusHooks.refreshContext;
+            if (context != null) {
+                SystemStylusHooks.pollPenHall(context);
+                SystemStylusHooks.updateRefreshFromState(context);
+            }
+            // Real Hall/GATT/root broadcasts are the primary path. This poll
+            // is only reconciliation. The Root hall monitor remains the
+            // immediate magnetic-edge owner, so a slower framework fallback
+            // avoids periodic system_server work without delaying UI updates.
+            SystemStylusHooks.pollHandler.postDelayed(
+                    this, SystemStylusHooks.screenOn ? 2000L : 10000L);
+        }
+    };
+    private static int lastOemPresent = -1;
+    private static int lastLoggedOemPresent = -2;
+    private static boolean lastPenInUseState;
+    private static int lastLinkedState = -1;
+    private static int lastDockedState = -1;
+    private static int lastHidProfileState = -1;
+    private static long lastBtReconcileAt;
+    private static String cachedPenAddress = "";
+    private static boolean cachedHidConnected;
+    private static boolean lastInputEnabled = true;
+    private static Object oplusDisplayModeService;
+    private static Method oplusRequestUpdate;
+    private static long bootSettleUntilMs;
+
+    static /* synthetic */ void lambda$static$0() {
+        synchronized (SystemStylusHooks.class) {
+            if (longLatched) {
+                longLatched = false;
+                HookUtils.log("stylus long action latch expired");
+            }
+        }
+    }
+
+    static /* synthetic */ void lambda$static$1() {
+        synchronized (SystemStylusHooks.class) {
+            if (hidConnectPending) {
+                hidConnectPending = false;
+                HookUtils.log("boot pen HID Host callback timed out; allowing the next retry");
+            }
+        }
+    }
+
+    static void install(XC_LoadPackage.LoadPackageParam loadPackageParam) {
+        if (bootSettleUntilMs == 0L) {
+            bootSettleUntilMs = SystemClock.elapsedRealtime() + 20000L;
+        }
+        try {
+            HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.wm.OplusDisplayModeService", "getInstance", new XC_MethodHook() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.0
+                @Override
+                protected void afterHookedMethod(XC_MethodHook.MethodHookParam methodHookParam) throws Throwable {
+                    SystemStylusHooks.oplusDisplayModeService = methodHookParam.getResult();
+                }
+            });
+        } catch (Throwable th) {
+            HookUtils.log("OplusDisplayModeService getInstance hook failed: " + th);
+        }
+        HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.policy.PhoneWindowManager", "interceptKeyBeforeQueueing", new XC_MethodHook() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.2
+            protected void beforeHookedMethod(XC_MethodHook.MethodHookParam methodHookParam) {
+                KeyEvent keyEvent;
+                Object[] objArr = methodHookParam.args;
+                int length = objArr.length;
+                int i = 0;
+                while (true) {
+                    if (i >= length) {
+                        keyEvent = null;
+                        break;
+                    }
+                    Object obj = objArr[i];
+                    if (obj instanceof KeyEvent) {
+                        keyEvent = (KeyEvent) obj;
+                        break;
+                    }
+                    i++;
+                }
+                if (keyEvent != null && SystemStylusHooks.isPen(keyEvent.getDevice()) && SystemStylusHooks.handle(HookUtils.context(methodHookParam.thisObject), keyEvent)) {
+                    methodHookParam.setResult(0);
+                }
+            }
+        });
+        XC_MethodHook xC_MethodHook = new XC_MethodHook() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.3
+            protected void afterHookedMethod(XC_MethodHook.MethodHookParam methodHookParam) {
+                Context context = HookUtils.context(methodHookParam.thisObject);
+                if (context != null) {
+                    SystemStylusHooks.init(context);
+                }
+            }
+        };
+        HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.SystemServer", "startOtherServices", xC_MethodHook);
+        HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.SystemServer", "run", xC_MethodHook);
+        HookUtils.log("system_server stylus hooks installed");
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static boolean handle(final Context context, KeyEvent keyEvent) {
+        if (context == null) {
+            return false;
+        }
+        int keyCode = keyEvent.getKeyCode();
+        int scanCode = keyEvent.getScanCode();
+        String lowerCase = (keyEvent.getDevice() == null || keyEvent.getDevice().getName() == null) ? "" : keyEvent.getDevice().getName().toLowerCase();
+        if (SystemClock.uptimeMillis() < suppressPenKeysUntil && isPen(keyEvent.getDevice())) {
+            HookUtils.log("suppressed pen key during magnetic transition code=" + keyCode + " scan=" + scanCode);
+            return true;
+        }
+        if (lowerCase.contains("lenovo tab pen pro consumer control")) {
+            if (keyEvent.getRepeatCount() <= 0 && keyEvent.getAction() == 1) {
+                if (keyCode == 131) {
+                    HookUtils.log("mapped touch strip: swipe down -> native 767");
+                    injectNativePenKey(context, 767);
+                } else if (keyCode == 132) {
+                    HookUtils.log("mapped touch strip: swipe up -> native 768");
+                    injectNativePenKey(context, 768);
+                } else if (keyCode == 133) {
+                    HookUtils.log("mapped touch strip: double tap -> native 769");
+                    injectNativePenKey(context, 769);
+                } else {
+                    HookUtils.log("unmapped consumer key code=" + keyCode + " scan=" + scanCode);
+                }
+            }
+            return true;
+        }
+        char c = (keyCode == 131 || keyCode == 188 || scanCode == 240 || scanCode == 272) ? (char) 1 : (keyCode == 132 || keyCode == 189 || scanCode == 273) ? (char) 2 : ((keyCode >= 133 && keyCode <= 135) || keyCode == 190 || scanCode == 274) ? (char) 3 : (char) 0;
+        if (c == 0) {
+            return false;
+        }
+        if (keyEvent.getRepeatCount() > 0) {
+            return true;
+        }
+        if (c == 1 && keyEvent.getAction() == 1) {
+            tap(context);
+            return true;
+        }
+        if (c == 2 && keyEvent.getAction() == 1) {
+            click(context, true);
+            return true;
+        }
+        if (c == 3 && keyEvent.getAction() == 1 && SystemClock.uptimeMillis() - lastLong > 900) {
+            lastLong = SystemClock.uptimeMillis();
+            haptic(context);
+            button(context, "down");
+            main.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda19
+                @Override // java.lang.Runnable
+                public final void run() {
+                    SystemStylusHooks.button(context, "up");
+                }
+            }, 120L);
+        }
+        return true;
+    }
+
+    private static void click(Context context, boolean z) {
+        haptic(context);
+        int i = Settings.Global.getInt(context.getContentResolver(), z ? "ipe_pencil_double_click" : "ipe_pencil_single_click", z ? 1 : HID_HOST_PROFILE);
+        if (i == 0) {
+            return;
+        }
+        String str = z ? "com.oplus.ipemanager.action.PENCIL_DOUBLE_CLICK" : "com.oplus.ipemanager.action.PENCIL_SINGLE_CLICK";
+        for (String str2 : i == HID_HOST_PROFILE ? new String[]{"com.oplus.healthservice"} : new String[]{"com.coloros.note", "com.oplus.screenshot"}) {
+            sendAll(context, new Intent(str).setPackage(str2).putExtra("action", i).addFlags(268435456), i == HID_HOST_PROFILE ? "com.oplus.ipemanager.permission.receiver.DOUBLE_CLICK" : null);
+        }
+    }
+
+    static /* synthetic */ void lambda$tap$3(Context context) {
+        synchronized (SystemStylusHooks.class) {
+            pendingTap = null;
+            click(context, false);
+        }
+    }
+
+    private static synchronized void tap(final Context context) {
+        long jUptimeMillis = SystemClock.uptimeMillis();
+        Runnable runnable = pendingTap;
+        if (runnable == null || jUptimeMillis - lastTapUp >= 320) {
+            lastTapUp = jUptimeMillis;
+            Runnable runnable2 = new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda1
+                @Override // java.lang.Runnable
+                public final void run() {
+                    SystemStylusHooks.lambda$tap$3(context);
+                }
+            };
+            pendingTap = runnable2;
+            main.postDelayed(runnable2, 280L);
+            return;
+        }
+        main.removeCallbacks(runnable);
+        pendingTap = null;
+        lastTapUp = 0L;
+        click(context, true);
+    }
+
+    private static synchronized void longAction(Context context) {
+        if (SystemClock.uptimeMillis() - lastLong < 700) {
+            return;
+        }
+        lastLong = SystemClock.uptimeMillis();
+        haptic(context);
+        if (longLatched) {
+            HookUtils.log("stylus long action already armed");
+            return;
+        }
+        button(context, "down");
+        longLatched = true;
+        Handler handler = main;
+        Runnable runnable = EXPIRE_LONG;
+        handler.removeCallbacks(runnable);
+        handler.postDelayed(runnable, 30000L);
+        HookUtils.log("stylus long action armed for next pen stroke");
+    }
+
+    private static synchronized void consumeLongLatch() {
+        if (longLatched) {
+            longLatched = false;
+            main.removeCallbacks(EXPIRE_LONG);
+            HookUtils.log("stylus long action consumed by pen down");
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static synchronized void releaseLong(Context context) {
+        if (longLatched) {
+            main.removeCallbacks(EXPIRE_LONG);
+            button(context, "cancel");
+            longLatched = false;
+            HookUtils.log("stylus long action released by pen/screen state");
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static void button(Context context, String str) {
+        HookUtils.log("stylus long button status=" + str);
+        sendAll(context, new Intent("com.oplus.ipemanager.action.STYLUS_BUTTON_STATE_CHANGED").setPackage("com.oplus.healthservice").putExtra("stylus_button_status", str).addFlags(268435456), null);
+    }
+
+    private static void haptic(Context context) {
+        // The stock "功能反馈" switch is hidden: its OEM binder call is an
+        // empty method, so the row could never govern anything.  With no
+        // control on screen there must be no hidden gate either, or a value
+        // left over from that switch would silently kill button feedback.
+        // "功能反馈" explicitly describes vibration in the pen body.  Do
+        // not substitute a tablet/phone vibrator for that pen-side action.
+        dispatchHaptic(context, "pulse", HookUtils.state(context).address, 0, true);
+    }
+
+    private static void sendAll(Context context, Intent intent, String str) {
+        try {
+            try {
+                Class<?> cls = Class.forName("android.os.UserHandle");
+                Context.class.getMethod("sendBroadcastAsUser", Intent.class, cls, String.class).invoke(context, intent, cls.getField("ALL").get(null), str);
+            } catch (Throwable unused) {
+                if (str == null) {
+                    context.sendBroadcast(intent);
+                } else {
+                    context.sendBroadcast(intent, str);
+                }
+            }
+        } catch (Throwable unused2) {
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static boolean isPen(InputDevice inputDevice) {
+        if (inputDevice == null) {
+            return false;
+        }
+        if (inputDevice.getVendorId() == 6127) {
+            for (int i : PenBridgeConstants.LENOVO_PRODUCTS) {
+                if (inputDevice.getProductId() == i) {
+                    return true;
+                }
+            }
+        }
+        String lowerCase = inputDevice.getName() == null ? "" : inputDevice.getName().toLowerCase();
+        if (lowerCase.contains("nvtcapacitivepen") && (inputDevice.getSources() & 16386) != 0) {
+            return true;
+        }
+        for (String str : PenBridgeConstants.LENOVO_NAMES) {
+            if (lowerCase.contains(str)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static synchronized void init(final Context context) {
+        if (!initialized) {
+            initialized = true;
+            refreshContext = context;
+            HookUtils.invalidateHardwareBattery(context);
+            HookUtils.invalidateOemCharging(context);
+            enableKernelPenWake();
+            LenovoPenUEventBridge.start(context);
+            if (!pollThread.isAlive()) {
+                pollThread.start();
+            }
+            if (pollHandler == null) {
+                pollHandler = new Handler(pollThread.getLooper());
+            }
+            registerTouchscreen(context);
+            registerHapticControl(context);
+            registerStateSync(context);
+            registerMagneticAttachListener(context);
+            LenovoConsumerGestureReader.start(context);
+            Handler handler = pollHandler;
+            Runnable runnable = POLL_PEN_HALL;
+            handler.removeCallbacks(runnable);
+            handler.post(runnable);
+            handler.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda8
+                @Override // java.lang.Runnable
+                public final void run() {
+                    SystemStylusHooks.restorePenAfterBoot(context, 0);
+                }
+            }, 2000L);
+            // Root owns the bounded CoreService/HID boot connection. Repeating
+            // OEM wake broadcasts here created competing GATT sessions, while
+            // three snapshots replayed the same state into system_server.
+            // One delayed snapshot is enough after PackageManager/BT settle.
+            handler.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda14
+                @Override // java.lang.Runnable
+                public final void run() {
+                    SystemStylusHooks.syncColorOsPenState(context);
+                }
+            }, 5000L);
+        }
+        if (!monitorReady) {
+            registerMonitor(context);
+        }
+    }
+
+    static /* synthetic */ void lambda$onKernelPenAvailable$11(Context context) {
+        enableKernelPenWake();
+        restorePenAfterBoot(context, 0);
+    }
+
+    static void onKernelPenAvailable(final Context context) {
+        main.post(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda2
+            @Override // java.lang.Runnable
+            public final void run() {
+                SystemStylusHooks.lambda$onKernelPenAvailable$11(context);
+            }
+        });
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static synchronized boolean enableKernelPenWake() {
+        // These proc nodes are vendor DSI/panel controls.  system_server is
+        // not allowed to access them on this ROM.  Leave ownership entirely
+        // to the vendor driver instead of generating repeated AVC denials.
+        if (!kernelWakeDisabledLogged) {
+            HookUtils.log("Lenovo kernel pen wake left to vendor driver");
+            kernelWakeDisabledLogged = true;
+        }
+        kernelWakeReady = false;
+        return false;
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static void restorePenAfterBoot(final Context context, final int i) {
+        // The Root service owns the bounded boot CONNECT_PENCIL and HID
+        // sequence. The runtime switch keeps this legacy system_server retry
+        // path disabled so it cannot become a second connection owner.
+        if (context == null || Settings.Global.getInt(context.getContentResolver(), "lenovo_pen_root_owns_boot", 1) == 1) {
+            HookUtils.log("system_server pen restore suppressed; Root owns boot recovery");
+            return;
+        }
+        boolean z;
+        try {
+            if (HookUtils.disconnectRequested(context)) {
+                HookUtils.log("boot pen restore skipped: settings disconnect is latched");
+                return;
+            }
+            BluetoothAdapter defaultAdapter = BluetoothAdapter.getDefaultAdapter();
+            if (defaultAdapter != null && defaultAdapter.getState() == 12) {
+                ensureTouchscreenHaptics();
+                InputManager inputManager = (InputManager) context.getSystemService("input");
+                if (inputManager != null) {
+                    for (int i2 : inputManager.getInputDeviceIds()) {
+                        InputDevice inputDevice = inputManager.getInputDevice(i2);
+                        if (((inputDevice == null || inputDevice.getName() == null) ? "" : inputDevice.getName().toLowerCase()).contains("lenovo tab pen") && (inputDevice.getSources() & 8451) != 0) {
+                            z = true;
+                            break;
+                        }
+                    }
+                    z = false;
+                } else {
+                    z = false;
+                }
+                BluetoothDevice bluetoothDevice = null;
+                for (BluetoothDevice bluetoothDevice2 : defaultAdapter.getBondedDevices()) {
+                    String lowerCase = bluetoothDevice2.getName() == null ? "" : bluetoothDevice2.getName().toLowerCase();
+                    String[] strArr = PenBridgeConstants.LENOVO_NAMES;
+                    int length = strArr.length;
+                    int i3 = 0;
+                    while (true) {
+                        if (i3 >= length) {
+                            break;
+                        }
+                        if (lowerCase.contains(strArr[i3])) {
+                            bluetoothDevice = bluetoothDevice2;
+                            break;
+                        }
+                        i3++;
+                    }
+                    if (bluetoothDevice != null) {
+                        break;
+                    }
+                }
+                if (bluetoothDevice == null) {
+                    HookUtils.log("boot pen restore: no bonded Lenovo pen");
+                    return;
+                }
+                if (!z) {
+                    requestHidReconnect(context, defaultAdapter, bluetoothDevice, i);
+                } else {
+                    HookUtils.log("boot pen restore: HID input already ready");
+                }
+                if (z || i >= 20) {
+                    return;
+                }
+                main.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda6
+                    @Override // java.lang.Runnable
+                    public final void run() {
+                        SystemStylusHooks.restorePenAfterBoot(context, i + 1);
+                    }
+                }, 3000L);
+                return;
+            }
+            if (i < 5) {
+                main.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda5
+                    @Override // java.lang.Runnable
+                    public final void run() {
+                        SystemStylusHooks.restorePenAfterBoot(context, i + 1);
+                    }
+                }, 2000L);
+            }
+        } catch (Throwable th) {
+            HookUtils.log("boot pen restore: " + th);
+            if (i < 20) {
+                main.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda7
+                    @Override // java.lang.Runnable
+                    public final void run() {
+                        SystemStylusHooks.restorePenAfterBoot(context, i + 1);
+                    }
+                }, 3000L);
+            }
+        }
+    }
+
+    private static synchronized void requestHidReconnect(Context context, final BluetoothAdapter bluetoothAdapter, final BluetoothDevice bluetoothDevice, final int i) {
+        if (hidConnectPending) {
+            return;
+        }
+        hidConnectPending = true;
+        Handler handler = main;
+        Runnable runnable = HID_CONNECT_TIMEOUT;
+        handler.removeCallbacks(runnable);
+        handler.postDelayed(runnable, 7000L);
+        try {
+            if (!bluetoothAdapter.getProfileProxy(context, new BluetoothProfile.ServiceListener() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.4
+                /* JADX WARN: Removed duplicated region for block: B:19:0x004e  */
+                @Override // android.bluetooth.BluetoothProfile.ServiceListener
+                public void onServiceConnected(int i2, BluetoothProfile bluetoothProfile) {
+                    int iState = 0;
+                    try {
+                        Method methodGetState = null;
+                        for (Method method : bluetoothProfile.getClass().getMethods()) {
+                            if ("getConnectionState".equals(method.getName()) && method.getParameterTypes().length == 1 && method.getParameterTypes()[0] == BluetoothDevice.class) {
+                                methodGetState = method;
+                                break;
+                            }
+                        }
+                        if (methodGetState != null) {
+                            methodGetState.setAccessible(true);
+                            Object objState = methodGetState.invoke(bluetoothProfile, bluetoothDevice);
+                            if (objState instanceof Number) {
+                                iState = ((Number) objState).intValue();
+                            }
+                        }
+                        if (iState == 2) {
+                            HookUtils.log("boot pen HID Host already connected");
+                        } else if (iState == 1) {
+                            HookUtils.log("boot pen HID Host still connecting attempt=" + i);
+                        } else {
+                            Method methodConnect = null;
+                            for (Method method2 : bluetoothProfile.getClass().getMethods()) {
+                                if ("connect".equals(method2.getName()) && method2.getParameterTypes().length == 1 && method2.getParameterTypes()[0] == BluetoothDevice.class) {
+                                    methodConnect = method2;
+                                    break;
+                                }
+                            }
+                            if (methodConnect == null) {
+                                throw new NoSuchMethodException("BluetoothHidHost.connect");
+                            }
+                            methodConnect.setAccessible(true);
+                            Object objResult = methodConnect.invoke(bluetoothProfile, bluetoothDevice);
+                            HookUtils.log("boot pen HID Host connect requested attempt=" + i + " result=" + objResult);
+                        }
+                    } catch (Throwable th) {
+                        HookUtils.log("boot pen HID Host connect failed: " + th);
+                    }
+                    try {
+                        bluetoothAdapter.closeProfileProxy(HID_HOST_PROFILE, bluetoothProfile);
+                    } catch (Throwable unused) {
+                    }
+                    synchronized (SystemStylusHooks.class) {
+                        SystemStylusHooks.main.removeCallbacks(SystemStylusHooks.HID_CONNECT_TIMEOUT);
+                        boolean unused2 = SystemStylusHooks.hidConnectPending = false;
+                    }
+                }
+
+                @Override // android.bluetooth.BluetoothProfile.ServiceListener
+                public void onServiceDisconnected(int i2) {
+                    synchronized (SystemStylusHooks.class) {
+                        SystemStylusHooks.main.removeCallbacks(SystemStylusHooks.HID_CONNECT_TIMEOUT);
+                        boolean unused = SystemStylusHooks.hidConnectPending = false;
+                    }
+                }
+            }, HID_HOST_PROFILE)) {
+                handler.removeCallbacks(runnable);
+                hidConnectPending = false;
+                HookUtils.log("boot pen HID Host profile unavailable attempt=" + i);
+            }
+        } catch (Throwable th) {
+            main.removeCallbacks(HID_CONNECT_TIMEOUT);
+            hidConnectPending = false;
+            HookUtils.log("boot pen HID Host request failed: " + th);
+        }
+    }
+
+    private static synchronized void registerMagneticAttachListener(Context context) {
+        InputManager inputManager;
+        if (magneticListenerReady) {
+            return;
+        }
+        try {
+            inputManager = (InputManager) context.getSystemService("input");
+        } catch (Throwable th) {
+            HookUtils.log("NVT magnetic listener: " + th);
+            return;
+        }
+        if (inputManager == null) {
+            return;
+        }
+        for (int i : inputManager.getInputDeviceIds()) {
+            if (isNvtPen(inputManager.getInputDevice(i))) {
+                nvtDeviceIds.add(Integer.valueOf(i));
+            }
+        }
+        inputManager.registerInputDeviceListener(new InputManager.InputDeviceListener() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.5
+            @Override // android.hardware.input.InputManager.InputDeviceListener
+            public void onInputDeviceChanged(int i2) {
+            }
+
+            @Override // android.hardware.input.InputManager.InputDeviceListener
+            public void onInputDeviceAdded(int i2) {
+                if (SystemStylusHooks.isNvtPen(inputManager.getInputDevice(i2))) {
+                    synchronized (SystemStylusHooks.class) {
+                        SystemStylusHooks.nvtDeviceIds.add(Integer.valueOf(i2));
+                        long unused = SystemStylusHooks.suppressPenKeysUntil = Math.max(SystemStylusHooks.suppressPenKeysUntil, SystemClock.uptimeMillis() + 900);
+                    }
+                }
+            }
+
+            @Override // android.hardware.input.InputManager.InputDeviceListener
+            public void onInputDeviceRemoved(int i2) {
+                synchronized (SystemStylusHooks.class) {
+                    if (SystemStylusHooks.nvtDeviceIds.remove(Integer.valueOf(i2))) {
+                        long unused = SystemStylusHooks.suppressPenKeysUntil = Math.max(SystemStylusHooks.suppressPenKeysUntil, SystemClock.uptimeMillis() + 1200);
+                    }
+                }
+            }
+        }, main);
+        magneticListenerReady = true;
+        HookUtils.log("NVT transition suppressor registered");
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static boolean isNvtPen(InputDevice inputDevice) {
+        return (inputDevice == null || inputDevice.getName() == null || !"NVTCapacitivePen".equalsIgnoreCase(inputDevice.getName()) || (inputDevice.getSources() & 16386) == 0) ? false : true;
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static void pollPenHall(Context context) {
+        int i;
+        int i3 = readInt(PEN1_HALL, -1);
+        int i4 = readInt(PEN2_HALL, -1);
+        if (i3 < 0 && i4 < 0) {
+            if (hallReadFailed) {
+                return;
+            }
+            hallReadFailed = true;
+            HookUtils.log("Lenovo pen hall nodes are not readable");
+            return;
+        }
+        hallReadFailed = false;
+        if (i3 >= 0 && i4 >= 0) {
+            // Root service and this hook both trust the hall pair. 1:1 is
+            // detached; 0:0 / 0:1 / 1:0 are all docked orientations.
+            // OplusBatteryManager.getWirelessPenPresent() is unreliable on
+            // this Lenovo pen (always 0), so it must never override the hall pair.
+            i = (i3 == 1 && i4 == 1) ? 1 : 0;
+        } else {
+            return;
+        }
+        // Fast undock: re-enable the pen input the moment the hall pair reads
+        // 1:1 (detached). The 3-sample debounce below guards the dock edge so
+        // dock-orientation flicker cannot disable input; holding that same
+        // debounce on the undock edge left a ~2-3s window where the disabled
+        // NVTCapacitivePen swallowed every stroke right after the pen left the
+        // magnetic dock.
+        if (i == 1 && lastPenHall == 0) {
+            hallCandidate = i;
+            hallCandidateSamples = 3;
+            lastPenHall = i;
+            HookUtils.log("Lenovo pen hall fast undock raw=" + i3 + "," + i4);
+            applyPenHall(context, i, true);
+            return;
+        }
+        if (i != hallCandidate) {
+            hallCandidate = i;
+            hallCandidateSamples = 1;
+            HookUtils.log("Lenovo pen hall raw=" + i3 + "," + i4);
+            return;
+        }
+        int i5 = hallCandidateSamples;
+        if (i5 < 3) {
+            hallCandidateSamples = i5 + 1;
+        }
+        int i2 = lastPenHall;
+        if (hallCandidateSamples < 3 || i == i2) {
+            return;
+        }
+        boolean z = i2 >= 0;
+        lastPenHall = i;
+        HookUtils.log("Lenovo pen hall stable raw=" + i3 + "," + i4);
+        applyPenHall(context, i, z);
+    }
+
+    private static int readInt(String str, int i) {
+        try {
+            BufferedReader bufferedReader = new BufferedReader(new FileReader(str));
+            try {
+                String line = bufferedReader.readLine();
+                int i2 = line == null ? i : Integer.parseInt(line.trim());
+                bufferedReader.close();
+                return i2;
+            } finally {
+            }
+        } catch (Throwable unused) {
+            return i;
+        }
+    }
+
+    private static int readOemWirelessPenPresent() {
+        long jUptimeMillis = SystemClock.uptimeMillis();
+        if (jUptimeMillis - lastOemPresentAt < 250) {
+            return lastOemPresent;
+        }
+        lastOemPresentAt = jUptimeMillis;
+        try {
+            Object objNewInstance = Class.forName("android.os.OplusBatteryManager").getDeclaredConstructor(new Class[0]).newInstance(new Object[0]);
+            Method method = objNewInstance.getClass().getMethod("getWirelessPenPresent", new Class[0]);
+            method.setAccessible(true);
+            Object objInvoke = method.invoke(objNewInstance, new Object[0]);
+            int iIntValue = objInvoke instanceof Number ? ((Number) objInvoke).intValue() : -1;
+            if (iIntValue != 0 && iIntValue != 1) {
+                iIntValue = -1;
+            }
+            lastOemPresent = iIntValue;
+            if (iIntValue != lastLoggedOemPresent) {
+                lastLoggedOemPresent = iIntValue;
+                HookUtils.log("Lenovo OEM wireless pen present=" + iIntValue);
+            }
+            return iIntValue;
+        } catch (Throwable unused) {
+            lastOemPresent = -1;
+            return -1;
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static synchronized void applyPenHall(final Context context, int i, boolean z) {
+        boolean z2 = i == 0;
+        suppressPenKeysUntil = Math.max(suppressPenKeysUntil, SystemClock.uptimeMillis() + 1200);
+        if (z2) {
+            releaseLong(context);
+            dispatchHaptic(context, "disconnect", HookUtils.state(context).address, 0, false);
+            setPenTouchpadEnabled(context, false);
+            if (z) {
+                main.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda20
+                    @Override // java.lang.Runnable
+                    public final void run() {
+                        SystemStylusHooks.showDockCapsule(context, 0);
+                    }
+                }, 350L);
+            }
+        } else {
+            setPenTouchpadEnabled(context, true);
+            sendAll(context, new Intent("com.aclaniakea.lenovopenbridge.action.DISMISS_PENCIL_CAPSULE").setPackage("com.oplus.ipemanager"), null);
+        }
+        PenBridgeReceiver.publishPhysicalEdge(context, z2);
+        updateRefreshFromState(context);
+        scheduleColorOsPenStateSync(context, 80L);
+        HookUtils.log("Lenovo pen hall state=" + i + " (" + (z2 ? "docked" : "undocked") + ")");
+    }
+
+    /** 笔不在磁吸位 → 锁 120Hz；磁吸回 → 释放 144Hz。蓝牙连接状态会跳动，不作为判定条件。 */
+    private static void updateRefreshFromState(Context context) {
+        try {
+            // Root service and this hook read different hall sources and can
+            // disagree at boot (pen2_hall vs OplusBatteryManager wireless-pen
+            // present). The Root service overwrites lenovo_pen_physical_docked,
+            // which used to disable the pen for a long time until a screen
+            // off/on replay. Prefer the debounced hall reading owned by this
+            // hook (lastPenHall: 0=docked, 1=undocked) so refresh rate and
+            // input follow the same reliable source.
+            int iDocked;
+            if (lastPenHall >= 0) {
+                iDocked = lastPenHall == 0 ? 1 : 0;
+            } else {
+                iDocked = Settings.Global.getInt(context.getContentResolver(), "lenovo_pen_physical_docked", 0);
+            }
+            // Profile 4 (Bluetooth HID Host/HOGP) is the stock connection
+            // truth. ACL/GATT, bonding, Hall and cached settings can all stay
+            // present after the usable pen profile has disconnected. Both
+            // penAddress() (getBondedDevices) and bluetoothConnected() (HID
+            // proxy reflection) are binder round-trips; calling them every
+            // poll second flooded the Bluetooth service and disturbed the
+            // phone-link/cast keepalive. Reconcile at most once per interval;
+            // real ACL/HID edges still arrive via the state receiver.
+            String penAddress;
+            boolean hidConnected;
+            long nowUptime = SystemClock.uptimeMillis();
+            if (cachedPenAddress.length() == 0
+                    || nowUptime - lastBtReconcileAt >= 5000L) {
+                penAddress = HookUtils.penAddress(context);
+                hidConnected = HookUtils.bluetoothConnected(context, penAddress);
+                cachedPenAddress = penAddress;
+                cachedHidConnected = hidConnected;
+                lastBtReconcileAt = nowUptime;
+            } else {
+                penAddress = cachedPenAddress;
+                hidConnected = cachedHidConnected;
+            }
+            int hidState = hidConnected ? 1 : 0;
+            if (hidState != lastHidProfileState) {
+                lastHidProfileState = hidState;
+                HookUtils.setLinkConnected(context, hidConnected);
+                if (!hidConnected) {
+                    releaseLong(context);
+                    stopWriting();
+                }
+                // The profile broadcast is not reliable on this port. Publish
+                // only the real profile edge so IPe's stock panel callbacks,
+                // Device Space and the input gate consume one common state.
+                PenBridgeReceiver.publishCurrentHardwareState(
+                        context, "hid_profile_reconcile");
+                HookUtils.log("stock HID profile reconciled connected=" + hidConnected);
+            }
+
+            // A Bluetooth settings disconnect must stop NVT input as well as
+            // the OEM GATT session. Require the real stock HID profile in
+            // addition to the explicit settings latch and magnetic position.
+            boolean zDisconnected = HookUtils.disconnectRequested(context);
+            boolean zPenInUse = iDocked == 0 && !zDisconnected && hidConnected;
+            setRefreshActive(context, zPenInUse);
+            // OPlusRefreshRatePolicyImpl reads settings_enable_oppo_pencil as
+            // isIPEPencilConnected and votes ipePencilRateId (120 Hz) while 1.
+            // A docked pen is not in use, so only report "in use" when the pen
+            // is connected and off the magnetic dock.
+            Settings.Global.putInt(context.getContentResolver(), "settings_enable_oppo_pencil", zPenInUse ? 1 : 0);
+            if (zPenInUse != lastPenInUseState) {
+                lastPenInUseState = zPenInUse;
+                if (SystemClock.elapsedRealtime() >= bootSettleUntilMs) {
+                    forceRefreshReevaluate();
+                } else {
+                    HookUtils.log("pen refresh re-evaluation deferred until boot settles");
+                }
+            }
+            if (iDocked != lastDockedState) {
+                lastDockedState = iDocked;
+            }
+            boolean zInputEnabled = iDocked == 0 && !zDisconnected && hidConnected;
+            if (zInputEnabled != lastInputEnabled) {
+                lastInputEnabled = zInputEnabled;
+                setPenInputEnabled(context, zInputEnabled);
+                HookUtils.log("pen input gate -> " + zInputEnabled + " (docked="
+                        + iDocked + " disconnect=" + zDisconnected + " hid="
+                        + hidConnected + ")");
+            }
+        } catch (Throwable th) {
+            HookUtils.log("pen refresh state update: " + th);
+        }
+    }
+
+    /** OPlusDisplayModeService.requestUpadate() posts a WMS traversal that re-applies the pencil mode immediately. */
+    private static void forceRefreshReevaluate() {
+        try {
+            if (oplusDisplayModeService != null) {
+                if (oplusRequestUpdate == null) {
+                    for (Method method : oplusDisplayModeService.getClass().getDeclaredMethods()) {
+                        if ("requestUpadate".equals(method.getName()) && method.getParameterCount() == 0) {
+                            method.setAccessible(true);
+                            oplusRequestUpdate = method;
+                            break;
+                        }
+                    }
+                }
+                if (oplusRequestUpdate != null) {
+                    oplusRequestUpdate.invoke(oplusDisplayModeService, new Object[0]);
+                    HookUtils.log("pen refresh re-evaluation triggered");
+                }
+            } else {
+                HookUtils.log("pen refresh re-evaluation deferred: OplusDisplayModeService not ready");
+            }
+        } catch (Throwable th) {
+            HookUtils.log("pen refresh re-evaluation failed: " + th);
+        }
+    }
+
+    /** 吸附时禁用 NVTCapacitivePen 触控板输入（防误触），取下时恢复。 */
+    private static void setPenTouchpadEnabled(Context context, boolean enabled) {
+        try {
+            InputManager inputManager = (InputManager) context.getSystemService("input");
+            if (inputManager == null) {
+                return;
+            }
+            Method mEnable = null;
+            Method mDisable = null;
+            Method m2 = null;
+            Method m3 = null;
+            try {
+                mEnable = InputManager.class.getMethod("enableInputDevice", int.class);
+            } catch (Throwable t) {
+                // ignore
+            }
+            try {
+                mDisable = InputManager.class.getMethod("disableInputDevice", int.class);
+            } catch (Throwable t) {
+                // ignore
+            }
+            try {
+                m2 = InputManager.class.getMethod("setInputDeviceEnabled", int.class, boolean.class);
+            } catch (Throwable t) {
+                // ignore
+            }
+            try {
+                m3 = InputManager.class.getMethod("setInputDeviceEnabled", int.class, int.class, boolean.class);
+            } catch (Throwable t) {
+                // ignore
+            }
+            if (mEnable == null && mDisable == null && m2 == null && m3 == null) {
+                HookUtils.log("NVT touchpad API missing");
+                return;
+            }
+            synchronized (SystemStylusHooks.class) {
+                for (Integer id : nvtDeviceIds) {
+                    try {
+                        if (enabled) {
+                            if (mEnable != null) {
+                                mEnable.invoke(inputManager, id);
+                            } else if (m2 != null) {
+                                m2.invoke(inputManager, id, true);
+                            } else {
+                                m3.invoke(inputManager, id, 0, true);
+                            }
+                        } else if (mDisable != null) {
+                            mDisable.invoke(inputManager, id);
+                        } else if (m2 != null) {
+                            m2.invoke(inputManager, id, false);
+                        } else {
+                            m3.invoke(inputManager, id, 0, false);
+                        }
+                    } catch (Throwable t) {
+                        HookUtils.log("NVT touchpad device " + id + " set failed: " + t);
+                    }
+                }
+            }
+            HookUtils.log("NVT pen touchpad " + (enabled ? "enabled" : "disabled") + " devices=" + nvtDeviceIds.size());
+        } catch (Throwable t) {
+            HookUtils.log("NVT touchpad control failed: " + t);
+        }
+    }
+
+    /** 断开时禁用笔输入设备（NVTCapacitivePen / Lenovo 笔 HID），重连时恢复。 */
+    static void setPenInputEnabled(Context context, boolean enabled) {
+        try {
+            InputManager inputManager = (InputManager) context.getSystemService("input");
+            if (inputManager == null) {
+                return;
+            }
+            Method mEnable = null;
+            Method mDisable = null;
+            try {
+                mEnable = InputManager.class.getMethod("enableInputDevice", int.class);
+            } catch (Throwable t) {
+                // ignore
+            }
+            try {
+                mDisable = InputManager.class.getMethod("disableInputDevice", int.class);
+            } catch (Throwable t) {
+                // ignore
+            }
+            if (mEnable == null || mDisable == null) {
+                return;
+            }
+            int iCount = 0;
+            for (int iDeviceId : inputManager.getInputDeviceIds()) {
+                InputDevice inputDevice = inputManager.getInputDevice(iDeviceId);
+                if (inputDevice == null || inputDevice.getName() == null) {
+                    continue;
+                }
+                String strName = inputDevice.getName().toLowerCase();
+                boolean zPenDevice = "nvtcapacitivepen".equals(strName)
+                        || (strName.contains("lenovo tab pen") && (inputDevice.getSources() & 16642) != 0);
+                if (!zPenDevice) {
+                    continue;
+                }
+                if (enabled) {
+                    mEnable.invoke(inputManager, Integer.valueOf(iDeviceId));
+                } else {
+                    mDisable.invoke(inputManager, Integer.valueOf(iDeviceId));
+                }
+                iCount++;
+            }
+            if (iCount > 0) {
+                HookUtils.log("pen input devices " + (enabled ? "enabled" : "disabled") + " count=" + iCount);
+            }
+        } catch (Throwable th) {
+            HookUtils.log("pen input control failed: " + th);
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static void showDockCapsule(final Context context, final int i) {
+        if (lastPenHall != 0) {
+            return;
+        }
+        int iBatteryForCapsule = HookUtils.batteryForCapsule(context);
+        if (iBatteryForCapsule >= 0) {
+            // Avoid HookUtils.state()/penAddress() on the main thread: it walks
+            // BluetoothAdapter.getBondedDevices() and can jank the capsule. The
+            // dock capsule only needs cached charging + address.
+            int charging = HookUtils.effectiveCharging(context, Settings.Global.getInt(context.getContentResolver(), "ipe_pencil_charging_state", 0));
+            String mac = Settings.Global.getString(context.getContentResolver(), "ipe_pencil_mac_addr");
+            boolean present = !HookUtils.disconnectRequested(context);
+            sendAll(context, new Intent("com.aclaniakea.lenovopenbridge.action.SHOW_PENCIL_CAPSULE").setPackage("com.oplus.ipemanager").putExtra("battery_level", iBatteryForCapsule).putExtra("charging_state", charging).putExtra("chargingState", charging).putExtra("charging", charging).putExtra("present", present ? "1" : "0").putExtra("macAddr", mac == null ? "" : mac.replace(":", "")).putExtra("source", "lenovo_pen_hall_validated"), null);
+            HookUtils.log("validated Hall magnetic capsule requested: battery=" + iBatteryForCapsule + " charging=" + charging);
+        } else if (i < 40) {
+            main.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda0
+                @Override // java.lang.Runnable
+                public final void run() {
+                    SystemStylusHooks.showDockCapsule(context, i + 1);
+                }
+            }, 500L);
+        } else {
+            HookUtils.log("magnetic capsule skipped: battery still unknown after boot");
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    /* JADX WARN: Type inference failed for: r7v1, types: [boolean, int] */
+    /* JADX WARN: Type inference failed for: r7v3 */
+    /* JADX WARN: Type inference failed for: r7v4 */
+    /* JADX WARN: Type inference failed for: r7v5 */
+    public static synchronized void setRefreshActive(Context context, boolean z) {
+        refreshContext = context;
+        if (z && HookUtils.disconnectRequested(context)) {
+            z = false;
+        }
+        if (refreshActive == z && Settings.Global.getInt(context.getContentResolver(), "lenovo_pen_refresh_active", -1) == (z ? 1 : 0)) {
+            return;
+        }
+        refreshActive = z;
+        try {
+            Settings.Global.putInt(context.getContentResolver(), "lenovo_pen_refresh_active", z ? 1 : 0);
+            HookUtils.log("adaptive pencil 120 Hz ".concat(z ? "enabled" : "released"));
+        } catch (Throwable th) {
+            HookUtils.log("adaptive pencil refresh: " + th);
+        }
+    }
+
+    /* renamed from: com.aclaniakea.colorosporttuning.SystemStylusHooks$6, reason: invalid class name */
+    static class AnonymousClass6 extends BroadcastReceiver {
+        final /* synthetic */ Context val$c;
+
+        AnonymousClass6(Context context) {
+            this.val$c = context;
+        }
+
+        @Override // android.content.BroadcastReceiver
+        public void onReceive(Context context, Intent intent) {
+            String action = intent == null ? null : intent.getAction();
+            if ("android.intent.action.USER_UNLOCKED".equals(action)) {
+                SystemStylusHooks.enableKernelPenWake();
+                Handler handler2 = SystemStylusHooks.main;
+                final Context context2 = this.val$c;
+                handler2.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$6$$ExternalSyntheticLambda0
+                    @Override // java.lang.Runnable
+                    public final void run() {
+                        LenovoPenUEventBridge.wakeOemForCurrentPen(context2);
+                    }
+                }, 350L);
+                HookUtils.log("user unlocked: replaying OEM pen boot wake");
+            } else if ("android.intent.action.SCREEN_OFF".equals(action)) {
+                boolean unused = SystemStylusHooks.screenOn = false;
+                SystemStylusHooks.releaseLong(this.val$c);
+                SystemStylusHooks.setRefreshActive(this.val$c, false);
+                // A screen transition never changes pen hardware state, so it
+                // must not schedule the ColorOS state sync below either.
+                return;
+            } else if ("android.intent.action.SCREEN_ON".equals(action)) {
+                boolean unused2 = SystemStylusHooks.screenOn = true;
+                // Hall/GATT/root broadcasts are the state owners. Replaying
+                // the same Hall edge here duplicated Settings, Bluetooth and
+                // refresh-rate work during the lock-screen animation.
+                //
+                // The unconditional sync at the end of onReceive still did it:
+                // 600ms after wake it ran on system_server's main looper for
+                // 211ms (Settings writes + broadcast), right inside the
+                // keyguard animation, and delayed the next main-thread message
+                // by 202ms.  Return before scheduling it.
+                return;
+            } else if ("com.aclaniakea.lenovopenbridge.action.RECONNECT_PEN".equals(action)) {
+                    try {
+                        Settings.Global.putInt(this.val$c.getContentResolver(), "lenovo_pen_disconnect_requested", 0);
+                        Settings.Global.putInt(this.val$c.getContentResolver(), "lenovo_pen_user_disconnect_requested", 0);
+                    } catch (Throwable unused3) {
+                    }
+                    SystemStylusHooks.enableKernelPenWake();
+                    HookUtils.log("root pen reconnect requested");
+                    Handler handler3 = SystemStylusHooks.main;
+                    final Context context3 = this.val$c;
+                    handler3.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$6$$ExternalSyntheticLambda1
+                        @Override // java.lang.Runnable
+                        public final void run() {
+                            SystemStylusHooks.restorePenAfterBoot(context3, 0);
+                        }
+                    }, 250L);
+            } else if ("android.bluetooth.adapter.action.STATE_CHANGED".equals(action)) {
+                SystemStylusHooks.releaseLong(this.val$c);
+                if (intent.getIntExtra("android.bluetooth.adapter.extra.STATE", Integer.MIN_VALUE) == 12) {
+                    SystemStylusHooks.enableKernelPenWake();
+                    Handler handler4 = SystemStylusHooks.main;
+                    final Context context4 = this.val$c;
+                    handler4.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$6$$ExternalSyntheticLambda2
+                            @Override // java.lang.Runnable
+                            public final void run() {
+                                LenovoPenUEventBridge.wakeOemForCurrentPen(context4);
+                            }
+                        }, 500L);
+                    Handler handler5 = SystemStylusHooks.main;
+                    final Context context5 = this.val$c;
+                    handler5.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$6$$ExternalSyntheticLambda3
+                            @Override // java.lang.Runnable
+                            public final void run() {
+                                SystemStylusHooks.restorePenAfterBoot(context5, 0);
+                            }
+                        }, 1200L);
+                }
+            } else if ("android.bluetooth.device.action.ACL_DISCONNECTED".equals(action)) {
+                SystemStylusHooks.releaseLong(this.val$c);
+            } else if ("android.bluetooth.input.profile.action.CONNECTION_STATE_CHANGED".equals(action)) {
+                BluetoothDevice device = null;
+                try {
+                    android.os.Parcelable parcelable = intent.getParcelableExtra("android.bluetooth.device.extra.DEVICE");
+                    if (parcelable instanceof BluetoothDevice) {
+                        device = (BluetoothDevice) parcelable;
+                    }
+                } catch (Throwable ignored) {
+                }
+                String name = device == null ? "" : String.valueOf(device.getName());
+                String address = device == null ? "" : String.valueOf(device.getAddress());
+                PenState pen = HookUtils.state(this.val$c);
+                boolean knownPen = name.toLowerCase().contains("pen")
+                        || (address.length() > 0 && address.equalsIgnoreCase(pen.address));
+                if (knownPen) {
+                    int profileState = intent.getIntExtra("android.bluetooth.profile.extra.STATE", -1);
+                    if (profileState == 0) {
+                        SystemStylusHooks.releaseLong(this.val$c);
+                        SystemStylusHooks.setPenInputEnabled(this.val$c, false);
+                        SystemStylusHooks.lastInputEnabled = false;
+                        SystemStylusHooks.setRefreshActive(this.val$c, false);
+                        HookUtils.log("real HID disconnected: pen input disabled");
+                    } else if (profileState == 2 && !HookUtils.disconnectRequested(this.val$c)) {
+                        SystemStylusHooks.updateRefreshFromState(this.val$c);
+                        HookUtils.log("real HID connected: pen input gate restored");
+                    }
+                }
+            }
+            SystemStylusHooks.scheduleColorOsPenStateSync(this.val$c, 600L);
+        }
+    }
+
+    private static volatile Context stateSyncContext;
+    private static final Runnable STATE_SYNC = new Runnable() {
+        @Override // java.lang.Runnable
+        public void run() {
+            Context context = stateSyncContext;
+            if (context != null) {
+                SystemStylusHooks.syncColorOsPenState(context);
+            }
+        }
+    };
+
+    /**
+     * Pen state sync reads/writes Settings and sends a broadcast; none of it
+     * needs system_server's main looper.  Run it on the pen poll thread and
+     * coalesce bursts (a Bluetooth reconnect delivers several broadcasts in a
+     * row) into one sync.
+     */
+    static void scheduleColorOsPenStateSync(Context context, long delayMs) {
+        stateSyncContext = context;
+        Handler handler = pollHandler != null ? pollHandler : main;
+        handler.removeCallbacks(STATE_SYNC);
+        handler.postDelayed(STATE_SYNC, delayMs);
+    }
+
+    private static void registerStateSync(Context context) {
+        if (stateReceiverReady) {
+            return;
+        }
+        stateReceiverReady = true;
+        AnonymousClass6 anonymousClass6 = new AnonymousClass6(context);
+        try {
+            IntentFilter intentFilter = new IntentFilter();
+            intentFilter.addAction("android.intent.action.USER_UNLOCKED");
+            intentFilter.addAction("android.intent.action.SCREEN_ON");
+            intentFilter.addAction("android.intent.action.SCREEN_OFF");
+            intentFilter.addAction("com.aclaniakea.lenovopenbridge.action.RECONNECT_PEN");
+            intentFilter.addAction("android.bluetooth.device.action.ACL_CONNECTED");
+            intentFilter.addAction("android.bluetooth.device.action.ACL_DISCONNECTED");
+            intentFilter.addAction("android.bluetooth.device.action.BATTERY_LEVEL_CHANGED");
+            intentFilter.addAction("android.bluetooth.input.profile.action.CONNECTION_STATE_CHANGED");
+            intentFilter.addAction("android.bluetooth.adapter.action.STATE_CHANGED");
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(anonymousClass6, intentFilter, 2);
+            } else {
+                context.registerReceiver(anonymousClass6, intentFilter);
+            }
+        } catch (Throwable th) {
+            HookUtils.log("pen state receiver: " + th);
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static void syncColorOsPenState(Context context) {
+        try {
+            PenBridgeReceiver.publishCurrentHardwareState(context, "hardware_snapshot");
+            PenState penStateState = HookUtils.state(context);
+            HookUtils.log("ColorOS pen state synced: connected=" + penStateState.connected + " battery=" + penStateState.battery + " charging=" + penStateState.charging);
+        } catch (Throwable th) {
+            HookUtils.log("ColorOS pen state sync: " + th);
+        }
+    }
+
+    private static void registerTouchscreen(Context context) {
+        BroadcastReceiver broadcastReceiver = new BroadcastReceiver() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.7
+            @Override // android.content.BroadcastReceiver
+            public void onReceive(Context context2, Intent intent) {
+                if ("com.aclaniakea.lenovopenbridge.haptic.TOUCHSCREEN".equals(intent.getAction())) {
+                    SystemStylusHooks.setTouchscreen(intent.getBooleanExtra("enabled", true));
+                }
+            }
+        };
+        try {
+            IntentFilter intentFilter = new IntentFilter("com.aclaniakea.lenovopenbridge.haptic.TOUCHSCREEN");
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(broadcastReceiver, intentFilter, 2);
+            } else {
+                context.registerReceiver(broadcastReceiver, intentFilter);
+            }
+        } catch (Throwable th) {
+            HookUtils.log("touchscreen receiver: " + th);
+        }
+    }
+
+    private static synchronized void registerHapticControl(final Context context) {
+        if (hapticControlReady) {
+            return;
+        }
+        try {
+            BroadcastReceiver broadcastReceiver = new BroadcastReceiver() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.8
+                @Override // android.content.BroadcastReceiver
+                public void onReceive(Context context2, Intent intent) {
+                    if (intent == null || !"com.aclaniakea.lenovopenbridge.haptic.COMMAND".equals(intent.getAction())) {
+                        return;
+                    }
+                    boolean booleanExtra = intent.getBooleanExtra("enabled", Settings.Global.getInt(context.getContentResolver(), "lenovo_pen_global_writing_haptic", 1) != 0);
+                    dispatchHaptic(context, "enable", HookUtils.state(context).address, 0, booleanExtra);
+                    if (!booleanExtra) {
+                        SystemStylusHooks.stopWriting();
+                    }
+                    HookUtils.log("writing haptic runtime control=" + booleanExtra);
+                }
+            };
+            IntentFilter intentFilter = new IntentFilter("com.aclaniakea.lenovopenbridge.haptic.COMMAND");
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(broadcastReceiver, intentFilter, 2);
+            } else {
+                context.registerReceiver(broadcastReceiver, intentFilter);
+            }
+            hapticControlReady = true;
+            if (Settings.Global.getInt(context.getContentResolver(), "lenovo_pen_global_writing_haptic", 1) != 0) {
+                dispatchHaptic(context, "enable", HookUtils.state(context).address, 0, true);
+            }
+        } catch (Throwable th) {
+            HookUtils.log("haptic control receiver: " + th);
+        }
+    }
+
+    static boolean setTouchscreen(boolean z) {
+        Parcel parcelObtain = Parcel.obtain();
+        Parcel parcelObtain2 = Parcel.obtain();
+        try {
+            suppressNvtHotplugUntil = SystemClock.uptimeMillis() + 1200;
+            suppressPenKeysUntil = Math.max(suppressPenKeysUntil, SystemClock.uptimeMillis() + 1200);
+            IBinder iBinder = (IBinder) Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "vendor.lenovo.hardware.touchscreen.ITouchscreen/default");
+            if (iBinder != null) {
+                parcelObtain.writeInterfaceToken("vendor.lenovo.hardware.touchscreen.ITouchscreen");
+                parcelObtain.writeInt(z ? 1 : 0);
+                boolean zTransact = iBinder.transact(14, parcelObtain, parcelObtain2, 0);
+                if (zTransact) {
+                    try {
+                        parcelObtain2.readException();
+                    } catch (Throwable unused) {
+                    }
+                }
+                return zTransact;
+            }
+            return false;
+        } catch (Throwable th) {
+            HookUtils.log("touchscreen binder: " + th);
+            return false;
+        } finally {
+            parcelObtain.recycle();
+            parcelObtain2.recycle();
+        }
+    }
+
+    static synchronized boolean ensureTouchscreenHaptics() {
+        if (touchscreenHapticsReady) {
+            return true;
+        }
+        boolean touchscreen = setTouchscreen(true);
+        if (touchscreen) {
+            touchscreenHapticsReady = true;
+            HookUtils.log("Lenovo touchscreen haptics initialized once");
+        }
+        return touchscreen;
+    }
+
+    private static void registerMonitor(final Context context) {
+        try {
+            Object systemService = context.getSystemService("input");
+            Object objInvoke = systemService.getClass().getMethod("monitorGestureInput", String.class, Integer.TYPE).invoke(systemService, "LenovoPenGlobalHaptic", 0);
+            inputMonitor = objInvoke;
+            Object objInvoke2 = objInvoke.getClass().getMethod("getInputChannel", new Class[0]).invoke(inputMonitor, new Object[0]);
+            Class<?> cls = Class.forName("android.view.BatchedInputEventReceiver$SimpleBatchedInputEventReceiver");
+            Class<?> cls2 = Class.forName("android.view.InputChannel");
+            Class<?> cls3 = Class.forName("android.view.BatchedInputEventReceiver$SimpleBatchedInputEventReceiver$InputEventListener");
+            inputReceiver = cls.getConstructor(cls2, Looper.class, Choreographer.class, cls3).newInstance(objInvoke2, Looper.getMainLooper(), Choreographer.getInstance(), Proxy.newProxyInstance(cls3.getClassLoader(), new Class[]{cls3}, new InvocationHandler() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda3
+                @Override // java.lang.reflect.InvocationHandler
+                public final Object invoke(Object obj, Method method, Object[] objArr) throws Throwable {
+                    return SystemStylusHooks.lambda$registerMonitor$18(context, obj, method, objArr);
+                }
+            }));
+            monitorReady = true;
+            HookUtils.log("global stylus input monitor registered");
+        } catch (Throwable th) {
+            HookUtils.log("global input monitor unavailable: " + th);
+        }
+    }
+
+    static /* synthetic */ Object lambda$registerMonitor$18(Context context, Object obj, Method method, Object[] objArr) throws Throwable {
+        if ("onInputEvent".equals(method.getName()) && objArr != null && objArr.length > 0) {
+            Object obj2 = objArr[0];
+            if (obj2 instanceof MotionEvent) {
+                return Boolean.valueOf(onMotion(context, (MotionEvent) obj2));
+            }
+        }
+        return false;
+    }
+
+    private static long lastGateRefusalAt;
+
+    private static boolean onMotion(Context context, MotionEvent motionEvent) {
+        // The BLE accessory exposes an auxiliary mouse collection, while the
+        // real pressure/tilt stream comes from NVTCapacitivePen. Ignore only
+        // that duplicate mouse stream so hover events cannot start/stop the
+        // writing feedback state machine ahead of the real stylus event.
+        InputDevice device = motionEvent.getDevice();
+        String deviceName = device == null || device.getName() == null
+                ? "" : device.getName().toLowerCase();
+        if (deviceName.contains("lenovo tab pen")
+                && (device.getSources() & 8194) != 0) {
+            return false;
+        }
+        for (int i = 0; i < motionEvent.getPointerCount(); i++) {
+            int toolType = motionEvent.getToolType(i);
+            if (toolType == 2 || toolType == HID_HOST_PROFILE) {
+                if (!HookUtils.state(context).connected || HookUtils.disconnectRequested(context)) {
+                    lastButtons = 0;
+                    if (writing) {
+                        stopWriting();
+                    }
+                    // Never refuse silently. When this gate closed wrongly the
+                    // whole haptic chain vanished with no dispatch and no log,
+                    // and only a full measurement pass could find it.
+                    long now = SystemClock.uptimeMillis();
+                    if (now - lastGateRefusalAt > 5000) {
+                        lastGateRefusalAt = now;
+                        HookUtils.log("stylus haptic gate closed: connected="
+                                + HookUtils.state(context).connected
+                                + " disconnectRequested="
+                                + HookUtils.disconnectRequested(context));
+                    }
+                    return false;
+                }
+                int buttonState = motionEvent.getButtonState();
+                int i2 = (~lastButtons) & buttonState;
+                lastButtons = buttonState;
+                long jUptimeMillis = SystemClock.uptimeMillis();
+                if (i2 != 0 && jUptimeMillis - lastButtonAt > 250) {
+                    if ((i2 & 32) != 0) {
+                        lastButtonAt = jUptimeMillis;
+                        click(context, false);
+                    } else if ((i2 & 64) != 0) {
+                        lastButtonAt = jUptimeMillis;
+                        click(context, true);
+                    }
+                }
+                int actionMasked = motionEvent.getActionMasked();
+                if (Settings.Global.getInt(context.getContentResolver(), "lenovo_pen_global_writing_haptic", 1) == 0) {
+                    if (writing) {
+                        stopWriting();
+                    }
+                    return false;
+                }
+                if (actionMasked == 0 || (actionMasked == 2 && motionEvent.getPressure() > 0.0f)) {
+                    if (actionMasked == 0) {
+                        consumeLongLatch();
+                    }
+                    main.removeCallbacks(STOP_WRITING);
+                    if (!writing) {
+                        writing = true;
+                        dispatchHaptic(context, "start", HookUtils.state(context).address,
+                                motionEvent.getToolType(0), true);
+                        HookUtils.log("start writing haptic pressure=" + motionEvent.getPressure());
+                    } else if (actionMasked == 2) {
+                        // Pattern feedback is rate-limited inside the IPe
+                        // transport; this has no polling or resident worker.
+                        dispatchHaptic(context, "motion", HookUtils.state(context).address,
+                                motionEvent.getToolType(0), true);
+                    }
+                } else if (actionMasked == 1 || actionMasked == 3 || writing) {
+                    scheduleStopWriting();
+                }
+                return false;
+            }
+        }
+        return false;
+    }
+
+    private static synchronized void scheduleStopWriting() {
+        Handler handler = main;
+        Runnable runnable = STOP_WRITING;
+        handler.removeCallbacks(runnable);
+        handler.postDelayed(runnable, 220L);
+    }
+
+    static /* synthetic */ void lambda$onConsumerGesture$19(int i, Context context) {
+        if (SystemClock.uptimeMillis() < suppressPenKeysUntil) {
+            HookUtils.log("suppressed touch strip event during magnetic transition usage=0x" + Integer.toHexString(i));
+        }
+        switch (i) {
+            case 787969:
+                HookUtils.log("grabbed touch strip: double tap -> double action");
+                click(context, true);
+                break;
+            case 787986:
+                HookUtils.log("grabbed touch strip: swipe down -> single action");
+                click(context, false);
+                break;
+            case 787987:
+                HookUtils.log("grabbed touch strip: swipe up -> long action");
+                longAction(context);
+                break;
+            default:
+                HookUtils.log("grabbed touch strip: unknown usage=0x" + Integer.toHexString(i));
+                break;
+        }
+    }
+
+    static void onConsumerGesture(final Context context, final int i) {
+        main.post(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda18
+            @Override // java.lang.Runnable
+            public final void run() {
+                SystemStylusHooks.lambda$onConsumerGesture$19(i, context);
+            }
+        });
+    }
+
+    private static void injectNativePenKey(final Context context, final int i) {
+        if (context == null) {
+            return;
+        }
+        final long jUptimeMillis = SystemClock.uptimeMillis();
+        if (inject(context, new KeyEvent(jUptimeMillis, jUptimeMillis, 0, i, 0, 0, -1, 0, 72, 257))) {
+            main.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda4
+                @Override // java.lang.Runnable
+                public final void run() {
+                    SystemStylusHooks.lambda$injectNativePenKey$20(jUptimeMillis, i, context);
+                }
+            }, 60L);
+        } else {
+            HookUtils.log("native pen key down failed code=" + i);
+        }
+    }
+
+    static /* synthetic */ void lambda$injectNativePenKey$20(long j, int i, Context context) {
+        if (inject(context, new KeyEvent(j, SystemClock.uptimeMillis(), 1, i, 0, 0, -1, 0, 72, 257))) {
+            return;
+        }
+        HookUtils.log("native pen key up failed code=" + i);
+    }
+
+    private static boolean inject(Context context, InputEvent inputEvent) {
+        try {
+            Object systemService = context.getSystemService("input");
+            if (systemService == null) {
+                return false;
+            }
+            for (Method method : systemService.getClass().getMethods()) {
+                if ("injectInputEvent".equals(method.getName()) && method.getParameterTypes().length == 2) {
+                    method.setAccessible(true);
+                    Object objInvoke = method.invoke(systemService, inputEvent, 0);
+                    if (objInvoke instanceof Boolean) {
+                        if (!((Boolean) objInvoke).booleanValue()) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+            }
+            return false;
+        } catch (Throwable th) {
+            HookUtils.log("native pen key injection: " + th);
+            return false;
+        }
+    }
+
+    /* JADX INFO: Access modifiers changed from: private */
+    public static synchronized void stopWriting() {
+        main.removeCallbacks(STOP_WRITING);
+        if (writing) {
+            writing = false;
+            dispatchHaptic(refreshContext, "stop", HookUtils.state(refreshContext).address,
+                    0, false);
+            HookUtils.log("stop writing haptic");
+        }
+    }
+
+    private static void dispatchHaptic(Context context, String op, String address,
+            int toolType, boolean enabled) {
+        if (context == null) {
+            return;
+        }
+        Handler worker = pollHandler;
+        if (worker == null) {
+            return;
+        }
+        final Context appContext = context;
+        final String operation = op;
+        final String penAddress = address == null ? "" : address;
+        worker.post(new Runnable() {
+            @Override
+            public void run() {
+                // Dispatch the haptic command directly. The earlier isolated
+                // ContentProvider indirection was silently dropped here by
+                // OplusAppStartupManager ("prevent start ... by contentprovider
+                // callingUid 1000"), because the bridge APK has no launcher
+                // component and never leaves the background start allowlist.
+                // With lenovo_pen_oem_haptic_forward=1 the commands below only
+                // send an OEM broadcast (no GATT is opened in system_server),
+                // so the direct path is safe and restores the pre-1.1.10 haptic
+                // behavior that actually vibrated the pen.
+                try {
+                    if ("start".equals(operation)) {
+                        Settings.Global.putInt(appContext.getContentResolver(),
+                                "lenovo_pen_haptic_stroke_active", 1);
+                        Settings.Global.putInt(appContext.getContentResolver(),
+                                "lenovo_pen_haptic_stroke_tool", toolType);
+                        // Keep the stock touch-node path, then bridge the
+                        // missing port-specific node->BLE leg through IPe's
+                        // already-open OEM GATT session.
+                        setOemWritingFeedback(true);
+                        PenHapticGatt.startWriting(appContext, penAddress, toolType);
+                    } else if ("stop".equals(operation)) {
+                        Settings.Global.putInt(appContext.getContentResolver(),
+                                "lenovo_pen_haptic_stroke_active", 0);
+                        setOemWritingFeedback(false);
+                        PenHapticGatt.stopWriting();
+                    } else if ("pulse".equals(operation)) {
+                        PenHapticGatt.pulse(appContext, penAddress);
+                    } else if ("motion".equals(operation)) {
+                        PenHapticGatt.onWritingMotion(appContext, penAddress);
+                    } else if ("enable".equals(operation)) {
+                        PenHapticGatt.setWritingEnabled(appContext, penAddress, enabled);
+                    } else if ("disconnect".equals(operation)) {
+                        PenHapticGatt.disconnect();
+                    }
+                } catch (Throwable th) {
+                    HookUtils.log("haptic dispatch " + operation + ": " + th);
+                }
+            }
+        });
+    }
+
+    /**
+     * Follow IPeManager's stock g0.start/stopFeedBackVibration implementation.
+     * Node 38 is the vendor pen-feedback control: "3" starts feedback and "2"
+     * stops it. The touch HAL owns the timing and transport to the pen; direct
+     * BLE writes are only a fallback for ROMs without this Oplus API.
+     */
+    private static boolean setOemWritingFeedback(boolean start) {
+        Context context = refreshContext;
+        String address = context == null ? "" : HookUtils.state(context).address;
+        boolean forwarded = PenHapticGatt.stockWritingFeedback(context, address, start);
+        HookUtils.log("OEM writing feedback " + (start ? "start" : "stop")
+                + " forwarded-to-IPe=" + forwarded);
+        return forwarded;
+    }
+
+    private SystemStylusHooks() {
+    }
+}
