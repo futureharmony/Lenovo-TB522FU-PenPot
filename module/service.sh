@@ -28,13 +28,16 @@ LOGFILE="$MODDIR/pen-bridge.log"
 MODE=/proc/pen_wakeup_mode
 SWITCH=/proc/pen_wakeup_switch
 UEVENT=/sys/devices/virtual/lenovo_penraw/lenovo_penraw/uevent
-PEN1_HALL=/sys/devices/virtual/factory/interface/hw_info/pen1_hall
-PEN2_HALL=/sys/devices/virtual/factory/interface/hw_info/pen2_hall
+# TB522FU (sun/SM8750P): och1909 hall driver exposes four channels.
+# Calibrated 2026-09-18: pen magnetic dock == hall3, attached reads 0,
+# detached reads 1. hall1_1/hall1_2 idle 0, hall2 idle 1 (kbd cover side).
+PEN1_HALL=/sys/devices/virtual/hall/och1909/hall3
+PEN2_HALL=/sys/devices/virtual/hall/och1909/hall3
 CPS_GPIOCHIP=gpiochip0
 CPS_GPIODEV=/dev/gpiochip0
 CPS_GPIOSET=/system/bin/gpioset
 CPS_HELPER="$MODDIR/bin/pen-cps-gpio"
-CPS_PEN_HALL=/sys/devices/virtual/factory/interface/hw_info/pen2_hall
+CPS_PEN_HALL=/sys/devices/virtual/hall/och1909/hall3
 CPS_UEVENT=/sys/devices/platform/soc/9c0000.qcom,qupv3_i2c_geni_se/98c000.i2c/i2c-2/2-0041/uevent
 CPS_PIDFILE="$MODDIR/cps-gpio.pid"
 CPS_DISABLED="$MODDIR/disable"
@@ -399,19 +402,14 @@ echo "[$(date '+%F %T')] stable LSPosed Pen Hook payload expected"
 # still come from the CPS/GATT-backed settings and uevent; this monitor only
 # repairs the physical magnetic edge.
 read_hall_state() {
-    # This path is sampled once per second for physical attach/detach.  Using
-    # cat|tr here used to fork four short-lived processes for every sample
-    # (two readers plus two filters).  sysfs values are newline-terminated,
-    # so POSIX read returns the same value without a process launch.  Keep
-    # invalid/missing nodes represented as an empty value and let the existing
-    # state machine report -1 rather than fabricating a magnetic edge.
-    hall1=
-    hall2=
-    [ -r "$PEN1_HALL" ] && IFS= read -r hall1 <"$PEN1_HALL"
-    [ -r "$PEN2_HALL" ] && IFS= read -r hall2 <"$PEN2_HALL"
-    case "$hall1:$hall2" in
-        0:1|1:0|0:0) echo 1 ;; # docked (either orientation)
-        1:1) echo 0 ;; # detached
+    # TB522FU: och1909 hall3, file format "hall3 value = N" (N=0 docked).
+    # The trailing-digit extraction avoids spawning tr/awk per sample.
+    hall=
+    [ -r "$PEN1_HALL" ] && IFS= read -r hall <"$PEN1_HALL"
+    hall=${hall##* }
+    case "$hall" in
+        0) echo 1 ;; # docked (hall3 low when pen attached)
+        1) echo 0 ;; # detached
         *) echo -1 ;;
     esac
 }
@@ -1274,6 +1272,12 @@ done
 # Bluetooth or attention state is synthesized here; the CPS driver must still
 # report the actual chip, battery and HID state.
 start_cps_gpio() {
+    # TB522FU: the CPS8601 driver owns the wireless TX path via the kernel
+    # power-supply framework (cps_wls_tx online=1 observed the moment the pen
+    # docks). No GPIO keeper is needed here, and the TB710FU line numbers
+    # (10/108) are invalid on this board. Keep the hook disabled until a
+    # concrete failure is proven on-device.
+    return 0
     [ -r "$CPS_PEN_HALL" ] || return 0
     [ "$(read_hall_state)" = 1 ] || return 0
     [ -x "$CPS_HELPER" ] || [ -x "$CPS_GPIOSET" ] || {
