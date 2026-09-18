@@ -1,0 +1,10 @@
+{
+	"InstallScripts" : 
+	[
+		"/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/cmake_install.cmake",
+		"/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/Dobby/cmake_install.cmake",
+		"/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/Dobby/external/logging/cmake_install.cmake",
+		"/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/Dobby/builtin-plugin/SymbolResolver/cmake_install.cmake"
+	],
+	"Parallel" : false
+}

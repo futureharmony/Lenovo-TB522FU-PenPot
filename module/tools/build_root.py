@@ -19,6 +19,8 @@ INCLUDE = (
     "panic.sh",
     "post-fs-data.sh",
     "service.sh",
+    "guard_note_engine.sh",
+    "engine/libSuniaEngine.16.7.2.fixed.so",
     "system/etc/permissions/privapp-permissions-com.aclaniakea.penhidctl.xml",
     "system/priv-app/aclpenhid/PenHidCtl.apk",
     "uninstall.sh",

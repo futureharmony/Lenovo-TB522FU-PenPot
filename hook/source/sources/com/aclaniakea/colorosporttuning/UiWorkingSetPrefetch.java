@@ -39,6 +39,15 @@ public final class UiWorkingSetPrefetch implements IXposedHookLoadPackage {
                 WirelessSettingsHooks.install(loadPackageParam);
                 break;
             case "com.coloros.note":
+                // Restore the EGL-layer "ColorOS contract" the bundled GLEW
+                // loader expects (eglGetProcAddress must hand back core GL
+                // functions; eglInitialize must be idempotent). Loaded once,
+                // in-process, before the handwriting engine's glewInit() runs.
+                // See hook/source/jni/egl_contract_shim.c. Scoped to this
+                // package only -- zero blast radius to the rest of the system.
+                EglContractShim.ensureLoaded();
+                NoteToolkitHooks.install(loadPackageParam);
+                break;
             case "com.oplus.screenshot":
                 NoteToolkitHooks.install(loadPackageParam);
                 break;

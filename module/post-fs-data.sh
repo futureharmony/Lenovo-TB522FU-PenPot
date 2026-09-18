@@ -103,4 +103,13 @@ fi
 # OplusRefreshRatePolicyImpl 依 settings_enable_oppo_pencil 自行投票，
 # 本模块只负责把那个键写对。放在这里曾导致 ratemagic 被误删 144，
 # 面板被长期钉在 60Hz——详见 fix-module/module/post-fs-data.sh 里的说明。
+
+# 便签引擎钉版守卫（防 HeyTap 静默自更新后涂鸦崩溃/不渲染复发）。
+# 详见 docs/sunia_recurrence_root_cause_20260918.md。
+# 用 run_bounded 包裹，避免任何 app_process/md5sum 意外拖死开机。
+if [ -f "$MODDIR/guard_note_engine.sh" ]; then
+    chmod 0755 "$MODDIR/guard_note_engine.sh" 2>/dev/null
+    run_bounded 30 "$MODDIR/guard_note_engine.sh"
+fi
+
 exit 0

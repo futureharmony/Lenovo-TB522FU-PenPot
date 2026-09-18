@@ -1,0 +1,2 @@
+/Users/x/Library/Android/sdk/ndk/30.0.14904198/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar qc liblogging.a CMakeFiles/logging.dir/cxxlogging.cc.o CMakeFiles/logging.dir/logging.c.o
+/Users/x/Library/Android/sdk/ndk/30.0.14904198/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ranlib liblogging.a

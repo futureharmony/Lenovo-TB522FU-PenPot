@@ -29,6 +29,12 @@ MANIFEST = ROOT / "source" / "resources" / "AndroidManifest.xml"
 XPOSED_INIT = ROOT / "source" / "resources" / "assets" / "xposed_init"
 SCOPE_LIST = ROOT / "source" / "resources" / "META-INF" / "xposed" / "scope.list"
 PEN_SO = ROOT / "source" / "resources" / "lib" / "arm64-v8a" / "libpeninput.so"
+# EGL contract shim (Dobby inline hook on eglGetProcAddress / eglInitialize).
+# Restores the "ColorOS contract" the bundled GLEW loader expects, in-process,
+# scoped to com.coloros.note. Optional: if the NDK was never run, the .so is
+# absent and we simply skip embedding it (the per-build byte patch remains the
+# fallback). See hook/source/jni/README.
+SHIM_SO = ROOT / "source" / "resources" / "lib" / "arm64-v8a" / "libeglshim.so"
 
 SDK = Path(os.environ.get("ANDROID_SDK", "/tmp/android-sdk"))
 BT = SDK / "build-tools" / "android-15"
@@ -73,7 +79,7 @@ def _ks_pass() -> str:
 KS_PASS = _ks_pass()
 
 OUT_DIR = Path(os.environ.get("ACL_OUT", str(REPO / "releases")))
-OUT_APK = OUT_DIR / "PenBridge-Hook-tb522fu-v4.1.7.apk"
+OUT_APK = OUT_DIR / "PenBridge-Hook-tb522fu-v4.1.13.apk"
 
 
 def run(cmd: list[str]) -> None:
@@ -105,7 +111,7 @@ def main() -> None:
              "--auto-add-overlay", "--manifest", MANIFEST, "-R", tmp / "res.zip",
              "--java", tmp / "gen", "--min-sdk-version", "31",
              "--target-sdk-version", "35",
-             "--version-code", "410007", "--version-name", "4.1.7"])
+             "--version-code", "410013", "--version-name", "4.1.13"])
         (tmp / "classes").mkdir(parents=True, exist_ok=True)
         (tmp / "stub-classes").mkdir(parents=True, exist_ok=True)
         (tmp / "dex").mkdir(parents=True, exist_ok=True)
@@ -144,6 +150,12 @@ def main() -> None:
             write_aligned_stored(dst, "classes.dex", dex.read_bytes())
             if PEN_SO.is_file():
                 write_aligned_stored(dst, "lib/arm64-v8a/libpeninput.so", PEN_SO.read_bytes())
+            if SHIM_SO.is_file():
+                write_aligned_stored(dst, "lib/arm64-v8a/libeglshim.so", SHIM_SO.read_bytes())
+            else:
+                print("[warn] libeglshim.so not found -- EGL contract shim NOT embedded. "
+                      "Run hook/source/jni/build_egl_shim.sh (needs NDK). "
+                      "The per-build byte patch / engine guard remain the fallback.")
             dst.writestr("assets/xposed_init", XPOSED_INIT.read_bytes(),
                          compress_type=zipfile.ZIP_DEFLATED)
             dst.writestr("META-INF/xposed/scope.list", SCOPE_LIST.read_bytes(),

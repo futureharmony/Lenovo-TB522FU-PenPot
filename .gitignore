@@ -1,7 +1,4 @@
-*.zip
-*.log
-*.apk
-hook/build/
-module/out/
+__pycache__/
+*.pyc
+scripts/.build/
 .DS_Store
-keys/

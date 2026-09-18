@@ -1,0 +1,340 @@
+==================== note_egl_diag ====================
+phase      = app-oncreate:onCreate
+time       = 2026-09-18 18:44:11.737
+pid/uid/tid= 12039/10309/12039
+pkg        = com.coloros.note
+proc name  = om.coloros.note
+sdk/rel    = 36 16
+fingerprint= OPPO/OPD2409/OP615CL1:16/AP3A.240617.008/V.1ef3381_58e4c2_5654f7:user/release-keys
+abi/arch   = arm64-v8a / aarch64
+dataDir    = /data/user/0/com.coloros.note
+nativeLib  = /data/app/~~ACDCL2WthORi3h-qalrojA==/com.coloros.note-o0KOL6kJhTqDh38kAQG22g==/lib/arm64
+java.library.path = /system/lib64:/system_ext/lib64
+--- already-current EGL (before probe) ---
+eglGetCurrentDisplay -> EGL_NO_DISPLAY
+eglGetCurrentContext -> EGL_NO_CONTEXT
+eglGetCurrentSurface(DRAW) -> EGL_NO_SURFACE
+eglGetError -> 0x3000(EGL_SUCCESS=true)
+--- nativeLibraryDir listing ---
+  libsuniabase.so 2146240 bytes
+  libSuniaEngine.so 14658800 bytes
+  (total entries: 31)
+--- /proc/self/maps (graphics libs) ---
+  790a35b000-790a361000 r--p 00000000 fd:04 3256                           /system_ext/lib64/libvulkanextimpl.so
+  790a361000-790a374000 r-xp 00006000 fd:04 3256                           /system_ext/lib64/libvulkanextimpl.so
+  790a374000-790a375000 r--p 00019000 fd:04 3256                           /system_ext/lib64/libvulkanextimpl.so
+  7917a40000-7917a49000 r--p 00000000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7917a4c000-7917a5b000 r-xp 0000c000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7917a5c000-7917a5d000 r--p 0001c000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7917a60000-7917a61000 rw-p 00020000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7a06c0f000-7a06c10000 r--p 00000000 fd:02 10960                          /system/lib64/libegl_flags.so
+  7a06c10000-7a06c11000 r-xp 00001000 fd:02 10960                          /system/lib64/libegl_flags.so
+  7a06c11000-7a06c12000 r--p 00002000 fd:02 10960                          /system/lib64/libegl_flags.so
+  7a11026000-7a1103c000 r--p 00000000 fd:02 10741                          /system/lib64/libEGL.so
+  7a1103c000-7a1105e000 r-xp 00016000 fd:02 10741                          /system/lib64/libEGL.so
+  7a1105e000-7a11063000 r--p 00038000 fd:02 10741                          /system/lib64/libEGL.so
+  7a11063000-7a11064000 rw-p 0003d000 fd:02 10741                          /system/lib64/libEGL.so
+  7a1579d000-7a157af000 r--p 00000000 fd:02 10748                          /system/lib64/libGLESv2.so
+  7a157af000-7a157b5000 r-xp 00012000 fd:02 10748                          /system/lib64/libGLESv2.so
+  7a157b5000-7a157b6000 r--p 00018000 fd:02 10748                          /system/lib64/libGLESv2.so
+  7a28d72000-7a28d77000 r--p 00000000 fd:02 11143                          /system/lib64/libnativewindow.so
+  7a28d77000-7a28d7a000 r-xp 00005000 fd:02 11143                          /system/lib64/libnativewindow.so
+  7a28d7a000-7a28d7b000 r--p 00008000 fd:02 11143                          /system/lib64/libnativewindow.so
+  7a2e6ab000-7a2e6b1000 r--p 00000000 fd:02 10746                          /system/lib64/libGLESv1_CM.so
+  7a2e6b1000-7a2e6b3000 r-xp 00006000 fd:02 10746                          /system/lib64/libGLESv1_CM.so
+  7a2e6b3000-7a2e6b4000 r--p 00008000 fd:02 10746                          /system/lib64/libGLESv1_CM.so
+  7a2e70d000-7a2e73a000 r--p 00000000 fd:02 11311                          /system/lib64/libui.so
+  7a2e73a000-7a2e777000 r-xp 0002d000 fd:02 11311                          /system/lib64/libui.so
+  7a2e777000-7a2e77a000 r--p 0006a000 fd:02 11311                          /system/lib64/libui.so
+  7a39989000-7a3999e000 r--p 00000000 fd:02 11344                          /system/lib64/libvulkan.so
+  7a3999e000-7a399b9000 r-xp 00015000 fd:02 11344                          /system/lib64/libvulkan.so
+  7a399b9000-7a399bc000 r--p 00030000 fd:02 11344                          /system/lib64/libvulkan.so
+  7a399bc000-7a399bd000 rw-p 00033000 fd:02 11344                          /system/lib64/libvulkan.so
+--- probe: caller thread ---
+thread=caller tid=12039 name=main
+  eglGetDisplay(DEFAULT)      -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglInitialize               -> true v1.5   err=0x3000(EGL_SUCCESS=true)
+  eglQueryString(VENDOR)      -> Android
+  eglQueryString(VERSION)     -> 1.5 Android META-EGL
+  EGL_KHR_surfaceless_context -> true
+  eglChooseConfig             -> true n=4   err=0x3000(EGL_SUCCESS=true)
+  eglCreateContext(ES3)       -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglMakeCurrent(surfaceless) -> true   err=0x3000(EGL_SUCCESS=true)
+  glGetString(GL_VERSION)     -> OpenGL ES 3.2 V@0800.72 (GIT@3967b80d3b, Ica4ce9bea6, 1770914544) (Date:02/12/26)
+  glGetString(GL_VENDOR)      -> Qualcomm
+  glGetString(GL_RENDERER)    -> Adreno (TM) 830
+  glGetError                  -> 0x0
+  RESULT: EGL OK on this thread -- a failure elsewhere is not environmental
+--- probe: spawned worker thread ---
+thread=worker tid=16817 name=EglDiag-probe
+  eglGetDisplay(DEFAULT)      -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglInitialize               -> true v1.5   err=0x3000(EGL_SUCCESS=true)
+  eglQueryString(VENDOR)      -> Android
+  eglQueryString(VERSION)     -> 1.5 Android META-EGL
+  EGL_KHR_surfaceless_context -> true
+  eglChooseConfig             -> true n=4   err=0x3000(EGL_SUCCESS=true)
+  eglCreateContext(ES3)       -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglMakeCurrent(surfaceless) -> true   err=0x3000(EGL_SUCCESS=true)
+  glGetString(GL_VERSION)     -> OpenGL ES 3.2 V@0800.72 (GIT@3967b80d3b, Ica4ce9bea6, 1770914544) (Date:02/12/26)
+  glGetString(GL_VENDOR)      -> Qualcomm
+  glGetString(GL_RENDERER)    -> Adreno (TM) 830
+  glGetError                  -> 0x0
+  RESULT: EGL OK on this thread -- a failure elsewhere is not environmental
+==================== end ====================
+
+[note] /data/local/tmp/note_egl_diag.txt not writable: java.io.FileNotFoundException: /data/local/tmp/note_egl_diag.txt: open failed: EACCES (Permission denied) (pre-create it 0666 from root, or read this mirror)
+==================== note_egl_diag ====================
+phase      = app-oncreate:onCreate
+time       = 2026-09-18 18:44:12.756
+pid/uid/tid= 17286/10309/17286
+pkg        = com.coloros.note
+proc name  = ileged_process0
+sdk/rel    = 36 16
+fingerprint= OPPO/OPD2409/OP615CL1:16/AP3A.240617.008/V.1ef3381_58e4c2_5654f7:user/release-keys
+abi/arch   = arm64-v8a / aarch64
+dataDir    = /data/user/0/com.coloros.note
+nativeLib  = /data/app/~~ACDCL2WthORi3h-qalrojA==/com.coloros.note-o0KOL6kJhTqDh38kAQG22g==/lib/arm64
+java.library.path = /system/lib64:/system_ext/lib64
+--- already-current EGL (before probe) ---
+eglGetCurrentDisplay -> EGL_NO_DISPLAY
+eglGetCurrentContext -> EGL_NO_CONTEXT
+eglGetCurrentSurface(DRAW) -> EGL_NO_SURFACE
+eglGetError -> 0x3000(EGL_SUCCESS=true)
+--- nativeLibraryDir listing ---
+  libsuniabase.so 2146240 bytes
+  libSuniaEngine.so 14658800 bytes
+  (total entries: 31)
+--- /proc/self/maps (graphics libs) ---
+  790a35b000-790a361000 r--p 00000000 fd:04 3256                           /system_ext/lib64/libvulkanextimpl.so
+  790a361000-790a374000 r-xp 00006000 fd:04 3256                           /system_ext/lib64/libvulkanextimpl.so
+  790a374000-790a375000 r--p 00019000 fd:04 3256                           /system_ext/lib64/libvulkanextimpl.so
+  7917a40000-7917a49000 r--p 00000000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7917a4c000-7917a5b000 r-xp 0000c000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7917a5c000-7917a5d000 r--p 0001c000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7917a60000-7917a61000 rw-p 00020000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7a06c0f000-7a06c10000 r--p 00000000 fd:02 10960                          /system/lib64/libegl_flags.so
+  7a06c10000-7a06c11000 r-xp 00001000 fd:02 10960                          /system/lib64/libegl_flags.so
+  7a06c11000-7a06c12000 r--p 00002000 fd:02 10960                          /system/lib64/libegl_flags.so
+  7a11026000-7a1103c000 r--p 00000000 fd:02 10741                          /system/lib64/libEGL.so
+  7a1103c000-7a1105e000 r-xp 00016000 fd:02 10741                          /system/lib64/libEGL.so
+  7a1105e000-7a11063000 r--p 00038000 fd:02 10741                          /system/lib64/libEGL.so
+  7a11063000-7a11064000 rw-p 0003d000 fd:02 10741                          /system/lib64/libEGL.so
+  7a1579d000-7a157af000 r--p 00000000 fd:02 10748                          /system/lib64/libGLESv2.so
+  7a157af000-7a157b5000 r-xp 00012000 fd:02 10748                          /system/lib64/libGLESv2.so
+  7a157b5000-7a157b6000 r--p 00018000 fd:02 10748                          /system/lib64/libGLESv2.so
+  7a28d72000-7a28d77000 r--p 00000000 fd:02 11143                          /system/lib64/libnativewindow.so
+  7a28d77000-7a28d7a000 r-xp 00005000 fd:02 11143                          /system/lib64/libnativewindow.so
+  7a28d7a000-7a28d7b000 r--p 00008000 fd:02 11143                          /system/lib64/libnativewindow.so
+  7a2e6ab000-7a2e6b1000 r--p 00000000 fd:02 10746                          /system/lib64/libGLESv1_CM.so
+  7a2e6b1000-7a2e6b3000 r-xp 00006000 fd:02 10746                          /system/lib64/libGLESv1_CM.so
+  7a2e6b3000-7a2e6b4000 r--p 00008000 fd:02 10746                          /system/lib64/libGLESv1_CM.so
+  7a2e70d000-7a2e73a000 r--p 00000000 fd:02 11311                          /system/lib64/libui.so
+  7a2e73a000-7a2e777000 r-xp 0002d000 fd:02 11311                          /system/lib64/libui.so
+  7a2e777000-7a2e77a000 r--p 0006a000 fd:02 11311                          /system/lib64/libui.so
+  7a39989000-7a3999e000 r--p 00000000 fd:02 11344                          /system/lib64/libvulkan.so
+  7a3999e000-7a399b9000 r-xp 00015000 fd:02 11344                          /system/lib64/libvulkan.so
+  7a399b9000-7a399bc000 r--p 00030000 fd:02 11344                          /system/lib64/libvulkan.so
+  7a399bc000-7a399bd000 rw-p 00033000 fd:02 11344                          /system/lib64/libvulkan.so
+--- probe: caller thread ---
+thread=caller tid=17286 name=main
+  eglGetDisplay(DEFAULT)      -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglInitialize               -> true v1.5   err=0x3000(EGL_SUCCESS=true)
+  eglQueryString(VENDOR)      -> Android
+  eglQueryString(VERSION)     -> 1.5 Android META-EGL
+  EGL_KHR_surfaceless_context -> true
+  eglChooseConfig             -> true n=4   err=0x3000(EGL_SUCCESS=true)
+  eglCreateContext(ES3)       -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglMakeCurrent(surfaceless) -> true   err=0x3000(EGL_SUCCESS=true)
+  glGetString(GL_VERSION)     -> OpenGL ES 3.2 V@0800.72 (GIT@3967b80d3b, Ica4ce9bea6, 1770914544) (Date:02/12/26)
+  glGetString(GL_VENDOR)      -> Qualcomm
+  glGetString(GL_RENDERER)    -> Adreno (TM) 830
+  glGetError                  -> 0x0
+  RESULT: EGL OK on this thread -- a failure elsewhere is not environmental
+--- probe: spawned worker thread ---
+thread=worker tid=17585 name=EglDiag-probe
+  eglGetDisplay(DEFAULT)      -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglInitialize               -> true v1.5   err=0x3000(EGL_SUCCESS=true)
+  eglQueryString(VENDOR)      -> Android
+  eglQueryString(VERSION)     -> 1.5 Android META-EGL
+  EGL_KHR_surfaceless_context -> true
+  eglChooseConfig             -> true n=4   err=0x3000(EGL_SUCCESS=true)
+  eglCreateContext(ES3)       -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglMakeCurrent(surfaceless) -> true   err=0x3000(EGL_SUCCESS=true)
+  glGetString(GL_VERSION)     -> OpenGL ES 3.2 V@0800.72 (GIT@3967b80d3b, Ica4ce9bea6, 1770914544) (Date:02/12/26)
+  glGetString(GL_VENDOR)      -> Qualcomm
+  glGetString(GL_RENDERER)    -> Adreno (TM) 830
+  glGetError                  -> 0x0
+  RESULT: EGL OK on this thread -- a failure elsewhere is not environmental
+==================== end ====================
+
+[note] /data/local/tmp/note_egl_diag.txt not writable: java.io.FileNotFoundException: /data/local/tmp/note_egl_diag.txt: open failed: EACCES (Permission denied) (pre-create it 0666 from root, or read this mirror)
+==================== note_egl_diag ====================
+phase      = app-oncreate:onCreate
+time       = 2026-09-18 18:44:22.534
+pid/uid/tid= 19643/10309/19643
+pkg        = com.coloros.note
+proc name  = om.coloros.note
+sdk/rel    = 36 16
+fingerprint= OPPO/OPD2409/OP615CL1:16/AP3A.240617.008/V.1ef3381_58e4c2_5654f7:user/release-keys
+abi/arch   = arm64-v8a / aarch64
+dataDir    = /data/user/0/com.coloros.note
+nativeLib  = /data/app/~~ACDCL2WthORi3h-qalrojA==/com.coloros.note-o0KOL6kJhTqDh38kAQG22g==/lib/arm64
+java.library.path = /system/lib64:/system_ext/lib64
+--- already-current EGL (before probe) ---
+eglGetCurrentDisplay -> EGL_NO_DISPLAY
+eglGetCurrentContext -> EGL_NO_CONTEXT
+eglGetCurrentSurface(DRAW) -> EGL_NO_SURFACE
+eglGetError -> 0x3000(EGL_SUCCESS=true)
+--- nativeLibraryDir listing ---
+  libsuniabase.so 2146240 bytes
+  libSuniaEngine.so 14658800 bytes
+  (total entries: 31)
+--- /proc/self/maps (graphics libs) ---
+  790a35b000-790a361000 r--p 00000000 fd:04 3256                           /system_ext/lib64/libvulkanextimpl.so
+  790a361000-790a374000 r-xp 00006000 fd:04 3256                           /system_ext/lib64/libvulkanextimpl.so
+  790a374000-790a375000 r--p 00019000 fd:04 3256                           /system_ext/lib64/libvulkanextimpl.so
+  7917a40000-7917a49000 r--p 00000000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7917a4c000-7917a5b000 r-xp 0000c000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7917a5c000-7917a5d000 r--p 0001c000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7917a60000-7917a61000 rw-p 00020000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7a06c0f000-7a06c10000 r--p 00000000 fd:02 10960                          /system/lib64/libegl_flags.so
+  7a06c10000-7a06c11000 r-xp 00001000 fd:02 10960                          /system/lib64/libegl_flags.so
+  7a06c11000-7a06c12000 r--p 00002000 fd:02 10960                          /system/lib64/libegl_flags.so
+  7a11026000-7a1103c000 r--p 00000000 fd:02 10741                          /system/lib64/libEGL.so
+  7a1103c000-7a1105e000 r-xp 00016000 fd:02 10741                          /system/lib64/libEGL.so
+  7a1105e000-7a11063000 r--p 00038000 fd:02 10741                          /system/lib64/libEGL.so
+  7a11063000-7a11064000 rw-p 0003d000 fd:02 10741                          /system/lib64/libEGL.so
+  7a1579d000-7a157af000 r--p 00000000 fd:02 10748                          /system/lib64/libGLESv2.so
+  7a157af000-7a157b5000 r-xp 00012000 fd:02 10748                          /system/lib64/libGLESv2.so
+  7a157b5000-7a157b6000 r--p 00018000 fd:02 10748                          /system/lib64/libGLESv2.so
+  7a28d72000-7a28d77000 r--p 00000000 fd:02 11143                          /system/lib64/libnativewindow.so
+  7a28d77000-7a28d7a000 r-xp 00005000 fd:02 11143                          /system/lib64/libnativewindow.so
+  7a28d7a000-7a28d7b000 r--p 00008000 fd:02 11143                          /system/lib64/libnativewindow.so
+  7a2e6ab000-7a2e6b1000 r--p 00000000 fd:02 10746                          /system/lib64/libGLESv1_CM.so
+  7a2e6b1000-7a2e6b3000 r-xp 00006000 fd:02 10746                          /system/lib64/libGLESv1_CM.so
+  7a2e6b3000-7a2e6b4000 r--p 00008000 fd:02 10746                          /system/lib64/libGLESv1_CM.so
+  7a2e70d000-7a2e73a000 r--p 00000000 fd:02 11311                          /system/lib64/libui.so
+  7a2e73a000-7a2e777000 r-xp 0002d000 fd:02 11311                          /system/lib64/libui.so
+  7a2e777000-7a2e77a000 r--p 0006a000 fd:02 11311                          /system/lib64/libui.so
+  7a39989000-7a3999e000 r--p 00000000 fd:02 11344                          /system/lib64/libvulkan.so
+  7a3999e000-7a399b9000 r-xp 00015000 fd:02 11344                          /system/lib64/libvulkan.so
+  7a399b9000-7a399bc000 r--p 00030000 fd:02 11344                          /system/lib64/libvulkan.so
+  7a399bc000-7a399bd000 rw-p 00033000 fd:02 11344                          /system/lib64/libvulkan.so
+--- probe: caller thread ---
+thread=caller tid=19643 name=main
+  eglGetDisplay(DEFAULT)      -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglInitialize               -> true v1.5   err=0x3000(EGL_SUCCESS=true)
+  eglQueryString(VENDOR)      -> Android
+  eglQueryString(VERSION)     -> 1.5 Android META-EGL
+  EGL_KHR_surfaceless_context -> true
+  eglChooseConfig             -> true n=4   err=0x3000(EGL_SUCCESS=true)
+  eglCreateContext(ES3)       -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglMakeCurrent(surfaceless) -> true   err=0x3000(EGL_SUCCESS=true)
+  glGetString(GL_VERSION)     -> OpenGL ES 3.2 V@0800.72 (GIT@3967b80d3b, Ica4ce9bea6, 1770914544) (Date:02/12/26)
+  glGetString(GL_VENDOR)      -> Qualcomm
+  glGetString(GL_RENDERER)    -> Adreno (TM) 830
+  glGetError                  -> 0x0
+  RESULT: EGL OK on this thread -- a failure elsewhere is not environmental
+--- probe: spawned worker thread ---
+thread=worker tid=20522 name=EglDiag-probe
+  eglGetDisplay(DEFAULT)      -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglInitialize               -> true v1.5   err=0x3000(EGL_SUCCESS=true)
+  eglQueryString(VENDOR)      -> Android
+  eglQueryString(VERSION)     -> 1.5 Android META-EGL
+  EGL_KHR_surfaceless_context -> true
+  eglChooseConfig             -> true n=4   err=0x3000(EGL_SUCCESS=true)
+  eglCreateContext(ES3)       -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglMakeCurrent(surfaceless) -> true   err=0x3000(EGL_SUCCESS=true)
+  glGetString(GL_VERSION)     -> OpenGL ES 3.2 V@0800.72 (GIT@3967b80d3b, Ica4ce9bea6, 1770914544) (Date:02/12/26)
+  glGetString(GL_VENDOR)      -> Qualcomm
+  glGetString(GL_RENDERER)    -> Adreno (TM) 830
+  glGetError                  -> 0x0
+  RESULT: EGL OK on this thread -- a failure elsewhere is not environmental
+==================== end ====================
+
+[note] /data/local/tmp/note_egl_diag.txt not writable: java.io.FileNotFoundException: /data/local/tmp/note_egl_diag.txt: open failed: EACCES (Permission denied) (pre-create it 0666 from root, or read this mirror)
+==================== note_egl_diag ====================
+phase      = app-oncreate:onCreate
+time       = 2026-09-18 18:44:23.122
+pid/uid/tid= 20775/10309/20775
+pkg        = com.coloros.note
+proc name  = ileged_process0
+sdk/rel    = 36 16
+fingerprint= OPPO/OPD2409/OP615CL1:16/AP3A.240617.008/V.1ef3381_58e4c2_5654f7:user/release-keys
+abi/arch   = arm64-v8a / aarch64
+dataDir    = /data/user/0/com.coloros.note
+nativeLib  = /data/app/~~ACDCL2WthORi3h-qalrojA==/com.coloros.note-o0KOL6kJhTqDh38kAQG22g==/lib/arm64
+java.library.path = /system/lib64:/system_ext/lib64
+--- already-current EGL (before probe) ---
+eglGetCurrentDisplay -> EGL_NO_DISPLAY
+eglGetCurrentContext -> EGL_NO_CONTEXT
+eglGetCurrentSurface(DRAW) -> EGL_NO_SURFACE
+eglGetError -> 0x3000(EGL_SUCCESS=true)
+--- nativeLibraryDir listing ---
+  libsuniabase.so 2146240 bytes
+  libSuniaEngine.so 14658800 bytes
+  (total entries: 31)
+--- /proc/self/maps (graphics libs) ---
+  790a35b000-790a361000 r--p 00000000 fd:04 3256                           /system_ext/lib64/libvulkanextimpl.so
+  790a361000-790a374000 r-xp 00006000 fd:04 3256                           /system_ext/lib64/libvulkanextimpl.so
+  790a374000-790a375000 r--p 00019000 fd:04 3256                           /system_ext/lib64/libvulkanextimpl.so
+  7917a40000-7917a49000 r--p 00000000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7917a4c000-7917a5b000 r-xp 0000c000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7917a5c000-7917a5d000 r--p 0001c000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7917a60000-7917a61000 rw-p 00020000 fd:05 2884                           /vendor/lib64/libadreno_utils.so
+  7a06c0f000-7a06c10000 r--p 00000000 fd:02 10960                          /system/lib64/libegl_flags.so
+  7a06c10000-7a06c11000 r-xp 00001000 fd:02 10960                          /system/lib64/libegl_flags.so
+  7a06c11000-7a06c12000 r--p 00002000 fd:02 10960                          /system/lib64/libegl_flags.so
+  7a11026000-7a1103c000 r--p 00000000 fd:02 10741                          /system/lib64/libEGL.so
+  7a1103c000-7a1105e000 r-xp 00016000 fd:02 10741                          /system/lib64/libEGL.so
+  7a1105e000-7a11063000 r--p 00038000 fd:02 10741                          /system/lib64/libEGL.so
+  7a11063000-7a11064000 rw-p 0003d000 fd:02 10741                          /system/lib64/libEGL.so
+  7a1579d000-7a157af000 r--p 00000000 fd:02 10748                          /system/lib64/libGLESv2.so
+  7a157af000-7a157b5000 r-xp 00012000 fd:02 10748                          /system/lib64/libGLESv2.so
+  7a157b5000-7a157b6000 r--p 00018000 fd:02 10748                          /system/lib64/libGLESv2.so
+  7a28d72000-7a28d77000 r--p 00000000 fd:02 11143                          /system/lib64/libnativewindow.so
+  7a28d77000-7a28d7a000 r-xp 00005000 fd:02 11143                          /system/lib64/libnativewindow.so
+  7a28d7a000-7a28d7b000 r--p 00008000 fd:02 11143                          /system/lib64/libnativewindow.so
+  7a2e6ab000-7a2e6b1000 r--p 00000000 fd:02 10746                          /system/lib64/libGLESv1_CM.so
+  7a2e6b1000-7a2e6b3000 r-xp 00006000 fd:02 10746                          /system/lib64/libGLESv1_CM.so
+  7a2e6b3000-7a2e6b4000 r--p 00008000 fd:02 10746                          /system/lib64/libGLESv1_CM.so
+  7a2e70d000-7a2e73a000 r--p 00000000 fd:02 11311                          /system/lib64/libui.so
+  7a2e73a000-7a2e777000 r-xp 0002d000 fd:02 11311                          /system/lib64/libui.so
+  7a2e777000-7a2e77a000 r--p 0006a000 fd:02 11311                          /system/lib64/libui.so
+  7a39989000-7a3999e000 r--p 00000000 fd:02 11344                          /system/lib64/libvulkan.so
+  7a3999e000-7a399b9000 r-xp 00015000 fd:02 11344                          /system/lib64/libvulkan.so
+  7a399b9000-7a399bc000 r--p 00030000 fd:02 11344                          /system/lib64/libvulkan.so
+  7a399bc000-7a399bd000 rw-p 00033000 fd:02 11344                          /system/lib64/libvulkan.so
+--- probe: caller thread ---
+thread=caller tid=20775 name=main
+  eglGetDisplay(DEFAULT)      -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglInitialize               -> true v1.5   err=0x3000(EGL_SUCCESS=true)
+  eglQueryString(VENDOR)      -> Android
+  eglQueryString(VERSION)     -> 1.5 Android META-EGL
+  EGL_KHR_surfaceless_context -> true
+  eglChooseConfig             -> true n=4   err=0x3000(EGL_SUCCESS=true)
+  eglCreateContext(ES3)       -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglMakeCurrent(surfaceless) -> true   err=0x3000(EGL_SUCCESS=true)
+  glGetString(GL_VERSION)     -> OpenGL ES 3.2 V@0800.72 (GIT@3967b80d3b, Ica4ce9bea6, 1770914544) (Date:02/12/26)
+  glGetString(GL_VENDOR)      -> Qualcomm
+  glGetString(GL_RENDERER)    -> Adreno (TM) 830
+  glGetError                  -> 0x0
+  RESULT: EGL OK on this thread -- a failure elsewhere is not environmental
+--- probe: spawned worker thread ---
+thread=worker tid=20824 name=EglDiag-probe
+  eglGetDisplay(DEFAULT)      -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglInitialize               -> true v1.5   err=0x3000(EGL_SUCCESS=true)
+  eglQueryString(VENDOR)      -> Android
+  eglQueryString(VERSION)     -> 1.5 Android META-EGL
+  EGL_KHR_surfaceless_context -> true
+  eglChooseConfig             -> true n=4   err=0x3000(EGL_SUCCESS=true)
+  eglCreateContext(ES3)       -> ok   err=0x3000(EGL_SUCCESS=true)
+  eglMakeCurrent(surfaceless) -> true   err=0x3000(EGL_SUCCESS=true)
+  glGetString(GL_VERSION)     -> OpenGL ES 3.2 V@0800.72 (GIT@3967b80d3b, Ica4ce9bea6, 1770914544) (Date:02/12/26)
+  glGetString(GL_VENDOR)      -> Qualcomm
+  glGetString(GL_RENDERER)    -> Adreno (TM) 830
+  glGetError                  -> 0x0
+  RESULT: EGL OK on this thread -- a failure elsewhere is not environmental
+==================== end ====================
+
+[note] /data/local/tmp/note_egl_diag.txt not writable: java.io.FileNotFoundException: /data/local/tmp/note_egl_diag.txt: open failed: EACCES (Permission denied) (pre-create it 0666 from root, or read this mirror)

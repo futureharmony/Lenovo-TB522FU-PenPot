@@ -1,0 +1,2 @@
+/Users/x/Library/Android/sdk/ndk/30.0.14904198/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ar qc libsymbol_resolver.a CMakeFiles/symbol_resolver.dir/elf/dobby_symbol_resolver.cc.o CMakeFiles/symbol_resolver.dir/__/__/source/Backend/UserMode/PlatformUtil/Linux/ProcessRuntimeUtility.cc.o
+/Users/x/Library/Android/sdk/ndk/30.0.14904198/toolchains/llvm/prebuilt/darwin-x86_64/bin/llvm-ranlib libsymbol_resolver.a

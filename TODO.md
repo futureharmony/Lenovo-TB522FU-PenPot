@@ -34,15 +34,50 @@
   - 相关文档：`docs/install-vector-route.md` 踩坑表；技能 `android-ksu-vector-module-triage` 的 Bootloop triage。
 
 ## 已知缺口（2026-09-18 观测）
-- [x] **笔身触控条手势打通（v4.1.5）**：设备名串少了 ` 2` + 框架路径错按 `keyCode 131/132/133` 分派（该设备只上报 `KEY_UNKNOWN`(240)），
-      两处已修：名称放宽为 `lenovo tab pen` + `consumer control`，分派改按 `getScanCode()`。实测扫描码
-      `787987`=上滑 / `787986`=下滑 / `787969`=双击（TB522FU 实测，见 `docs/install-vector-route.md` 踩坑 #11）。
-      ⚠️ 待实测确认：三种手势能否分别落到注入键 768/767/769 且下游有响应（需要人各做一次手势看日志）。
+- [x] **笔身触控条手势打通（v4.1.8，实机验证）**：v4.1.5 的两处判断**都**是错的 ——
+      ①**设备名**：真正把键事件送进 `PhoneWindowManager` 的节点是 **`Lenovo Tab Pen Pro 2 Mouse`**（`event8`，uhid `0005:17EF:622E.0001`）；
+      兄弟节点 `…Consumer Control`（`event9`）只上报 `EV_MSC/MSC_SCAN + EV_KEY KEY_UNKNOWN` 且**从不进按键队列**，不能拿来匹配。
+      `dumpsys input` 对 Mouse 节点打印空 `KeyLayoutFile`，但它的 `code=131/132/133` 恰恰来自
+      `Vendor_17ef_Product_622e.kl` 的 `key usage` 行（`key usage <hid-usage> <key>` 语法 Android 确实支持，`Generic.kl` 里用了 25 处）。
+      ②**分派字段**：`getScanCode()` 恒为 **240**（=KEY_UNKNOWN，即内核原始 keycode，不是 HID usage），手势信息在 **`getKeyCode()`**。
+      v4.1.5 的 `switch (getScanCode())` 因此永远走 default，且 `contains("consumer control")` 对 Mouse 节点不成立 → 触控条全死。
+      真机实测（用户做 4 个手势）：`code=131/132/133 scan=240`。v4.1.8 的 `stripGestureToNativeKey()` 把它们注入成 OEM「原生笔」键 `767/768/769`。
+      ⚠️ **`767/768/769` 在 TB522FU 上是确认的空操作（no-op）**：注入事件确实进了管线（日志可见 `dev=Virtual code=768 act=0/1`），
+      但整条日志里**没有任何组件消费它们**，用户实测「完全没反应」。→ v4.1.10 弃用注入，改走移植版**自身**的 ColorOS 手势管线。
+      ⚠️ **还有一个更隐蔽的前置坑（已修）**：`vector-cli scope set` 会**整表覆盖** scope，而仓库脚本的 scope 列表漏了 `system/0`，
+      于是 module **完全不再注入 system_server**（`handleLoadPackage pkg=android` 消失、`interceptKeyBeforeQueueing hooks` 永不安装），
+      触控条与整条笔键路径全死，而**所有 app 侧 hook 仍正常**——极容易误判成代码 bug。判据：`vector-cli log cat` 里没有 system_server
+      的 `Loading legacy module` 行。已修 `scripts/deploy_vector.sh`（`system/0` 必须保留；`deploy_vector.sh` 新增注释说明）。
+
+- [x] **动作层打通（v4.1.10，实机验证「有反应」）**：action 层从 767/768/769 换成移植版自己的 `click()`/`longAction()` 后仍无反应，
+      根因是 **`click()` 广播发错了包**。反编译 `com.oplus.healthservice` + `dumpsys package` 全量枚举接收器后坐实：
+      **只有 `com.oplus.healthservice`**（`com.oplus.globalcollect.collect.receiver.StylusPressReceiver`）声明了
+      `PENCIL_SINGLE_CLICK` / `PENCIL_DOUBLE_CLICK` / `STYLUS_BUTTON_STATE_CHANGED`；`com.coloros.note` 与 `com.oplus.screenshot`
+      **一个都没声明**——旧目标列表因此把每个单击/双击动作静默丢弃（笔身按键不走此函数，所以一直「正常」）。
+      修法：`click()` 目标列表改为 `{com.oplus.healthservice, com.coloros.note, com.oplus.screenshot}`（无接收器=无害 no-op，保留后两者做兼容）。
+      另：`StylusPressReceiver` **完全忽略 `action` extra**——单击→`onStylusSingleDoubleClick(true)`、双击→`(false)`。
+      OEM 行为（`StylusPressManager.onStylusSingleDoubleClick`）：**屏幕解锁**时 `startRouletteService` 弹**笔功能转盘**（`CallRouletteService`）；
+      **锁屏/儿童模式/折叠提示**时 `stopRouletteService`（按设计什么都不做）——首次测试无反应正是因为当时**锁屏**（`isScreenLocked=true`）。
+      长按（`longAction`→`button("down")`→`STYLUS_BUTTON_STATE_CHANGED`）→ **收藏/圈选浮窗**（`StylusTouchInterceptWindow`），已手动广播验证能弹窗。
+      实机结果：4 个手势现在**都能弹出转盘**（用户确认「所有都是弹出转盘」）。
+      另修：`dispatchStripGesture` 的 131 桶改用 `tap()`（320ms 双击判别），因为真机上**双击常被固件拆成两次 131**，
+      逐次 `click(false)` 会让 OEM 把转盘**开一下又关一下**（净无反应）；`tap()` 归并成一次 `click(true)`。132（F2/双击）路径也实测可达。
+      ⏳ **待决策**：目前「滑动/单击/双击」全部落到同一个转盘，未做区分（框架层天然分不开上滑/下滑）。
+      若要四手势各自独立 → 见下一条 `.kl` overlay 方案。
+- [x] **手势原始判别位已拿到（供将来细分 6 手势）**：笔的 HID notify `00002a4d-…` 报文字节可区分手势 ——
+      `02 00 08 00 00`=上滑、`02 00 04 00 00`=下滑、`02 02 00 00 00`=双击、`02 00 00 02 00`=长按（与日志时间戳一一对应）。
+      但 ROM 的 `Vendor_17ef_Product_622e.kl` 把「上滑|下滑|单击」都并成 **F1(131)**、「双击」→F2(132)、「长按|挤捏」→F3(133)，
+      框架层只能分 3 组。要 6 手势各自独立：加一个**模块级 `.kl` overlay**（`module/system/usr/keylayout/Vendor_17ef_Product_622e.kl`）
+      把 6 个 `0x0c06xx` usage 映成 6 个不同键，再把 `stripGesture()`（v4.1.10 命名，原 `stripGestureToNativeKey()`）扩成 6 项即可
+      （KernelSU magic mount 在 post-fs-data 生效，早于 system_server 读 keylayout）。
+      ⚠️ 磁盘上现有那份 `.kl` **属于 ROM**（无模块覆盖，md5 `eb89c57180b3309badb03aaf9d2630bf`）；覆盖它前先确认 `dumpsys input` 里
+      该节点的 `KeyLayoutFile` 指向新文件。
 - [ ] `LenovoConsumerGestureReader` 依赖 native 库 `libpeninput.so`（`System.load(nativeLibraryDir+"/libpeninput.so")` 提供 `nativeGrab`=EVIOCGRAB），
       移植版 Hook APK **未打包**该 .so（v4.1.3 / v4.1.4 / v4.1.5 均无 `lib/`），运行期报
       `native pen input load failed: UnsatisfiedLinkError … libpeninput.so not found` →「consumer gesture reader」这条路（Lenovo Tab Pen Pro
-      触控条原始事件直读）当前不可用。**但触控条已由框架路径（`PhoneWindowManager` 拦截 + `getScanCode` 分派）覆盖，功能不受影响**；
-      且此路 `EVIOCGRAB` 会独占设备，与框架路径**只能二选一**。名称串已同步修好，仅作将来备选。
+      触控条原始事件直读）当前不可用。**但触控条已由框架路径（`PhoneWindowManager` 拦截 + `getKeyCode` 分派）覆盖，功能不受影响**；
+      且此路 `EVIOCGRAB` 会独占设备，与框架路径**只能二选一**（真机已确认 `native pen input load failed: … libpeninput.so not found`
+      只是这一路不可用，不影响框架路径）。名称串在 v4.1.8 里按真机事实改成了 `lenovo tab pen`，此路仅作将来备选。
       若要启用：从原始 TB710FU 移植源取预编译 .so 放进 `hook/source/resources/lib/arm64-v8a/`，或自写 ~20 行 JNI（一个 `ioctl` 封装）。
 
 ## P1 — 最小闭环（连接 + 电量）
@@ -143,3 +178,378 @@
 - [x] 回归验证（真实笔，重启后）：4 次吸附延迟分别为 **1s / 0s / 0s / 1s**；其中 1s 那次正是 `trusted=false`（原 21 秒路径）；`delayed` 与 `abandoned` 零出现；成对重复行消失
 - [x] 附带收益：`charging` 不再恒 0，改由 `cps_wls_en` 驱动（吸附时 `charging=1`）；`CPS uevent requested` 首次出现，证明路径解析生效
 - [ ] 观察项：笔接近满电时驱动会脉冲 `cps_wls_en`（1↔0），`charging` 因此可能轻微抖动（`monitor_charging_cache` 已按变化才发布，实际约每 10s 最多一次）
+
+## P0.7 手势功能对齐设备管理配置（v4.1.11，2026-09-18）
+
+**背景**：v4.1.10 为了「先让它有反应」把 `click()` 的广播目标改成永远包含 `com.oplus.healthservice`，
+结果 **4 个手势全部弹转盘**（用户实测「所有都是弹出转盘」），**丢掉了设备管理里配置的原有功能**。
+用户明确要求恢复：`呼出调色盘` / `橡皮擦切换` 等。
+
+**根因**：`com.oplus.healthservice` 的 `StylusPressReceiver` **完全忽略 `action` extra**，收到
+`PENCIL_SINGLE_CLICK`/`PENCIL_DOUBLE_CLICK` 一律 `onStylusSingleDoubleClick()` → 解锁时弹
+`CallRouletteService`（转盘）。所以「发到 healthservice」== 「无条件弹转盘」。
+
+**本机实测的配置值**（`settings list global | grep ipe_pencil`）：
+| 键 | 值 | 含义 |
+|---|---|---|
+| `ipe_pencil_single_click` | **3** | 呼出调色盘（show_color） |
+| `ipe_pencil_double_click` | **1** | 橡皮擦切换（switch_eraser） |
+| `ipe_pencil_long_click` | 0 | 无 |
+
+枚举（反编译 `com.oplus.ipemanager` 的 `IPESettingManager` + `setting/fragment/p.java`）：
+`1=橡皮擦切换 2=切回上一支笔 3=呼出调色盘`（**app 内**由 doodle 引擎
+`MODE_TOGGLE_ERASER/MODE_TOGGLE_LAST_PEN/MODE_PICK_COLOR` 处理）、`4=打开转盘`（→ healthservice）、`0=无`。
+
+**修复（v4.1.11 / versionCode 410011 / md5 `02ecc6bd093a84a76390b471a8f0692c`）**：
+`SystemStylusHooks.click()` 恢复**按配置值条件路由**——
+`i == 4` → 只发 `com.oplus.healthservice`（转盘）；
+`i ∈ {1,2,3}` → 发 `{com.coloros.note, com.oplus.screenshot}`（app 内切笔模式，正是设备管理配置的功能）。
+⚠️ 这条条件是**承重**的，源码里已写长注释，勿再改成「都发 healthservice」。
+
+**待验证**：重启后用户做单击/双击，确认分别是「调色盘」和「橡皮擦」。
+（`dumpsys package` 看不到 `com.coloros.note` 的 manifest 接收器 —— 该类接收器是 doodle 引擎
+在画布激活时**动态注册**的，所以清单里没有属正常；`NoteToolkitHooks` 正是挂在
+`com.oplusos.vfxsdk.doodleengine.toolkit.Toolkit` 的 `receiverSingleClick/receiverDoubleClick` 上。）
+
+## P0.8 便签手写笔记闪退（native，2026-09-18 完成根因定位，**非本模块引起**）
+
+**现象**：`com.coloros.note` 打开手写笔记后进程崩溃；`/data/tombstones/tombstone_15..23` 共 **9 个**
+签名**完全一致**（确定性，非竞态）。
+
+**崩溃点（已逐字节还原）**：
+```
+pc = 0x0  ← blr 到一个 NULL 函数指针；x0 = 0
+#01 EglContext3::eglInit()+76            (libSuniaEngine.so，BuildId 1fa3bc13…)
+#02 EglContext3::EglContext3(EglContext3*, bool)+68
+#03 ToolFactory::ToolFactory()+156
+#05 GroupFactoryManager::createFactory()  #06 CanvasManager::CanvasThreadHandlerFunc
+#07 ThreadHandler::ThreadFunc             线程名 DefaultDispatch
+```
+偏移换算：`.text` 的 paddr/vaddr 差 `0x4000` → `pc 0x697cbc` 对应文件偏移 `0x693cbc`。
+
+**完整调用链（r2 反汇编 + 重定位解析得到）**：
+```c
+void EglContext3::eglInit() {                     // @0x697c70
+    EglInit::makeTempEglContext();                // 建临时 EGL 上下文
+    glewExperimental = GL_TRUE;
+    glewInit();                                   // @0x828bcc (48B)
+    EglInit::clearTempEglContext();
+    dpy = __eglewGetDisplay(EGL_DEFAULT_DISPLAY); // @0x697cbc  blr → NULL → 崩
+}
+```
+- 崩溃指令 `0x697cbc: blr x8`，`x8 = [[GOT 0xc2a3a8]]`；该 GOT 槽的重定位符号 = **`__eglewGetDisplay`**。
+- `glewInit()` 实现：
+  ```c
+  r = glewContextInit();                 // 取 eglGetProcAddress("glGetString") 后调 glGetString(GL_VERSION)
+  if (r != 0) return r;                  // ← 无 current 上下文 → 返回 GLEW_ERROR_NO_GL_VERSION
+  dpy = eglGetProcAddress("eglGetCurrentDisplay")();
+  return eglewInit(dpy);                 // 只有走到这里才填 __eglew* 全套指针
+  ```
+- `eglewInit(dpy)` 开头（@0x81d73c）：`eglInitialize/eglQueryString` 经 `eglGetProcAddress` 取到后，
+  **`if (eglInitialize(dpy,&maj,&min) != 1) return;`** —— 若 `dpy` 是 `EGL_NO_DISPLAY`（= 本线程无 current 上下文）
+  则直接返回，**`__eglewGetDisplay` 保持 NULL**。
+- `EglInit::makeTempEglContext()`（@0x69878c）里 `eglCreateContext` 与
+  **`eglMakeCurrent(dpy, EGL_NO_SURFACE, EGL_NO_SURFACE, ctx)` 的返回值都被丢弃**；
+  库内只有 `eglGetDisplay/eglInitialize/eglChooseConfig` 三条失败日志字符串，**没有 createContext/makeCurrent 的**。
+  ⇒ **只要这两步任一失败，引擎静默地没有 current 上下文，紧接着就空指针崩溃。**
+
+**排除项（都实测过）**：
+- ❌ 本模块的 Java hook：把 `com.coloros.note` 从 Vector scope 移除（免重启生效）后**仍崩**。
+- ❌ 本模块禁用 `com.inkdye.lenovopentocoloros`：`pm enable` 后**仍崩**。
+- ❌ 本模块写属性：全仓无 `resetprop`；`grep Settings.*put*` 只写笔相关键。
+- ❌ 应用更新：`com.coloros.note` 16.7.2（`lastUpdateTime=2026-09-12`）与本机 `lastUpdateTime=1970` 的
+  ROM 自带版 `/my_stock/del-app/OppoNote2/OppoNote2.apk`，**`glewInit` 与 `eglInit` 崩溃点代码完全相同**，
+  两版 `makeTempEglContext` 也都是「不检查 createContext/makeCurrent」→ **回滚应用不能修**。
+- ❌ `ro.hardware.chipname`（日志里 `Access denied finding property "ro.hardware.chipname"`）：
+  该串只出现在 `/system/lib64/libonnxruntime.so`、`/vendor/lib64/libtensorflowlite_c.so`、
+  `/odm/lib64/libancbase_rt_fusion.so`（手写**识别模型**加载器），属**无害回退的红鲱鱼**，与 EGL 无关。
+- ❌ 可更新 GPU 驱动：`ro.gfx.driver.1=com.qualcomm.qti.gpudrivers.sun.api35` 是 `vendor/app` 系统应用
+  （从未更新），且 `dumpsys package com.coloros.note` 无 `gpuDriverPaths` → 便签**没有** opt-in。
+
+**设备侧实测（本仓库外的临时探针，`app_process` + `android.opengl.EGL14`）**：复刻
+`makeTempEglContext` 的完整序列（`eglGetDisplay → eglInitialize → eglChooseConfig(与引擎同一组 attribs) →
+eglCreateContext(ES3.0) → eglMakeCurrent(surfaceless) → glGetString`）**在本机全部成功**：
+```
+1 eglGetDisplay      -> ok        err=0x3000
+2 eglInitialize      -> true      EGL 1.5 Android META-EGL
+3 eglChooseConfig    -> true n=1  (RGBA8888 / ES2|ES3 / CONFORMANT=ES3 / PBUFFER|WINDOW)
+4 eglCreateContext   -> ok
+5 eglMakeCurrent(no surface) -> true
+6 glGetString(GL_VERSION) -> OpenGL ES 3.2 V@0800.72, Adreno 830
+```
+驱动能力也齐（`dumpsys SurfaceFlinger`）：**`EGL_KHR_surfaceless_context` 与 `GL_OES_surfaceless_context` 均在**。
+⇒ **设备本身完全支持这条路径**，失败只发生在便签进程内部 ⇒ 需**进程内**探针才能定位最后一步。
+
+**下一步（二选一，需用户决定）**：
+1. **进程内 EGL 探针（推荐，改动小）**：在 `NoteToolkitHooks` 加一个一次性 `EglDiag`，用
+   `persist.lenovo.penbridge.egl_diag=1` 开关，在 `com.coloros.note` 里跑同一组 EGL14 调用并把
+   每一步结果写 `/data/local/tmp/note_egl_diag.txt`。若进程内**成功** ⇒ 是 OPPO 应用/引擎自身问题
+   （外部不可修，只能换便签或打 .so 补丁）；若进程内**失败** ⇒ 是进程环境问题，接着做第 2 步。
+   → **[已实现，v4.1.12]** 见下方「进程内 EGL 探针 v4.1.12」。
+2. **框架 A/B**：`touch /data/adb/modules/{zygisk_vector,rezygisk,hma_oss_zygisk}/disable` 后重启，
+   再试手写笔记。用于排除「某个 Zygisk/Xposed 框架注入便签进程破坏 native GL 初始化」。
+   ⚠️ 会同时停掉笔桥（重启后记得删掉这些 `disable` 文件再重启一次）。
+
+**可能的修法（若确认是引擎自身）**：给 `/data/app/.../com.coloros.note-.../lib/arm64/libSuniaEngine.so`
+打补丁（root 可直接覆写该文件，签名校验只针对 APK 安装）——把 `eglInit` 里的
+`blr x8`（`0x697cbc`）换成直接 `bl <PLT eglGetDisplay @0xb90c20>`，并让 `glewInit`
+无条件走 `eglewInit`（`0x828bd8` 的 `cbz w0` 前插 `mov w0, wzr`）。**风险高、易被应用更新覆盖**，非首选。
+
+### 进程内 EGL 探针 v4.1.12（2026-09-18 实现）
+
+新增 `hook/source/sources/.../NoteEglDiag.java`（一次性、带开关、默认关闭），由
+`NoteToolkitHooks` 在两处相位调用：`Application.onCreate` / `MyApplication.onCreate`（相位
+`app-oncreate:*`）与 `Toolkit.onAttachedToWindow` / `onResume$paint_intermediate_release`
+（相位 `toolkit:*`）。
+
+- **开关**：`settings put global lenovo_penbridge_egl_diag 1`（也接受 `persist.lenovo.penbridge.egl_diag=1`）。
+  仅当包名 == `com.coloros.note` 时才生效，避免扰动 `com.oplus.screenshot`。每相位每进程只跑一次。
+- **跑什么**：先记录「探针前已 current 的 EGL」状态，再分别在**调用线程**与**另起 worker 线程**上复刻
+  `eglGetDisplay → eglInitialize → eglQueryString → eglChooseConfig(PBUFFER_BIT/ES2) →
+  eglCreateContext(ES3) → eglMakeCurrent(双 EGL_NO_SURFACE) → glGetString(GL_VERSION)`，逐步骤记录
+  `eglGetError()`。分两线程是刻意的——**崩溃发生在非主线程**（`DefaultDispatch`），只跑主线程答不了问题。
+- **附带环境取证**：`/proc/self/maps` 里 libEGL/libGLESv2/libglew/libSuniaEngine/libadreno 等映射行、
+  `nativeLibraryDir` 列表、dataDir、ABI、fingerprint。**若发现便签自带 `libEGL.so` 遮蔽系统库即为铁证**。
+- **落盘**：主 `/data/local/tmp/note_egl_diag.txt`（需 root 预先 `touch` 并 `chmod 666`；SELinux
+  `Enforcing` 下 app 写 `shell_data_file` 很可能被拒），镜像 `files/note_egl_diag.txt`
+  （`su -c cat /data/data/com.coloros.note/files/note_egl_diag.txt`，一定可写）。
+- **判读**：进程内成功 ⇒ OPPO 引擎自身问题（外部不可修）；失败 ⇒ 进程环境问题，转下一步 ①/②。
+- 本次探针**不与 EGL 生命周期冲突**：不调用 `eglTerminate`，只销毁自己建的 context。
+
+### 进程内探针**实测结论（2026-09-18，决定性）**：进程内 EGL **完全正常** ⇒ **OPPO 引擎自身问题**
+
+v4.1.12 部署 + 重启 + `cmd activity start-activity -n com.coloros.note/com.nearme.note.main.MainActivity`
+起进程后（注：`am start -n` 对该包一律报 "Activity class does not exist"，但
+`cmd activity start-activity -n` 与 `monkey -p` 均可正常拉起），探针落盘
+`/data/data/com.coloros.note/files/note_egl_diag.txt`（24 KB）。
+`/data/local/tmp/...` 那条路**实测 EACCES**（SELinux Enforcing 下 app 写 `shell_data_file` 被拒），
+镜像路径按设计生效。
+
+**4 次进程启动 × 2 条线程（主线程 + 另起 worker）= 8/8 全部成功**，逐项一致：
+```
+eglGetDisplay(DEFAULT)      -> ok        err=EGL_SUCCESS
+eglInitialize               -> true v1.5  1.5 Android META-EGL
+EGL_KHR_surfaceless_context -> true
+eglChooseConfig             -> true n=4
+eglCreateContext(ES3)       -> ok
+eglMakeCurrent(surfaceless) -> true      err=EGL_SUCCESS
+glGetString(GL_VERSION)     -> OpenGL ES 3.2 V@0800.72 (GIT@3967b80d3b, Ica4ce9bea6, 1770914544) (Date:02/12/26)
+glGetString(GL_VENDOR)      -> Qualcomm
+glGetString(GL_RENDERER)    -> Adreno (TM) 830
+glGetError                  -> 0x0
+```
+覆盖的进程：`com.coloros.note`（主进程，2 次）与 `com.coloros.note:tbl_privileged_process0`
+（2 次）—— **两个进程都是 8/8 成功**。
+
+**环境取证（排除掉所有「环境」解释）**：
+- `nativeLibraryDir` 里只有 `libsuniabase.so` + `libSuniaEngine.so` 是与图形相关的（共 31 个条目），
+  **没有任何自带的 `libEGL.so` / `libGLESv2.so` / GLEW** ⇒ 不存在「便签自带 libEGL 遮蔽系统库」。
+- `/proc/self/maps` 里 EGL/GLES 全部来自系统：`/system/lib64/libEGL.so`、
+  `/system/lib64/libGLESv2.so`、`/system_ext/lib64/libvulkanextimpl.so`、
+  `/vendor/lib64/libadreno_utils.so`、`/system/lib64/libegl_flags.so`、`libui.so`、`libvulkan.so`。
+- 探针**运行前**该线程就是干净的 `EGL_NO_DISPLAY / EGL_NO_CONTEXT / EGL_NO_SURFACE`
+  （没有「卡住的 current context」「别的 display」这类脏状态）。
+- 主线程与后台线程**结果完全相同** ⇒ 不是线程亲和性 / 非主线程限制问题。
+
+⇒ 按既定判读标准：**进程内成功 ⇒ 是 OPPO 应用/引擎自身问题**。
+与 P0.8 前面的逐字节分析（`glewInit()` 在有 current context 之前被调用 ⇒ `glewContextInit()` 因
+`glGetString(GL_VERSION)` 拿不到版本而返回 `GLEW_ERROR_NO_GL_VERSION` ⇒ `__eglewGetDisplay` 保持 NULL；
+而 `makeTempEglContext()` 又把 `eglCreateContext`/`eglMakeCurrent` 的返回值丢掉 ⇒ 失败无声）
+**互相印证**：**同一进程、同一线程、同一组调用我们能跑通，引擎自己跑不通 ⇒ 是引擎调用时序/错误处理的问题。**
+
+**因此外部可做的只剩两条**（与前面判断一致）：
+1. 换应用（不用 `com.coloros.note` 手写）；
+2. 给 `libSuniaEngine.so` 打补丁（见上文「可能的修法」），**风险高、且会被应用更新覆盖**。
+
+**开关现状**：`settings put global lenovo_penbridge_egl_diag 0` —— 已关闭（默认关，避免每次便签进程
+启动都写 24 KB）。要再采集（例如抓 `toolkit:*` 相位）：`settings put global lenovo_penbridge_egl_diag 1`，
+复现后 `su -c cat /data/data/com.coloros.note/files/note_egl_diag.txt`。
+⚠️ 注意 `toolkit:onAttachedToWindow` / `toolkit:onResume$paint_intermediate_release` 两个相位在本次
+**没有触发**（只开了便签列表页，没进手写画布），所以「画布阶段是否也正常」仍未被直接观测；
+但既然同进程同时刻连 worker 线程都能成功，进一步采集的边际价值很低。
+
+### 决定性加强证据：**同 PID 先通过探针、随后就崩在引擎自己那行**（2026-09-18 18:44–18:45）
+
+原以为「只开了列表页所以引擎没跑到崩点」，实际不然 —— **便签启动后几十秒内自己就崩了**，
+而且崩的正是那几个刚跑完探针的进程。`/data/tombstones` 里新出现了两条（重启后写入）：
+
+```
+tombstone_25  18:44:14  pid 12039  >>> com.coloros.note <<<
+tombstone_26  18:45:52  pid 19643  >>> com.coloros.note <<<
+ #00 pc 0x0 <unknown>
+ #01 pc 0x697cbc  libSuniaEngine.so (EglContext3::eglInit()+76)     <-- 与之前 9 条**同一偏移**
+ #02 pc 0x698024  libSuniaEngine.so (EglContext3::EglContext3(EglContext3*, bool)+68)
+```
+
+对照探针日志里的同一个 PID：
+
+| pid | 探针（相位 `app-oncreate`） | 探针结果 | 之后的结局 |
+|---|---|---|---|
+| **12039** | 18:44:11.737 | 主线程 ✅ + worker ✅ → `GL_VERSION = OpenGL ES 3.2 ... Adreno 830` | 18:44:14 崩在 `EglContext3::eglInit()+76` |
+| **19643** | 18:44:22.386 | 主线程 ✅ + worker ✅ → 同上 | 18:45:52 崩在同一偏移 |
+| 17286 / 20775 | 18:44:12 / 18:44:23 | 同样 ✅ | （`:tbl_privileged_process0`，未见 tombstone） |
+
+**这是本案最硬的一条证据**：在**同一个进程**里，探针能在 `t=0` 与 `t=+11s` 把
+`eglGetDisplay→eglInitialize→eglChooseConfig→eglCreateContext(ES3)→eglMakeCurrent(surfaceless)→
+glGetString(GL_VERSION)` 全部跑通（主线程与后台线程都行），**而引擎自己在几十秒后崩在
+`blr __eglewGetDisplay`（NULL）**。⇒ 排除「进程环境」「线程亲和性」「驱动能力」「库被遮蔽」
+「便签自带 libEGL」等一切环境解释，**只能是 `libSuniaEngine.so` 自己的调用时序 + 丢弃返回值的错误处理**。
+
+**副作用观察**：便签现在**自己就会崩**（不需要用户手写、进列表页几十秒即崩），
+所以在这台机器上 `com.coloros.note` 目前基本不可用 —— 与用户的主观感受一致。
+
+
+## P0.9 `vendor.oplus.hardware.urcc-service` 持续崩溃（2026-09-18 完成根因定位，移植缺件）
+
+**现象**：`/odm/bin/hw/vendor.oplus.hardware.urcc-service` 反复崩、反复被 init 拉起。
+今日 `/data/tombstones` 共 **32 条**：urcc **24 条**、`com.coloros.note` 8 条（见 P0.8）、
+`system_server` 3 条（见 P0.10）。urcc 的 24 条**签名完全一致**。
+
+**签名**（tombstone_00 为代表）：
+```
+pid: 1868, tid: 1868, name: UrccMainThread  >>> /odm/bin/hw/vendor.oplus.hardware.urcc-service <<<
+signal 11 (SIGSEGV), code 1 (SEGV_MAPERR), fault addr 0x0
+Cause: null pointer dereference
+ #00 pc 0x0 <unknown>                       <-- 调了个空函数指针
+ #01 pc 0x58bec /odm/lib64/liburcccore.so (urccResStateRequest+396)
+ #02 pc 0x512c  .../urcc-service (Urcc::urccResStateRequest(aidl ...)+96)
+ #03 pc 0xd570  /odm/lib64/vendor.oplus.hardware.urcc-V1-ndk.so (IUrcc::onTransact+5144)
+ #04 ... libbinder_ndk.so / libbinder.so     <-- 普通 Binder 调用路径
+```
+崩溃线程既可能是 `UrccMainThread`，也可能是 `binder:<pid>_N` —— 即**任何**走到该 AIDL 调用的
+线程都会崩，不是单线程问题。
+
+**逐指令定位**（`liburcccore.so`，md5 `1c160f3dad18a60109b20ca3698449f2`）：
+```
+0x58bd8  adrp x9, 0x93000
+0x58bdc  ldr  x9, [x9, 0x4d8]   ; x9 = UrccCtlServer::uah_lib   (重定位符号 _ZN13UrccCtlServer7uah_libE)
+0x58be0  ldr  w20, [x8]         ; 请求 id
+0x58be4  ldr  x8, [x9, 0xc0]    ; x8 = uah_lib->[0xc0]   <-- 无 null 检查！
+0x58be8  mov  w0, w20
+0x58bec  blr  x8                ; <-- pc=0，SIGSEGV
+```
+槽位映射（由 `UrccCtlServer::loadUahCoreLib()` @0x4d804 的 dlsym 序列解出）：
+- `+0x88` = `dlopen("/odm/lib64/libuahcore.so")` 的句柄
+- `+0x90` = `uah_init`、`+0xa0` = `uah_request`、`+0xa8` = `uah_get_feature_status`、
+  `+0xb0` = `uah_allow`、`+0xb8` = …、**`+0xc0` = `uah_get_mode_status`**、`+0xc8` = `uah_get_feature_status`
+- 同一函数里 `+0xc8` 的调用点**有** `cbz x9, <bail>` 保护（0x58b5c），而 `+0xc0` 的调用点**没有**
+  —— 上游自己的 null 检查不一致，只有「UAH 库缺失」这种设备才会暴露。
+
+**根因**：**`/odm/lib64/libuahcore.so` 在这台设备上根本不存在**。
+```
+/odm/lib64/libuahcore.so             MISSING   <-- 铁证
+/odm/lib64/liboplus_gpu_utils.so     MISSING   (loadUahCoreLib 也 dlopen 这个)
+/vendor/lib64/libpowerhal.so         MISSING   (同上)
+/odm/lib64/liburcccore.so            PRESENT
+/odm/bin/hw/vendor.oplus.hardware.urcc-service  PRESENT
+$ find /odm /vendor /system -iname '*uah*'   ->  只有 liboplus-uah-client.so（不是 core）
+```
+`dlopen` 失败 ⇒ 句柄 NULL ⇒ 之后所有 `dlsym(NULL, "uah_*")` 全部返回 NULL ⇒ `uah_lib` 表**整表为空**
+⇒ 第一次 `UrccResStateRequest` 就撞 `+0xc0`（`uah_get_mode_status`）⇒ 崩。init 拉起后再被调用再崩
+⇒ **崩溃循环**。
+
+**为什么这台设备会缺件**：`vendor.oplus.hardware.urcc-service` 是 **OPPO 的性能/调度总控**
+（读它的 rc 就明白：它去 `chmod`/写 `/proc/perfmgr/boost_ctrl/eas_ctrl/*`、`/proc/oplus_scheduler/...`、
+`/proc/game_opt/...`、`/proc/ufsplus_ctrl/*`、`/sys/devices/platform/soc/soc:oplus-omrg/*`、`oplus_cpu_boost`、
+`ufshc` devfreq、`/dev/cpuctl/*` …）。实测这些 **OPPO 专属内核节点全部 MISSING**：
+```
+/proc/perfmgr/boost_ctrl/eas_ctrl      MISSING
+/proc/oplus_scheduler                  MISSING
+/proc/game_opt                         MISSING
+/proc/ufsplus_ctrl                     MISSING
+/sys/devices/platform/soc/soc:oplus-omrg  MISSING
+/sys/class/devfreq/kgsl-busmon         PRESENT   (高通自有，与 OPPO 无关)
+uname: Linux 6.6.82TB522FU ... aarch64     ro.board.platform=sun  ro.soc.model=SM8750P
+```
+即：**移植时把 OPPO 的 odm 服务/库搬了过来，但 Lenovo/高通侧的内核接口和 `libuahcore.so` 没跟过来。**
+该 HAL 在本机**理论上不可能工作**（它要控的调度节点一个都不在）。它在 `/odm/etc/vintf/manifest/`
+里有声明（`vendor.oplus.hardware.urcc-service.xml`），所以框架侧 UAH 会去 bind 它：
+`UAH-UahAdaptHelper: getAidlService uah urcc service = vendor.oplus.hardware.urcc.IUrcc$Stub$Proxy@…`
+⇒ 调用 ⇒ 崩 ⇒ 循环。
+
+**影响评估**：24 次/约 2 小时，崩溃-重启的耗电/日志噪音是实打实的；功能上因为该 HAL 本来就不可能工作，
+**丢掉它不会比现在更差**（UAH 拿不到服务会走降级分支）。**但它不是 note 闪退的原因，也不是 system_server
+崩的原因**（签名/调用栈完全无关）。
+
+**可选处置（按推荐度）**：
+1. **只做可观测性 + 忽略**：`setprop persist.vendor.oplus.uah.debugenable 1` 前先确认；urcc 崩一次就
+   重启一次，代价可接受。**零风险**，先这样跑。
+2. **让 init 别再拉起它**：用 KernelSU 模块 overlay `/odm/etc/init/vendor.oplus.hardware.urcc-service.rc`
+   把 service 改成 `disabled`（并删掉那些注定失败的 `chmod` 段）。副作用：vintf 里仍声明该 AIDL HAL，
+   `init`/`vintf` 可能报 "HAL not found"；需实测框架是否因此降级异常。
+3. **补齐缺件**：从**同版本 OPD2409 (ColorOS 16) 的 odm 镜像**里取 `libuahcore.so` +
+   `liboplus_gpu_utils.so` + `libpowerhal.so` 放进 `/odm/lib64/`。⚠️ **ABI 必须完全匹配**，
+   且这些库还会去碰上面那些不存在的内核节点 —— **不保证能治好，可能只是把 NULL 崩换成别的崩**。
+4. **不建议**：给 `liburcccore.so` 打补丁（把 0x58be4 的空槽调用绕开）。治不了根，且该库属于 odm，
+   升级即失效。除非 1/2 都被证明不可接受。
+
+**验证已做**：`getenforce=Enforcing`（与 SELinux 无关）；无 dmesg 噪声（init 的报错走 logcat 且已 rollover）。
+
+## P0.10 `system_server` 偶发崩溃（ART 内部 abort，2026-09-18 定位到失败模式，未定因）
+
+今日 3 条 `system_server` tombstone（05 / 12 / 29），**签名一致**：
+
+```
+pid: 2271, tid: 3446, name: HeapTaskDaemon   >>> system_server <<<      (05 是 Thread-2, 29 是 HeapTaskDaemon)
+signal 11 / 6,  fault addr 0x9 / --------
+Abort message: 'Failed to recognize implicit suspend check at 0xaa5e46b4;
+                thread state = Runnable; mutator lock shared held = false;
+                code ranges = {{0x66800000, 2000000}, {0x62800000, 2000000}, ...
+                               {0xaa45c000, 2ea058}, {0x72c5052340, eed0}}'
+backtrace:
+ #00 libart.so (art::ReferenceMapVisitor<art::RootCallbackVisitor,false>::VisitFrame()+2820)
+ #01 libart.so (StackVisitor::WalkStack<...>(bool)+340)
+ #02 libart.so (art::Thread::VisitRoots(art::RootVisitor*, art::VisitRootFlags)+1088)
+ #03 libart.so (art::gc::collector::MarkCompact::RunPhases()+660)
+ #04 libart.so (art::gc::collector::GarbageCollector::Run(...)+328)
+ #05 libart.so (art::gc::Heap::CollectGarbageInternal(...)+608)
+ #06 libart.so (art::gc::Heap::ConcurrentGC(...)+168)
+ #07 libart.so (art::gc::Heap::ConcurrentGCTask::Run(art::Thread*)+76)
+ #08 libart.so (art::gc::TaskProcessor::RunAllTasks(art::Thread*)+124)
+ #09 /system/framework/arm64/boot-core-libart.oat (art_jni_trampoline+112)
+ #10 boot-core-libart.oat (java.lang.Daemons$HeapTaskDaemon.runInternal+184)
+```
+三条的 abort 文本逐字相同、只有 PC 与 `code ranges` 基址不同（05: `0xa9982548`，12: `0xaa5e46b4`，
+29: `0xaa604754`）。**失败模式**：ART 的 **并发 MarkCompact（压缩式）GC** 在
+`Thread::VisitRoots → StackVisitor::WalkStack → ReferenceMapVisitor::VisitFrame` 遍历**某个线程**的栈时，
+发现该线程 PC 处的指令**不是**它期望的「隐式 suspend check」序列（且该线程还是 `Runnable`、
+未持 mutator lock 共享锁），于是 `LOG(FATAL)` 主动 abort。
+
+**注意**：被 abort 的线程（`HeapTaskDaemon`）栈是纯 ART + boot-core-libart.oat —— 出问题的**不是**
+崩溃线程本身，而是**被它遍历到的那条线程**。abort 里给出的 PC（如 `0xaa604754`）**落在它自己列出的
+code range `{0xaa45c000, 2ea058}` 内**，也就是说「地址在已注册的 oat 代码段里，但那段代码不是
+stack map 期望的内容」⇒ 指向 **执行中的代码与 oat/stack map 不一致**。
+
+**两个候选（尚未区分，需 A/B）**：
+- **(a) ROM 的 ART/boot image 与运行时不匹配**：这是移植 ROM 最典型的一类问题。三条 tombstone 的
+  帧 #09/#10 落在 `/system/framework/arm64/boot-core-libart.oat`，而 abort 的 code range
+  `{0xaa45c000, 2ea058}`（约 3MB）大小也吻合 boot image 量级。`/system/framework/arm64/` 下还有
+  OPPO 特有的 `boot-QPerformance.*` / `boot-UxPerformance.*`（带 `.fsv_meta` 完整性元数据），
+  以及 OPPO 私有 `dalvik.vm.enable_pr_dexopt=true` / `dalvik.vm.appimageformat=lz4` /
+  `dalvik.vm.isa.arm64.variant=oryon`。**若 boot.art/oat 与 `libart.so` 不同源，就会出现「代码段对、
+  内容不对」**。
+- **(b) hook 框架 deopt 打补丁**：Vector 安装 hook 时会对目标方法做 `ThreadList::SuspendAll` + deopt
+  （见 P0.5），deopt 会把 oat 里方法入口改成 trampoline / 就地补丁。若补丁与并发压缩 GC 交叠，
+  就会让「代码段里 PC 处不是预期的隐式 suspend check」。**本模块确实注入 system_server**
+  （这正是笔桥需要的）。
+
+**排除项**：三条 tombstone 里**都没有** urcc 相关帧（P0.9 是独立问题）；崩溃线程栈**没有任何** hook
+框架帧（`/data/adb/...`、libzygisk、lspd 只出现在内存映射 dump 里，属正常注入痕迹，**不是**因果证据）。
+`grep -lE "/data/adb/(modules|lspatch)|libzygisk|zygiskd|lspd|rezygisk|libhm"` 命中 05/12/15/16/29 ——
+这只是 Zygisk 在每个进程都注入，**不能**当罪证。
+
+**下一步（区分 a/b，按代价从小到大）**：
+1. **先数频率**：清空 `/data/tombstones`（或记住序号），正常用一天，看 system_server 是否会再崩、
+   以及是否**只在装了 hook 模块时**出现。当前 3 次/2h 样本太小。
+2. **框架 A/B**：`touch /data/adb/modules/{zygisk_vector,rezygisk,hma_oss_zygisk}/disable` 后重启，
+   复现「之前必崩」的场景。这条能一刀切开 (b)。⚠️ 会同时停掉笔桥，记得删掉 `disable` 再重启。
+3. **验证 (a)**：比对 `libart.so` 的 BuildId 与 boot image 的编译指纹
+   （`strings /system/framework/arm64/boot.oat | grep -i "dex2oat"`、`/system/framework/arm64/boot.art`
+   的 `image_checksum`/`oat_checksum` 与 `libart.so` 的 `ArtMethod` 布局版本是否同源）；
+   以及 `/data/dalvik-cache/arm64/` 里是否有**别的 ROM 留下的陈旧 odex**（移植后未清 data 的经典坑）。
+4. **缓解（若能确认 a）**：避开压缩式 GC（`-Xgc:` 指到非 MarkCompact 的 collector，或调
+   `dalvik.vm.gc.*`），使 ART 不走 `MarkCompact::RunPhases` 这条遍历路径。**未验证，先别动**。
+
+**结论**：**已把失败模式钉死在 ART 的 `MarkCompact → Thread::VisitRoots → WalkStack → VisitFrame`
+里**（不是 binder、不是 HAL、不是我们的 Java 代码），但 **(a) ROM ART/boot-image 不同源** 与
+**(b) hook deopt 补丁** 两种成因**尚未区分**，需按上面 1→2 步做 A/B。**不作任何未经实验的结论。**

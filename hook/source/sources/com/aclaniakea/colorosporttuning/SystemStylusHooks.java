@@ -187,13 +187,14 @@ final class SystemStylusHooks {
                         int scanCode = keyEvent.getScanCode();
                         boolean pen = SystemStylusHooks.isPen(device);
                         // Log the first few callbacks unconditionally (proves the
-                        // hook is reached at all), then only the interesting ones
-                        // so a normal key stream does not flood the log.
+                        // hook is reached at all), then only the pen-related ones
+                        // so a normal key stream does not flood the log. The old
+                        // scanCode==787969/787986/787987 tests were dropped: the
+                        // scan code is a constant 240 on this device and those
+                        // HID usages never surface in Java (see handle()).
                         int seq = ++keyProbeSeq;
                         if (seq <= 8 || pen || device == null
-                                || deviceName.toLowerCase().contains("lenovo")
-                                || keyCode == 240 || scanCode == 787969 || scanCode == 787986
-                                || scanCode == 787987) {
+                                || deviceName.toLowerCase().contains("lenovo")) {
                             HookUtils.log("key probe#" + seq + ": dev=" + deviceName
                                     + " code=" + keyCode + " scan=" + scanCode
                                     + " act=" + keyEvent.getAction() + " pen=" + pen + " ctx="
@@ -318,6 +319,89 @@ final class SystemStylusHooks {
         worker.start();
     }
 
+    // Touch-strip gesture buckets. The ROM key layout
+    // (Vendor_17ef_Product_622e.kl) can only express three, because its
+    // "key usage" lines fold slide-down | slide-up | single-click into F1.
+    private static final int STRIP_SINGLE_CLICK = 1;
+    private static final int STRIP_DOUBLE_CLICK = 2;
+    private static final int STRIP_LONG_PRESS = 3;
+
+    /**
+     * Map the key-layout-mapped touch-strip key code to a gesture bucket.
+     *
+     * <p>Returns 0 when the code is not one of the touch-strip codes, so the
+     * caller can fall through to the generic pen-button mapping.
+     *
+     * <p>131/132/133 are the F1/F2/F3 the ROM key layout assigns to the pen's
+     * consumer-control usages.
+     */
+    private static int stripGesture(int keyCode) {
+        switch (keyCode) {
+            case 131: // F1: touch-film slide down | slide up | single click
+                return STRIP_SINGLE_CLICK;
+            case 132: // F2: two-click (double tap)
+                return STRIP_DOUBLE_CLICK;
+            case 133: // F3: long press | squeeze
+                return STRIP_LONG_PRESS;
+            default:
+                return 0;
+        }
+    }
+
+    private static String stripGestureName(int gesture) {
+        switch (gesture) {
+            case STRIP_DOUBLE_CLICK:
+                return "double-click action";
+            case STRIP_LONG_PRESS:
+                return "long-press action";
+            default:
+                return "single-click action";
+        }
+    }
+
+    /**
+     * Run a touch-strip gesture through the port's own ColorOS gesture
+     * pipeline: the same click()/longAction() helpers the native
+     * LenovoConsumerGestureReader path used.
+     *
+     * <p>Posted to the main looper because click() reads Settings.Global and
+     * both helpers send broadcasts; neither belongs on the input dispatch
+     * thread that is currently inside interceptKeyBeforeQueueing.
+     *
+     * <p>An earlier revision instead injected the OEM "native pen" key codes
+     * 767/768/769. That is a confirmed no-op on TB522FU: the injected events
+     * do reach the pipeline (they are visible in the key probe as
+     * {@code dev=Virtual code=768}) but nothing in this ROM consumes them, so
+     * no gesture produced any action.
+     */
+    private static void dispatchStripGesture(final Context context, final int gesture) {
+        main.post(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda18
+            @Override
+            public void run() {
+                switch (gesture) {
+                    case STRIP_DOUBLE_CLICK:
+                        click(context, true);
+                        break;
+                    case STRIP_LONG_PRESS:
+                        longAction(context);
+                        break;
+                    default:
+                        // A touch-strip DOUBLE tap reaches the framework as TWO
+                        // keyCode-131 events, not as the 0x0c0601 "two-click"
+                        // usage the .kl maps to F2 (measured 2026-09-18: the
+                        // pen firmware emits click twice). tap() classifies
+                        // single-vs-double by timing (~320 ms) and calls
+                        // click(true) for a double. Dispatching click(false)
+                        // twice instead would make the OEM toggle the roulette
+                        // open and immediately closed again -- i.e. nothing
+                        // visible, which is what the user reported.
+                        tap(context);
+                        break;
+                }
+            }
+        });
+    }
+
     /* JADX INFO: Access modifiers changed from: private */
     public static boolean handle(final Context context, KeyEvent keyEvent) {
         if (context == null) {
@@ -330,44 +414,57 @@ final class SystemStylusHooks {
             HookUtils.log("suppressed pen key during magnetic transition code=" + keyCode + " scan=" + scanCode);
             return true;
         }
-        // Touch strip ("Consumer Control") device.
+        // Touch strip (Lenovo pen HID "consumer control" usages).
         //
-        // TB522FU reality (getevent -lp /dev/input/event9, 2026-09-18):
-        //   name  = "Lenovo Tab Pen Pro 2 Consumer Control"   (note the " 2")
-        //   KEY   = KEY_UNKNOWN only  (keycode 240)
-        //   MSC   = MSC_SCAN
-        // Every gesture arrives as  EV_MSC/MSC_SCAN <code> + EV_KEY KEY_UNKNOWN
-        // DOWN/UP, i.e. the keycode is always 240 and the gesture is carried by
-        // the scancode.  The previous port matched the name WITHOUT " 2" and
-        // branched on keyCodes 131/132/133, so on this device neither the name
-        // nor the keycode ever matched and the touch strip was dead.
+        // TB522FU ground truth, measured on REAL gestures 2026-09-18
+        // (dumpsys input + getevent -lp + the in-hook key probe):
+        //   the node that actually delivers gestures to PhoneWindowManager is
+        //     "Lenovo Tab Pen Pro 2 Mouse"   (/dev/input/event8, uhid
+        //     0005:17EF:622E.0001, classes CURSOR|EXTERNAL)
+        //   the sibling node "Lenovo Tab Pen Pro 2 Consumer Control"
+        //     (/dev/input/event9) advertises EV_MSC/MSC_SCAN + KEY_UNKNOWN only
+        //     and NEVER reaches the key queue, so it must not be matched.
+        //   every gesture arrives as a DOWN+UP pair with
+        //     getScanCode() == 240   (KEY_UNKNOWN, the raw Linux code: CONSTANT)
+        //     getKeyCode()  == 131 / 132 / 133  (F1 / F2 / F3)
+        //   i.e. the gesture is carried by the KEYCODE and the scan code is a
+        //   constant.  The F1/F2/F3 codes come from the ROM key layout
+        //   /system/usr/keylayout/Vendor_17ef_Product_622e.kl, whose
+        //   "key usage <hid-usage> <key>" lines group the six consumer usages:
+        //     F1 (131) <- 0x0c0612 slide down | 0x0c0613 slide up | 0x0c0614 click
+        //     F2 (132) <- 0x0c0601 two-click (double tap)
+        //     F3 (133) <- 0x0c0611 long press    | 0x0c0619 squeeze
         //
-        // Measured scancodes (one per gesture, on the UP event):
-        //   0x000c0613 (787987) = swipe up
-        //   0x000c0612 (787986) = swipe down
-        //   0x000c0601 (787969) = double tap
-        if (lowerCase.contains("lenovo tab pen") && lowerCase.contains("consumer control")) {
-            if (keyEvent.getRepeatCount() <= 0 && keyEvent.getAction() == 1) {
-                switch (scanCode) {
-                    case 787987: // 0x000c0613 swipe up
-                        HookUtils.log("mapped touch strip: swipe up -> native 768");
-                        injectNativePenKey(context, 768);
-                        break;
-                    case 787986: // 0x000c0612 swipe down
-                        HookUtils.log("mapped touch strip: swipe down -> native 767");
-                        injectNativePenKey(context, 767);
-                        break;
-                    case 787969: // 0x000c0601 double tap
-                        HookUtils.log("mapped touch strip: double tap -> native 769");
-                        injectNativePenKey(context, 769);
-                        break;
-                    default:
-                        HookUtils.log("unmapped consumer scancode=0x"
-                                + Integer.toHexString(scanCode) + " keyCode=" + keyCode);
-                        break;
+        // v4.1.5 got this wrong twice: it dispatched on getScanCode() (a
+        // constant 240 here, so it always fell into the default branch) and it
+        // required the name to contain "consumer control", which the delivering
+        // node's name does not.  Result: the strip stayed dead.  Dispatch on
+        // getKeyCode() now.
+        //
+        // Action layer: drive the port's own ColorOS gesture pipeline rather
+        // than injecting OEM key codes.  The TB710FU bridge injected
+        // 767/768/769 here; on TB522FU that is a measured no-op -- the events
+        // reach the pipeline (visible in the key probe as dev=Virtual) but no
+        // component on this ROM consumes them and none of the four gestures
+        // produced any action.  See dispatchStripGesture().
+        if (isPen(keyEvent.getDevice()) && lowerCase.contains("lenovo tab pen")) {
+            int gesture = stripGesture(keyCode);
+            if (gesture != 0) {
+                if (keyEvent.getRepeatCount() <= 0 && keyEvent.getAction() == KeyEvent.ACTION_UP) {
+                    HookUtils.log("touch strip: keyCode=" + keyCode + " -> "
+                            + stripGestureName(gesture));
+                    dispatchStripGesture(context, gesture);
                 }
+                return true;
             }
-            return true;
+            if (keyCode == KeyEvent.KEYCODE_UNKNOWN) {
+                // Seen once per test run between gestures; leave it to the
+                // generic mapping below instead of swallowing it here.
+                HookUtils.log("touch strip: unmapped keyCode=0 scan=" + scanCode);
+            }
+            // Anything else on this node (BTN_MOUSE/BTN_RIGHT/BTN_MIDDLE =
+            // 272/273/274, the pen's barrel/tip buttons) falls through to the
+            // generic mapping below.
         }
         char c = (keyCode == 131 || keyCode == 188 || scanCode == 240 || scanCode == 272) ? (char) 1 : (keyCode == 132 || keyCode == 189 || scanCode == 273) ? (char) 2 : ((keyCode >= 133 && keyCode <= 135) || keyCode == 190 || scanCode == 274) ? (char) 3 : (char) 0;
         if (c == 0) {
@@ -404,6 +501,28 @@ final class SystemStylusHooks {
         if (i == 0) {
             return;
         }
+        // Which package must receive the broadcast depends on the CONFIGURED
+        // action value, i.e. Settings.Global ipe_pencil_single_click /
+        // ipe_pencil_double_click.  Decompiled from com.oplus.ipemanager
+        // (ui labels in setting/fragment/p.java, value enum in the doodle
+        // engine's IPESettingManager) the enumeration is:
+        //
+        //   1 = switch_eraser  切换橡皮擦    )  handled IN-APP: the doodle
+        //   2 = switch_recent  切回上一支笔  )  engine (com.coloros.note /
+        //   3 = show_color     呼出调色盘    )  com.oplus.screenshot) switches
+        //                                        the pen mode (MODE_TOGGLE_ERASER
+        //                                        / MODE_TOGGLE_LAST_PEN /
+        //                                        MODE_PICK_COLOR)
+        //   4 = open_wheel     打开转盘  -> com.oplus.healthservice, whose
+        //                                    StylusPressReceiver -> CallRouletteService
+        //                                    shows the pen wheel
+        //   0 = none
+        //
+        // So 1/2/3 MUST go to the app that owns the doodle engine and ONLY 4 to
+        // healthservice.  This conditional is load-bearing: v4.1.10 briefly sent
+        // 1/2/3 to healthservice as well, but StylusPressReceiver IGNORES the
+        // "action" extra and always opens the roulette -- so every gesture
+        // popped the wheel no matter what the user configured ("所有都是弹出转盘").
         String str = z ? "com.oplus.ipemanager.action.PENCIL_DOUBLE_CLICK" : "com.oplus.ipemanager.action.PENCIL_SINGLE_CLICK";
         for (String str2 : i == HID_HOST_PROFILE ? new String[]{"com.oplus.healthservice"} : new String[]{"com.coloros.note", "com.oplus.screenshot"}) {
             sendAll(context, new Intent(str).setPackage(str2).putExtra("action", i).addFlags(268435456), i == HID_HOST_PROFILE ? "com.oplus.ipemanager.permission.receiver.DOUBLE_CLICK" : null);

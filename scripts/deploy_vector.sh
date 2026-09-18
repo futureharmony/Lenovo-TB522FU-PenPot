@@ -18,11 +18,25 @@ set -euo pipefail
 
 ADB="${ADB:-/opt/homebrew/bin/adb}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
-HOOK_APK="$REPO/releases/PenBridge-Hook-tb522fu-v4.1.3.apk"
+HOOK_APK="${HOOK_APK:-$REPO/releases/PenBridge-Hook-tb522fu-v4.1.13.apk}"
 MODULE_ZIP="$REPO/releases/tb522fu-pen-bridge-v0.1.0.zip"
 PKG=com.aclaniakea.lenovopenbridge
 CLI=/data/adb/modules/zygisk_vector/cli
-SCOPE="android/0 com.coloros.note/0 com.oplus.exsystemservice/0 com.oplus.healthservice/0 com.heytap.mydevices/0 com.oplus.ipemanager/0 com.oplus.wirelesssettings/0 com.oplus.screenshot/0"
+# NOTE: the first entry MUST be the system_server pseudo-package `system/0`
+# (NOT `android/0`). See docs/install-vector-route.md section 3.
+#
+# Verified the hard way, 2026-09-18: this list used to carry `android/0` in place
+# of `system/0`. With only `android/0`, system_server was NOT injected at all --
+# no `handleLoadPackage pkg=android` for the module and no
+# PhoneWindowManager.interceptKeyBeforeQueueing hook -- while every app-scoped
+# hook kept working, so it looked exactly like a code bug. Restoring `system/0`
+# and rebooting brought it back:
+#   handleLoadPackage pkg=android proc=android
+#   PhoneWindowManager interceptKeyBeforeQueueing hooks=1
+#   system_server stylus hooks installed (startOtherServices=1 run=1)
+# `scope set` OVERWRITES the whole scope, so anything missing here is silently
+# deleted on the next deploy.
+SCOPE="system/0 com.coloros.note/0 com.oplus.exsystemservice/0 com.oplus.healthservice/0 com.heytap.mydevices/0 com.oplus.ipemanager/0 com.oplus.wirelesssettings/0 com.oplus.screenshot/0"
 
 SERIAL=""
 DO_MODULE=1

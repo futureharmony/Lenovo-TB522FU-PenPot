@@ -1,0 +1,12 @@
+/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/CMakeFiles/eglshim.dir
+/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/CMakeFiles/edit_cache.dir
+/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/CMakeFiles/rebuild_cache.dir
+/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/Dobby/CMakeFiles/dobby.dir
+/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/Dobby/CMakeFiles/edit_cache.dir
+/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/Dobby/CMakeFiles/rebuild_cache.dir
+/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/Dobby/external/logging/CMakeFiles/logging.dir
+/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/Dobby/external/logging/CMakeFiles/edit_cache.dir
+/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/Dobby/external/logging/CMakeFiles/rebuild_cache.dir
+/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/Dobby/builtin-plugin/SymbolResolver/CMakeFiles/symbol_resolver.dir
+/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/Dobby/builtin-plugin/SymbolResolver/CMakeFiles/edit_cache.dir
+/Users/x/Documents/DATA0/Projects/TB522FU_Unlock_kit_20260904/Lenovo-TB522FU-PEN/tb522fu-pen-port/hook/source/jni/build/Dobby/builtin-plugin/SymbolResolver/CMakeFiles/rebuild_cache.dir
