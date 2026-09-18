@@ -144,15 +144,11 @@ INKDYE_PKG=com.inkdye.lenovopentocoloros
 INKDYE_STATE="$MODDIR/inkdye-enabled.state"
 # 迁移：旧语义的 inkdye-disabled.state（"用户曾选择禁用"）在新默认下已等价于默认值，清掉。
 rm -f "$MODDIR/inkdye-disabled.state" 2>/dev/null
-if [ -f "$INKDYE_STATE" ]; then
-    # 用户显式选择启用 → 维持系统内置笔桥
-    pm enable "$INKDYE_PKG" >/dev/null 2>&1
-    echo "inkdye kept ENABLED (user choice via action.sh)" >>"$LOGFILE"
-else
-    # 默认：禁用系统内置笔桥
-    pm disable-user --user 0 "$INKDYE_PKG" >/dev/null 2>&1
-    echo "inkdye disabled by default (enable via action.sh)" >>"$LOGFILE"
-fi
+# ⚠️ 实际的 pm enable/disable 不在这里执行：service.sh 跑到这一段时
+#    PackageManager 往往还没就绪，`pm disable-user` 会【静默失败】。
+#    实测（2026-09-18）：这里打印了 "inkdye disabled by default"，但 dumpsys
+#    仍是 enabled=0，`pm list packages -d` 也没有它 —— 即"日志说禁了，实际没禁"。
+#    真正的落地点在下面 exec 重定向之后的 apply_inkdye_state（带重试 + 状态复核）。
 
 # 本服务把整个输出重定向进日志，模块目录在 /data/adb 下又没有任何外部轮转，
 # 此前是无限追加。开机先滚一次，保留上一轮现场；运行中由下面的
@@ -176,6 +172,40 @@ trim_log_if_large() {
 
 exec >>"$LOGFILE" 2>&1
 echo "[$(date '+%F %T')] service start"
+
+# --- inkdye 落地：等 PackageManager 就绪后重试，直到状态复核通过 --------------
+# 早期 service.sh 阶段 pm enable/disable 会静默失败，因此这里后台重试（不阻塞
+# 主流程），并用 `pm list packages -d` 复核实际状态，避免"日志说禁了其实没禁"。
+inkdye_is_disabled() {
+    pm list packages -d --user 0 2>/dev/null | grep -q "^package:${INKDYE_PKG}$"
+}
+apply_inkdye_state() {
+    i=0
+    if [ -f "$INKDYE_STATE" ]; then
+        # 用户显式选择启用 → 维持系统内置笔桥
+        while [ "$i" -lt 40 ]; do
+            pm enable --user 0 "$INKDYE_PKG" >/dev/null 2>&1
+            if ! inkdye_is_disabled; then
+                echo "[$(date '+%F %T')] inkdye kept ENABLED (user choice via action.sh)"
+                return 0
+            fi
+            i=$((i + 1)); sleep 3
+        done
+        echo "[$(date '+%F %T')] WARN inkdye enable not confirmed after $i tries"
+    else
+        # 默认：禁用系统内置笔桥
+        while [ "$i" -lt 40 ]; do
+            pm disable-user --user 0 "$INKDYE_PKG" >/dev/null 2>&1
+            if inkdye_is_disabled; then
+                echo "[$(date '+%F %T')] inkdye disabled by default (enable via action.sh)"
+                return 0
+            fi
+            i=$((i + 1)); sleep 3
+        done
+        echo "[$(date '+%F %T')] WARN inkdye disable not confirmed after $i tries"
+    fi
+}
+apply_inkdye_state &
 
 # 不 fork 的等待。
 #
@@ -1353,7 +1383,22 @@ monitor_real_bt_state &
 # 独立脚本，可用 `touch $MODDIR/disable-charge-guard` 临时停用。
 # 用 -f + `sh` 而不是 -x：模块文件权限由打包时的 set_perm 决定，
 # 早先漏配导致 charge-guard.sh 为 0644 → -x 判定失败 → 守护静默不启动。
-[ -f "$MODDIR/charge-guard.sh" ] && sh "$MODDIR/charge-guard.sh" &
+# 另注：pidfile 落在 /data 会跨重启保留，脚本内已用 boot_id + cmdline 双重
+# 校验，防止把被内核复用的 PID 误判为"已在运行"（2026-09-18 实测踩坑）。
+if [ -f "$MODDIR/charge-guard.sh" ]; then
+    echo "[$(date '+%F %T')] launching charge-guard"
+    sh "$MODDIR/charge-guard.sh" &
+    # 后台确认守护确实起来了；若缺席（单实例误判、异常退出等）补启一次。
+    (
+        sleep 3
+        cg_pid=$(cat "$MODDIR/charge-guard.pid" 2>/dev/null)
+        cg_pid=${cg_pid%% *}; case "$cg_pid" in ''|*[!0-9]*) cg_pid= ;; esac
+        if [ -z "$cg_pid" ] || [ ! -d "/proc/$cg_pid" ]; then
+            echo "[$(date '+%F %T')] charge-guard missing after launch; relaunching"
+            sh "$MODDIR/charge-guard.sh" &
+        fi
+    ) &
+fi
 
 monitor_hid_latch &
 

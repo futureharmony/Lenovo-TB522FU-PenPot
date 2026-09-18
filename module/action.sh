@@ -21,7 +21,7 @@ echo "ipe_charging=$(settings get global ipe_pencil_charging_state 2>/dev/null)"
 echo "hook_apk=$(pm path com.aclaniakea.lenovopenbridge 2>/dev/null | head -1)"
 echo "hidctl_apk=$(pm path com.aclaniakea.penhidctl 2>/dev/null | head -1)"
 echo "lsposed=$([ -d /data/adb/lspd ] && echo installed || echo no)"
-echo "charge_guard_pid=$(cat "$MODDIR/charge-guard.pid" 2>/dev/null)"
+echo "charge_guard_pid=$(cut -d' ' -f1 "$MODDIR/charge-guard.pid" 2>/dev/null)"
 if [ -f "$STAMP" ]; then
     echo "inkdye=ENABLED (user override, $(cat "$STAMP"))"
 else
@@ -41,7 +41,7 @@ esac
 
 case "$op" in
     enable)
-        pm enable "$INKDYE_PKG" >/dev/null 2>&1
+        pm enable --user 0 "$INKDYE_PKG" >/dev/null 2>&1
         echo "enabled at $(date)" >"$STAMP"
         echo "inkdye ENABLED（已交还系统内置笔桥；笔能力不再由本模块 Hook 接管）"
         echo "inkdye enabled via action.sh" >>"$LOG"

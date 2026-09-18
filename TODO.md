@@ -10,6 +10,16 @@
 - [ ] 设备在线：跑 `scripts/recon_sysfs.sh`，找 TB522FU 的 Hall / CPS / 笔 uevent 节点
 - [ ] 若无内核节点：确认退化路径（纯 GATT 事件源，无磁吸充电管理）
 
+## P0.5 严重已知问题（阻塞性风险，2026-09-18 实机命中一次）
+- [ ] **Hook 注入 system_server 会「偶发卡开机」** —— 同配置多数开机正常，偶发卡死在开机动画且**不自恢复**（Watchdog 也救不了）。
+  - 根因（`debuggerd -b` 实证）：Vector 安装 hook 需 `ThreadList::SuspendAll`（持独占 mutator 锁），
+    而 system_server 主线程此时正卡在 `BatteryService.onStart → IHealth.update()` 的 **binder JNI 调用**里，
+    JNI 退出处要重新获取 mutator 锁 → 互等死锁。Vector 日志停在 `Loading class …UiWorkingSetPrefetch`，无后续完成行。
+  - 恢复：重启即可（本次重启 35s 起来）。`debuggerd -b <pid>` 对全线程 suspend/resume **有可能短暂打破该死的锁**（实测疑似生效）。
+  - [ ] 降险方案评估中，候选：① 把 `SystemStylusHooks.install()` 延后/异步（`Handler.postDelayed`）以避开主线程最忙的 JNI 窗口；
+        ② 查 Vector 是否有 per-module「免 deopt / 懒加载」配置；③ 保留「作用域回退到 app-only」的降级开关（牺牲 system_server 侧功能但保证能开机）。
+  - 相关文档：`docs/install-vector-route.md` 踩坑表；技能 `android-ksu-vector-module-triage` 的 Bootloop triage。
+
 ## P1 — 最小闭环（连接 + 电量）
 - [ ] 构建 Hook APK（`hook/tools/build_hook_source.py`）并按 scope.list 勾选 LSPosed 作用域
 - [ ] 构建 Root 模块 zip（`module/tools/build_root.py`）刷入
@@ -51,6 +61,10 @@
 - [ ] 实机验证 ipe_pencil_charging_state 在低于 100% 吸附时被修正为 1
 - [ ] P1 Hook APK 中实现 SHOW_PENCIL_CAPSULE 接收端（弹胶囊/发通知）
 - [x] inkdye **默认禁用**（2026-09-18 用户拍板）：`service.sh` 开机 `disable-user` 内置笔桥 `com.inkdye.lenovopentocoloros`，由本模块接管；用户可用 `action.sh enable` 覆盖（写入 `inkdye-enabled.state`）。卸载/panic/boot-guard 会无条件恢复
+- [x] **inkdye 落地时机修正**（2026-09-18）：原实现放在 `exec` 之前、service.sh 很早期执行，此时 **PackageManager 尚未就绪**，`pm disable-user` **静默失败**（日志说禁了、`dumpsys` 仍 `enabled=0`）。
+  已改为 `exec` 之后的后台函数 `apply_inkdye_state()`：**最多 40×3s 重试 + `pm list packages -d --user 0` 复核状态**，确认后打印。实机验证 `enabled=3`（DISABLED_USER）✅
+- [x] **charge-guard 单实例守卫修正**（2026-09-18）：pidfile 在 `/data` 跨重启保留，旧实现只 `kill -0 <old>` → 撞上被复用的 PID 时守护**静默 exit 0**（守护整轮缺席）。
+  已改为 boot_id + `/proc/<pid>/cmdline` 双校验，pidfile 记 `pid bootid`；`service.sh` 补启动日志 + 后台 liveness 复核（失败补启一次）。实机验证单实例、日志正常 ✅
 
 ## P1 构建（2026-09-18 完成）
 - [x] Hook APK：`releases/PenBridge-Hook-tb522fu-v4.1.3.apk`（DeviceGate=SM8750P/sun，213KB，Xposed API 已正确从 dex 剔除）

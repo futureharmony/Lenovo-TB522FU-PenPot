@@ -153,14 +153,44 @@ main_loop() {
     done
 }
 
-if [ -r "$PIDFILE" ]; then
-    old=$(cat "$PIDFILE" 2>/dev/null)
-    case "$old" in
-        ''|*[!0-9]*) ;;
-        *) kill -0 "$old" 2>/dev/null && exit 0 ;;
-    esac
-fi
-echo $$ >"$PIDFILE"
+# ---------------------------------------------------------------------------
+# 单实例保护（2026-09-18 修正）
+#
+# 旧实现只做 `kill -0 "$old" && exit 0`。致命缺陷有两点：
+#   a) pidfile 落在 /data（$MODDIR），会跨重启保留；
+#   b) PID 号由内核复用，重启后会被重新分配。
+# 实测踩坑：某次开机 pidfile 里是上一轮的 PID 7313，而本次开机 service.sh
+# 自己的监控子进程恰好占用了 7313 → `kill -0` 成功 → 本脚本判定"已在运行"
+# 直接 exit 0，**既不更新 pidfile 也不写任何日志**，守护整轮静默缺席。
+#
+# 现在改成两道校验，只有"确实是本脚本的存活实例"才退出：
+#   1) 旧记录必须来自【本次开机】（比对 /proc/sys/kernel/random/boot_id）；
+#   2) 该 PID 的 /proc/<pid>/cmdline 必须真的指向 charge-guard.sh。
+# 任一不满足即视为陈旧记录，清理后正常启动。pidfile 现在存 "pid bootid"。
+# ---------------------------------------------------------------------------
+cur_boot=$(cat /proc/sys/kernel/random/boot_id 2>/dev/null)
 
-log "charge-guard v3 (observer) started: tx_node=${TX_NODE:-NONE} full>=$FULL_TH resume<=$RESUME_TH poll=${POLL_SEC}s - never writes tx_status"
+if [ -r "$PIDFILE" ]; then
+    read -r old old_boot <"$PIDFILE" 2>/dev/null
+    case "$old" in ''|*[!0-9]*) old= ;; esac    # 非数字内容=陈旧，直接丢弃
+    if [ -n "$old" ]; then
+        if [ -n "$cur_boot" ] && [ -n "$old_boot" ] && [ "$old_boot" != "$cur_boot" ]; then
+            log "pidfile pid=$old belongs to a previous boot; starting fresh"
+        elif kill -0 "$old" 2>/dev/null; then
+            old_cmd=$(tr '\0' ' ' <"/proc/$old/cmdline" 2>/dev/null)
+            case "$old_cmd" in
+                *charge-guard.sh*)
+                    log "already running as pid=$old; not starting a second instance"
+                    exit 0 ;;
+                *)
+                    log "pidfile pid=$old is a recycled non-guard process ($old_cmd); starting fresh" ;;
+            esac
+        else
+            log "pidfile pid=$old is no longer alive; starting fresh"
+        fi
+    fi
+fi
+echo "$$ ${cur_boot:-}" >"$PIDFILE"
+
+log "charge-guard v3 (observer) started [rev 2026-09-18b]: tx_node=${TX_NODE:-NONE} full>=$FULL_TH resume<=$RESUME_TH poll=${POLL_SEC}s - never writes tx_status"
 main_loop
