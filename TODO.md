@@ -30,6 +30,8 @@
 ## P2.5 充电守护（新增，2026-09-18 实现）
 - [x] `module/charge-guard.sh` v2：磁吸观察 + 充满通知 + 兜底断电 + IPeManager 状态修正（已实机起进程验证启动）
 - [x] `service.sh` 挂载、`uninstall.sh` 恢复 TX=1
+- [x] 充电全周期采样（charge_log.csv 33 样本）：充满判据=online 1→0 边沿 + 涓流保持期分析；ipe_chg 恒 0 实锤 → 判据禁用 ipe_chg，见 docs/p0-recon-20260918.md 充电全周期采样分析
 - [ ] 实机验证充满通知（吸附 + 电量 100）闭环
+- [ ] 补受控实验：笔到 100% 后保持不动，确认 online 是否自行归零（区分"充满自动断电"vs"取笔"）
 - [ ] 实机验证恢复充电通知（电量回落到 <=95）
 - [ ] 验证 ipe_pencil_charging_state 在低于 100% 吸附时被修正为 1
