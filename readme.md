@@ -29,12 +29,12 @@ vector-cli 用法、踩坑记录、救援分层）。
 
 - **安装**：`scripts/push_to_device.sh` 推送产物 → 装 Hook APK（root `pm install`）
   → `vector-cli modules enable` + `scope set` 8 项 → `ksud module install` → 重启。
-- **inkdye 切换为手动**：模块**不再开机自动禁用** `com.inkdye.lenovopentocoloros`
-  （实际装在 `/system/priv-app/LenovoPenBridge/`）。
-  先用 KSU「执行」按钮（`action.sh`）确认 hook 已生效，再手动 `action.sh disable`；
-  避免 hook 未生效时出现触觉反馈空窗。
-  - 切换：`su -c 'sh /data/adb/modules/tb522fu_pen_bridge/action.sh disable|enable|toggle'`
-  - 状态记录于 `inkdye-disabled.state`。
+- **inkdye 默认禁用**：模块开机把系统内置笔桥 `com.inkdye.lenovopentocoloros`
+  （实际装在 `/system/priv-app/LenovoPenBridge/`）`disable-user`，笔能力由本模块
+  （Root 服务 + Hook）接管。想回退到系统内置笔桥：在 KSU/Magisk 管理器「执行」
+  按钮（`action.sh`）里开启。
+  - 切换：`su -c 'sh /data/adb/modules/tb522fu_pen_bridge/action.sh enable|disable|toggle'`（默认 disable）
+  - 用户选择记录于 `inkdye-enabled.state`（存在 = 显式**启用**内置笔桥，覆盖默认）。
 - **回退**：卸载模块 → `uninstall.sh` 自动 `pm enable` 恢复 inkdye、杀守护、恢复 TX=1。
   临时仅停守护：`touch $MODDIR/disable-charge-guard`。
 
@@ -65,7 +65,7 @@ tb522fu_pen_bridge`；或 Recovery 里删模块目录。详见
 1. `hook/.../DeviceGate.java`：SM8650Q/PINEAPPLE → SM8750P/SUN
 2. `module/service.sh`：Root 侧设备门同步改；Hall 节点改为单节点 `och1909/hall3`（实测：吸附=0，离开=1）；CPS GPIO keeper 停用（充电由驱动自身经 `tx_status` 管理）
 3. `module/module.prop`、`customize.sh`：模块 ID 改为 `tb522fu_pen_bridge`，避免与原模块冲突
-4. inkdye 禁用改为手动（`action.sh`），`service.sh` 不再自动禁用
+4. inkdye 默认禁用（`service.sh` 开机 `disable-user`），可用 `action.sh enable` 开启（写入 `inkdye-enabled.state`）
 5. **`SystemStylusHooks`：给 system_server 回调加 `catch (Throwable)`** —— 原代码在
    `SystemServer#startOtherServices` after-hook 里裸调 `init()`，异常逃逸即中断
    system_server 启动（表现为卡开机动画、`boot_completed` 永不为真）。这是本项目

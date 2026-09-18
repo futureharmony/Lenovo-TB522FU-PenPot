@@ -50,7 +50,7 @@
 - [ ] 实机验证恢复充电通知（电量回落到 <=95）
 - [ ] 实机验证 ipe_pencil_charging_state 在低于 100% 吸附时被修正为 1
 - [ ] P1 Hook APK 中实现 SHOW_PENCIL_CAPSULE 接收端（弹胶囊/发通知）
-- [x] inkdye 禁用**改为手动**：`service.sh` 开机不再自动禁用，仅尊重 `inkdye-disabled.state` 选择；切换走 `action.sh disable|enable|toggle`（消除 hook 未生效时的触觉空窗）
+- [x] inkdye **默认禁用**（2026-09-18 用户拍板）：`service.sh` 开机 `disable-user` 内置笔桥 `com.inkdye.lenovopentocoloros`，由本模块接管；用户可用 `action.sh enable` 覆盖（写入 `inkdye-enabled.state`）。卸载/panic/boot-guard 会无条件恢复
 
 ## P1 构建（2026-09-18 完成）
 - [x] Hook APK：`releases/PenBridge-Hook-tb522fu-v4.1.3.apk`（DeviceGate=SM8750P/sun，213KB，Xposed API 已正确从 dex 剔除）
@@ -63,7 +63,7 @@
 - [x] Vector 作用域配置（`vector-cli scope set` 8 项，全 user 0）——**框架是 Vector，不是 LSPosed**
 - [x] 验证 hook 加载（`vector-cli log cat` 显示 uid 1000/system_server 也加载了本模块）
 - [x] 验证 charge-guard 随开机启动、bootfail 计数正常归零
-- [ ] hook 生效确认后，手动 `action.sh disable` 关 inkdye（勿提前禁用，避免触觉空窗）
+- [ ] 确认 inkdye 被默认禁用后基础书写（NVTCapacitivePen HID）与触觉反馈不受影响（Hook 未生效期间触觉可能空窗，必要时 `action.sh enable` 临时回退）
 - [ ] 接入真实手写笔做功能验收（吸附弹窗 / 按键 / 触觉 / 充满闭环）
 
 ## P1.4 卡死根因修复（2026-09-18 实机定位）

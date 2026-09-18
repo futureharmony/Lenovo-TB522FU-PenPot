@@ -1,14 +1,17 @@
 #!/system/bin/sh
-# KSU 管理器「执行」按钮：状态总览 + inkdye 切换开关
+# KSU / Magisk 管理器「执行」按钮：状态总览 + inkdye 开关
 # ------------------------------------------------------------
-# 背景：inkdye（com.inkdye.lenovopentocoloros）与本模块的 Hook 功能重叠。
-#   * Hook 需要 LSPosed 勾选作用域后才真正生效；
-#   * 若 Hook 未生效就禁用 inkdye，触觉反馈等能力会出现空窗。
-# 因此 inkdye 的禁用改为用户手动开关（本脚本），开机不再自动禁用。
+# 默认行为：本模块**默认禁用**系统内置笔桥 inkdye
+#   （com.inkdye.lenovopentocoloros），笔能力由本模块（Root 服务 + Hook）接管。
+# 若内置笔桥 Hook 尚未生效、或想回退到系统原厂笔体验，用本脚本开启：
+#     sh action.sh enable      # 恢复系统内置笔桥并持续维持
+#     sh action.sh disable     # 回到模块默认（禁用内置笔桥）
+#     sh action.sh toggle      # 在两者间切换
+# 状态标记：存在 inkdye-enabled.state = 用户显式选择"启用内置笔桥"（覆盖默认）。
 MODDIR=${0%/*}
 LOG="$MODDIR/pen-bridge.log"
 INKDYE_PKG=com.inkdye.lenovopentocoloros
-STAMP="$MODDIR/inkdye-disabled.state"
+STAMP="$MODDIR/inkdye-enabled.state"
 
 echo "================ 状态 ================"
 echo "hall3=$(cat /sys/devices/virtual/hall/och1909/hall3 2>/dev/null)"
@@ -20,40 +23,37 @@ echo "hidctl_apk=$(pm path com.aclaniakea.penhidctl 2>/dev/null | head -1)"
 echo "lsposed=$([ -d /data/adb/lspd ] && echo installed || echo no)"
 echo "charge_guard_pid=$(cat "$MODDIR/charge-guard.pid" 2>/dev/null)"
 if [ -f "$STAMP" ]; then
-    echo "inkdye=DISABLED by this module ($(cat "$STAMP"))"
+    echo "inkdye=ENABLED (user override, $(cat "$STAMP"))"
 else
-    echo "inkdye=ENABLED"
+    echo "inkdye=DISABLED (module default)"
 fi
 
 echo "================ 用法 ================"
-echo "切换 inkdye:  sh $0 disable|enable|toggle"
+echo "切换 inkdye:  sh $0 enable|disable|toggle   （默认 disable）"
 
 op="$1"
 case "$op" in
-    disable|toggle)
-        if [ -f "$STAMP" ] && [ "$op" = toggle ]; then
-            op=enable
-        elif [ "$op" = toggle ]; then
-            op=disable
-        fi
+    toggle)
+        # 当前启用 → 切到禁用；当前禁用（默认）→ 切到启用
+        if [ -f "$STAMP" ]; then op=disable; else op=enable; fi
         ;;
 esac
 
 case "$op" in
+    enable)
+        pm enable "$INKDYE_PKG" >/dev/null 2>&1
+        echo "enabled at $(date)" >"$STAMP"
+        echo "inkdye ENABLED（已交还系统内置笔桥；笔能力不再由本模块 Hook 接管）"
+        echo "inkdye enabled via action.sh" >>"$LOG"
+        ;;
     disable)
         if pm disable-user --user 0 "$INKDYE_PKG" >/dev/null 2>&1; then
-            echo "disabled at $(date)" >"$STAMP"
-            echo "inkdye DISABLED（触觉/通知改由 Hook APK 承担，请确认 LSPosed 作用域已勾选）"
+            rm -f "$STAMP"
+            echo "inkdye DISABLED（模块默认状态；请确认 Hook 作用域已勾选并生效）"
             echo "inkdye disabled via action.sh" >>"$LOG"
         else
             echo "disable failed"
         fi
-        ;;
-    enable)
-        pm enable "$INKDYE_PKG" >/dev/null 2>&1
-        rm -f "$STAMP"
-        echo "inkdye ENABLED（已交还系统内置笔桥）"
-        echo "inkdye enabled via action.sh" >>"$LOG"
         ;;
     ""|status)
         ;;

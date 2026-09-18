@@ -134,17 +134,24 @@ esac
     fi
 ) &
 
-# --- inkdye（系统内置笔桥）保留运行，由用户经 action.sh 手动切换 ---
-# 原因：Hook 需要 LSPosed 勾选作用域后才生效；自动禁用会在 Hook 未就绪时
-# 造成触觉反馈空窗。切换入口：KSU 管理器「执行」或 `sh $MODDIR/action.sh disable|enable`。
+# --- inkdye（系统内置笔桥）默认禁用，由本模块接管；可在管理器里手动开启 ---
+# 默认行为：开机把内置笔桥 `com.inkdye.lenovopentocoloros` 降级（disable-user），
+# 使笔能力交由本模块（Root 服务 + Hook）接管。
+# 如需回退到系统内置笔桥：在 KernelSU/Magisk 管理器「执行」按钮运行
+# `action.sh enable`（写入 inkdye-enabled.state 并持续维持）。
+# 切换入口：KSU 管理器「执行」或 `sh $MODDIR/action.sh enable|disable|toggle`。
 INKDYE_PKG=com.inkdye.lenovopentocoloros
-INKDYE_STATE="$MODDIR/inkdye-disabled.state"
+INKDYE_STATE="$MODDIR/inkdye-enabled.state"
+# 迁移：旧语义的 inkdye-disabled.state（"用户曾选择禁用"）在新默认下已等价于默认值，清掉。
+rm -f "$MODDIR/inkdye-disabled.state" 2>/dev/null
 if [ -f "$INKDYE_STATE" ]; then
-    # 用户此前已选择禁用 → 维持
-    pm disable-user --user 0 "$INKDYE_PKG" >/dev/null 2>&1
-    echo "inkdye kept disabled (user choice)" >>"$LOGFILE"
+    # 用户显式选择启用 → 维持系统内置笔桥
+    pm enable "$INKDYE_PKG" >/dev/null 2>&1
+    echo "inkdye kept ENABLED (user choice via action.sh)" >>"$LOGFILE"
 else
-    echo "inkdye kept ENABLED (switch via action.sh)" >>"$LOGFILE"
+    # 默认：禁用系统内置笔桥
+    pm disable-user --user 0 "$INKDYE_PKG" >/dev/null 2>&1
+    echo "inkdye disabled by default (enable via action.sh)" >>"$LOGFILE"
 fi
 
 # 本服务把整个输出重定向进日志，模块目录在 /data/adb 下又没有任何外部轮转，

@@ -17,13 +17,11 @@ fi
 [ -x /system/bin/gpioset ] && /system/bin/gpioset gpiochip0 10=0 108=0 >/dev/null 2>&1
 
 # --- 恢复系统内置 inkdye 笔桥（本模块卸载/禁用时交还控制权）---
+# 模块默认会禁用 inkdye，所以卸载时**无条件**恢复启用。
 INKDYE_PKG=com.inkdye.lenovopentocoloros
-INKDYE_STATE="$MODDIR/inkdye-disabled.state"
-if [ -f "$INKDYE_STATE" ]; then
-    pm enable "$INKDYE_PKG" >/dev/null 2>&1 || \
-        echo "WARN: failed to re-enable $INKDYE_PKG; run manually: pm enable $INKDYE_PKG" >&2
-    rm -f "$INKDYE_STATE"
-fi
+pm enable "$INKDYE_PKG" >/dev/null 2>&1 || \
+    echo "WARN: failed to re-enable $INKDYE_PKG; run manually: pm enable $INKDYE_PKG" >&2
+rm -f "$MODDIR/inkdye-enabled.state" "$MODDIR/inkdye-disabled.state"
 
 # --- 收回充电守护：停进程并把无线发射恢复到开启态（裸数字写法）---
 CG_PID="$MODDIR/charge-guard.pid"

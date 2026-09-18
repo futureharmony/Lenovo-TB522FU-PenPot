@@ -16,11 +16,12 @@ ui_print "- 连接状态只接受真实 ACL/GATT/Hall/CPS 事件，拒绝强制�
 ui_print "- 刷新率策略统一绑定：笔场景锁 120Hz，其余场景最高 144Hz"
 ui_print "- 内置签名 Hook 副本并固定 LSPosed 早期路径，消除冷启动随机路径竞态"
 ui_print "- TB522FU (sun/SM8750P) 移植版"
-ui_print "- inkdye 系统内置笔桥【保持启用】，由你确认 Hook 生效后手动切换"
-ui_print "- 切换指令：sh action.sh disable|enable|toggle"
+ui_print "- 默认禁用系统内置笔桥 com.inkdye.lenovopentocoloros，由本模块接管"
+ui_print "- 想回退内置笔桥：KSU/Magisk 管理器「执行」按钮 → sh action.sh enable"
+ui_print "- 切换指令：sh action.sh enable|disable|toggle（默认 disable）"
 ui_print "- 启动自保：连续 3 次开机失败将自动停用本模块"
 ui_print "- 一键救援：sh panic.sh（恢复状态并停用模块）"
-ui_print "- 卸载本模块会自动恢复 inkdye，可随时回退"
+ui_print "- 卸载本模块会无条件恢复 inkdye，可随时回退"
 
 # An older revision may have embedded the Hook APK in this same module.
 # Remove only those exact legacy paths during the split update. The new Root
