@@ -120,6 +120,12 @@ Hook 已确认在 system_server 内工作（开机日志）：`system_server sty
 > （构建脚本标注为可选），`native pen input load failed` 后模块优雅降级，`global stylus
 > input monitor` 仍正常注册。
 
+> ⚠️ **已知阻塞性风险（2026-09-18 实机命中一次）**：Hook 注入 system_server 会**偶发卡开机**
+> —— 同配置多数开机正常，偶发卡死在开机动画且不自恢复。根因是 Vector 安装 hook 的
+> `ThreadList::SuspendAll`（持独占 mutator 锁）与 system_server 主线程在 binder JNI 调用
+> （`BatteryService.onStart → IHealth.update()`）退出处的重新加锁互等 → 死锁。**重启即可恢复**；
+> 诊断与降险方案见 `TODO.md` P0.5 与 `docs/install-vector-route.md` 踩坑表第 8 条。
+
 硬件节点侦察已完成：TB710FU 的 `pen1_hall/pen2_hall`、CPS I2C/GPIO 在 TB522FU 无对应物，
 已改用 `och1909/hall3`（磁吸，注意节点内容前缀是驱动 bug 的 `hall13`）+
 CPS8601 `11-0041/tx_status`（充电）。详见 `docs/p0-recon-20260918.md`。
