@@ -37,13 +37,15 @@
 - [x] `service.sh` 挂载、`uninstall.sh` 恢复 TX=1
 - [x] 充电全周期采样（charge_log.csv 33 样本）：充满判据=online 1→0 边沿 + 涓流保持期分析；ipe_chg 恒 0 实锤 → 判据禁用 ipe_chg，见 docs/p0-recon-20260918.md 充电全周期采样分析
 - [ ] 实机验证充满通知（吸附 + 电量 100）闭环
-- [x] 补受控实验：笔到 100% 后保持不动，确认 online 是否自行归零 —— **实测 online 恒为 1，不随充满/断电变化**，因此它**不能**作为「正在充电」判据；唯一判据是 `tx_status` 的 `cps_wls_en`（2026-09-18）
-  - 注意 `cps_wls_tx` 的 `charge_type=Trickle` 也只是驱动默认档位名，同样不代表在充电
-- [x] 实机复核「充满后软件侧是否主动断电」（2026-09-18，电量 100 / 笔在磁吸上）：**是，且两层都有动作**
-  - 驱动层：充满后**不总是**自己关 —— charge-guard.log 抓到两次「driver left TX on at full (100); forced off」（14:56:59 首次吸附、14:57:29 重新吸附各一次）
-  - 守护层：30s 轮询兜底写 0，两次都成功；当前连续采样 15s 稳定 `cps_wls_en:0`
+- [x] 补受控实验：确认 `online` 语义 —— **随"笔是否在线圈上"变化**（吸附=1，离开=0，见 `docs/charge_log_20260918.csv` 11:34 边沿），但 **不反映是否在送电**（`cps_wls_en:0` 时仍为 1）。因此它**不能**作为「正在充电」判据；唯一判据是 `tx_status` 的 `cps_wls_en`（2026-09-18）
+  - `capacity` 同理：吸附=笔的 SOC，离开=0 —— 是驱动通过带内通信解析出的笔电量，可用作交叉校验
+  - `charge_type`：吸附=Trickle、离开=Unknown，是驱动按吸附状态给的档位名，同样不代表"正在充电"
+- [x] 实机复核「充满后软件侧是否主动断电」（2026-09-18，电量 100 / 笔在磁吸上）：**有，但当前是我们守护干的，不是驱动**
+  - charge-guard.log 两次「driver left TX on at full (100); forced off」分别在吸附后 **t+3s / t+6s**，即我们的守护比驱动先动手；**因此"驱动自己会不会关"至今没有被观察到**（被我们抢先了）
   - 通知层：14:56:59 触发「手写笔已充满，已停止充电」（ColorOS 丢 shell 通知，UI 走 Hook 广播）
-  - ⚠️ 已知窗口：驱动可能为补电重新打开 TX（14:57:29 即如此），守护最多 30s（`POLL_SEC`）后才再关；要收紧就调小 `POLL_SEC`，代价是轮询更频繁
+  - ⚠️ 守护抢先动手的风险：守护用 **BLE 侧电量**（可能滞后）当判据，驱动用 **带内 `charging_soc`**（直读）。若两者不一致（BLE 仍读 100、笔实际需要补电），守护会**挡住合法补电** → 表现为"笔吸上去不充电"
+- [x] **反向工程 CPS 驱动本体**（`/vendor_dlkm/lib/modules/cps_wls_charger.ko`，2026-09-18）——确认充满截止/补充充电是**原厂驱动自带**：读 `hall_status`、带内 ASK/FSK 解析 `pen_type/mac/charging_soc/charging_status/charging_cmd`、`charging_cmd → close tx`、`error int flag → close tx`、`cps_handle_rechg_work`（补充充电）、设备树无任何策略参数。详见 `docs/cps-charger-driver-analysis.md`
+- [ ] **待补的决定性实验**：临时 `touch disable-charge-guard` 后让笔重新吸附，确认**驱动是否会在笔保持吸附时自行把 `cps_wls_en` 关掉**以及耗时。若会 → 守护的强制写 0 应当移除（只保留通知 + `ipe_pencil_charging_state` 回写）；若不会 → 守护必须保留并说明原厂逻辑缺了什么
 - [x] 实机验证充满通知闭环：守护触发 ✅、兜底断电 ✅；确认 ColorOS 丢弃 shell 通知 → UI 展示移入 P1 Hook APK（SHOW_PENCIL_CAPSULE 广播链路已预留）
 - [ ] 实机验证恢复充电通知（电量回落到 <=95）
 - [ ] 实机验证 ipe_pencil_charging_state 在低于 100% 吸附时被修正为 1

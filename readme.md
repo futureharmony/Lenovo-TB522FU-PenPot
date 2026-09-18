@@ -83,9 +83,19 @@ tb522fu_pen_bridge`；或 Recovery 里删模块目录。详见
 - **充电状态修正**：实测 IPeManager `ipe_pencil_charging_state` 恒 0，由守护按真实 吸附+TX 状态回写。
 - **充满通知**：吸附 + 电量>=100 + TX 关闭 → 通知「已充满，已停止充电」。
   ⚠️ ColorOS 丢弃 uid 0（shell）通知 → UI 走 Hook APK 的 `SHOW_PENCIL_CAPSULE` 广播，`cmd notification` 仅作 AOSP 兜底。
-- **充满断电**：实测由 cps-wls-charger 驱动自带（笔满自发 `cps_wls_en:0`）；守护仅在驱动异常时兜底写 `0`。
+- **充满断电**：由 **原厂 cps-wls-charger 驱动自带**（驱动读霍尔 + 与笔的带内通信，
+  收到笔的 `charging_cmd` 就 `close tx`，另有 `cps_handle_rechg_work` 做补充充电）；
+  守护仅在驱动异常时兜底写 `0`。⚠️ **"驱动是否会自己关"尚未直接观测到**，两次实测
+  都是守护在吸附后 t+3s/t+6s 抢先动手 —— 待补决定性实验，详见
+  [`docs/cps-charger-driver-analysis.md`](docs/cps-charger-driver-analysis.md)。
   - ⚠️ TX 写入为**瞬时**：`echo 1` 后约 30s 被驱动按自身策略改回；写入只认裸数字 `0`/`1`。
 - 开关：`touch $MODDIR/disable-charge-guard` 临时停用；卸载时自动恢复 TX=1。
+
+> **来源结论（2026-09-18，只读侦察）**：内核（`6.6.82TB522FU`，2024-12-01）与整个
+> `/vendor_dlkm`（308 个模块，含 `dhall_och1909`/`lenovo_sys_temp`/`lenovo_thermal_control`）
+> 都是**原厂 Lenovo 构建**；ColorOS 只提供 system/product/odm 与 4 个 `oplus_network_*`
+> 模块，**没有介入 CPS8601**。充电策略硬编码在驱动内部，设备树无任何策略参数。
+> 详见 [`docs/cps-charger-driver-analysis.md`](docs/cps-charger-driver-analysis.md)。
 
 ## 当前状态（2026-09-18 实测）
 
