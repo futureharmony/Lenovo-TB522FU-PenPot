@@ -40,6 +40,10 @@ final class SystemStylusHooks {
     private static final String PEN1_HALL = "/sys/devices/virtual/factory/interface/hw_info/pen1_hall";
     private static final String PEN2_HALL = "/sys/devices/virtual/factory/interface/hw_info/pen2_hall";
     private static int hallCandidateSamples;
+    // Diagnostic: counts PhoneWindowManager.interceptKeyBeforeQueueing callbacks.
+    // The first few are logged unconditionally so we can tell "the hook never
+    // fires on this ROM" from "it fires but the event is filtered out".
+    private static int keyProbeSeq;
     private static boolean hallReadFailed;
     private static boolean hapticControlReady;
     private static boolean hidConnectPending;
@@ -147,36 +151,55 @@ final class SystemStylusHooks {
             bootSettleUntilMs = SystemClock.elapsedRealtime() + 20000L;
         }
         try {
-            HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.wm.OplusDisplayModeService", "getInstance", new XC_MethodHook() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.0
+            int nDisp = HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.wm.OplusDisplayModeService", "getInstance", new XC_MethodHook() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.0
                 @Override
                 protected void afterHookedMethod(XC_MethodHook.MethodHookParam methodHookParam) throws Throwable {
                     SystemStylusHooks.oplusDisplayModeService = methodHookParam.getResult();
                 }
             });
+            HookUtils.log("OplusDisplayModeService getInstance hooks=" + nDisp);
         } catch (Throwable th) {
             HookUtils.log("OplusDisplayModeService getInstance hook failed: " + th);
         }
         try {
-            HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.policy.PhoneWindowManager", "interceptKeyBeforeQueueing", new XC_MethodHook() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.2
+            int nPwm = HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.policy.PhoneWindowManager", "interceptKeyBeforeQueueing", new XC_MethodHook() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.2
                 protected void beforeHookedMethod(XC_MethodHook.MethodHookParam methodHookParam) {
                     try {
-                        KeyEvent keyEvent;
+                        KeyEvent keyEvent = null;
                         Object[] objArr = methodHookParam.args;
-                        int length = objArr.length;
-                        int i = 0;
-                        while (true) {
-                            if (i >= length) {
-                                keyEvent = null;
-                                break;
+                        if (objArr != null) {
+                            for (Object obj : objArr) {
+                                if (obj instanceof KeyEvent) {
+                                    keyEvent = (KeyEvent) obj;
+                                    break;
+                                }
                             }
-                            Object obj = objArr[i];
-                            if (obj instanceof KeyEvent) {
-                                keyEvent = (KeyEvent) obj;
-                                break;
-                            }
-                            i++;
                         }
-                        if (keyEvent != null && SystemStylusHooks.isPen(keyEvent.getDevice()) && SystemStylusHooks.handle(HookUtils.context(methodHookParam.thisObject), keyEvent)) {
+                        if (keyEvent == null) {
+                            // The hook fired but no KeyEvent was passed: either a
+                            // different overload got hooked or the signature moved.
+                            HookUtils.log("key probe: hook fired but no KeyEvent in args");
+                            return;
+                        }
+                        InputDevice device = keyEvent.getDevice();
+                        String deviceName = device == null ? "<null>" : String.valueOf(device.getName());
+                        int keyCode = keyEvent.getKeyCode();
+                        int scanCode = keyEvent.getScanCode();
+                        boolean pen = SystemStylusHooks.isPen(device);
+                        // Log the first few callbacks unconditionally (proves the
+                        // hook is reached at all), then only the interesting ones
+                        // so a normal key stream does not flood the log.
+                        int seq = ++keyProbeSeq;
+                        if (seq <= 8 || pen || device == null
+                                || deviceName.toLowerCase().contains("lenovo")
+                                || keyCode == 240 || scanCode == 787969 || scanCode == 787986
+                                || scanCode == 787987) {
+                            HookUtils.log("key probe#" + seq + ": dev=" + deviceName
+                                    + " code=" + keyCode + " scan=" + scanCode
+                                    + " act=" + keyEvent.getAction() + " pen=" + pen + " ctx="
+                                    + (HookUtils.context(methodHookParam.thisObject) != null));
+                        }
+                        if (pen && SystemStylusHooks.handle(HookUtils.context(methodHookParam.thisObject), keyEvent)) {
                             methodHookParam.setResult(0);
                         }
                     } catch (Throwable th) {
@@ -186,6 +209,7 @@ final class SystemStylusHooks {
                     }
                 }
             });
+            HookUtils.log("PhoneWindowManager interceptKeyBeforeQueueing hooks=" + nPwm);
         } catch (Throwable th) {
             HookUtils.log("PhoneWindowManager hook failed: " + th);
         }

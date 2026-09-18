@@ -73,7 +73,7 @@ def _ks_pass() -> str:
 KS_PASS = _ks_pass()
 
 OUT_DIR = Path(os.environ.get("ACL_OUT", str(REPO / "releases")))
-OUT_APK = OUT_DIR / "PenBridge-Hook-tb522fu-v4.1.5.apk"
+OUT_APK = OUT_DIR / "PenBridge-Hook-tb522fu-v4.1.7.apk"
 
 
 def run(cmd: list[str]) -> None:
@@ -105,7 +105,7 @@ def main() -> None:
              "--auto-add-overlay", "--manifest", MANIFEST, "-R", tmp / "res.zip",
              "--java", tmp / "gen", "--min-sdk-version", "31",
              "--target-sdk-version", "35",
-             "--version-code", "410005", "--version-name", "4.1.5"])
+             "--version-code", "410007", "--version-name", "4.1.7"])
         (tmp / "classes").mkdir(parents=True, exist_ok=True)
         (tmp / "stub-classes").mkdir(parents=True, exist_ok=True)
         (tmp / "dex").mkdir(parents=True, exist_ok=True)
