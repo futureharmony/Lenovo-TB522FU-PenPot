@@ -97,15 +97,19 @@ case "$soc/$platform" in
 esac
 
 # --- 禁用系统内置 inkdye 笔桥，避免两套桥接服务互相打架（可逆，见 uninstall.sh）---
+# 时序保护：仅在移植版 Hook APK 已就位（本模块携带的签名副本存在）时才禁用，
+# 否则触觉反馈等能力会出现空窗——inkdye 的前台服务在被替换前必须继续工作。
 INKDYE_PKG=com.inkdye.lenovopentocoloros
 INKDYE_STATE="$MODDIR/inkdye-disabled.state"
-if [ ! -f "$MODDIR/disable" ] && [ ! -f "$INKDYE_STATE" ]; then
+if [ -f "$MODDIR/hook/PenBridge-Hook.apk" ] && [ ! -f "$MODDIR/disable" ] && [ ! -f "$INKDYE_STATE" ]; then
     if pm disable-user --user 0 "$INKDYE_PKG" >/dev/null 2>&1; then
         echo "disabled at $(date)" >"$INKDYE_STATE"
         echo "inkdye pen bridge disabled: $INKDYE_PKG" >>"$LOGFILE"
     else
         echo "inkdye disable failed (non-fatal, will retry next boot)" >>"$LOGFILE"
     fi
+else
+    [ -f "$INKDYE_STATE" ] || echo "inkdye kept enabled: hook apk not present yet" >>"$LOGFILE"
 fi
 
 # 本服务把整个输出重定向进日志，模块目录在 /data/adb 下又没有任何外部轮转，
