@@ -12,7 +12,7 @@
 #
 # 若连 root shell 都没有，改用 KernelSU 安全模式（开机后连按音量-三次）
 # 或 ksud：`ksud module disable tb522fu_pen_bridge`。详见
-# docs/install-lsposed-route.md 的「救援」节。
+# docs/install-vector-route.md 的「救援」节。
 # ============================================================================
 MODDIR=${0%/*}
 LOG="$MODDIR/pen-bridge.log"

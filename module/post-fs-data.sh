@@ -71,7 +71,7 @@ run_bounded() {
 # replaces this entire block:
 #   /data/adb/modules/zygisk_vector/cli modules enable com.aclaniakea.lenovopenbridge
 #   /data/adb/modules/zygisk_vector/cli scope set com.aclaniakea.lenovopenbridge \
-#       android/0 com.coloros.note/0 ... (see docs/install-lsposed-route.md)
+#       android/0 com.coloros.note/0 ... (see docs/install-vector-route.md)
 # Only re-enable this block if the device actually runs LSPosed again.
 LSP_DB=/data/adb/lspd/config/modules_config.db
 LSP_APK="$MODDIR/hook/PenBridge-Hook.apk"

@@ -1,8 +1,9 @@
 # TODO
 
-> **路线决策（2026-09-18）：先走 LSPosed 路线。** 静态 patch / 重打包 ROM 方案暂缓，
-> 待 hook 逻辑实机迭代稳定后再考虑固化进底包。安装与验证步骤见
-> [`docs/install-lsposed-route.md`](docs/install-lsposed-route.md)。
+> **路线决策（2026-09-18）：走运行时 hook 路线。** 静态 patch / 重打包 ROM 方案暂缓，
+> 待 hook 逻辑实机迭代稳定后再考虑固化进底包。
+> **框架是 Vector（JingMatrix，`zygisk_vector`），不是 LSPosed。** 安装与验证步骤见
+> [`docs/install-vector-route.md`](docs/install-vector-route.md)。
 
 ## P0 — 侦察（决定项目成败，先做）
 - [ ] 离线：`strings kernel_abs.elf | grep -iE 'lenovo_penraw|PEN_FRAMEWORK|pen_hall|cps'` — 确认内核是否导出笔事件接口
@@ -49,11 +50,20 @@
 - [x] 模块包：`releases/tb522fu-pen-bridge-v0.1.0.zip`（含 charge-guard.sh、service.sh、PenHidCtl priv-app、lsposed-path-sync、hook 副本）
 - [x] 构建脚本本地化：build_hook_source/build_penhid（alias/out env 化、libpeninput.so 可选）、build_root（repo 布局适配、去 CPS GPIO、加 charge-guard）
 - [x] 本机工具链：/tmp/android-sdk（build-tools android-15 + platform-35），自签 keys/tb522fu.jks（不入库）
-- [x] 安装/验证流程文档化：`docs/install-lsposed-route.md`；产物推送脚本 `scripts/push_to_device.sh`（含 md5 校验）
-- [ ] 刷入模块 zip + 重启（`scripts/push_to_device.sh` → KSU 刷 `tb522fu-pen-bridge-v0.1.0.zip`）
-- [ ] LSPosed 勾选作用域（android/ipemanager/mydevices/note/exsystemservice/healthservice/wirelesssettings/screenshot）→ 二次重启
-- [ ] 验证 hook 加载（logcat LSPosed + charge-guard 与 hook 联动）
+- [x] 安装/验证流程文档化：`docs/install-vector-route.md`；产物推送脚本 `scripts/push_to_device.sh`（含 md5 校验）
+- [x] 刷入模块 zip + 重启（`ksud module install`；ColorOS 拦截 `adb install`，Hook APK 走 root `pm install`）
+- [x] Vector 作用域配置（`vector-cli scope set` 8 项，全 user 0）——**框架是 Vector，不是 LSPosed**
+- [x] 验证 hook 加载（`vector-cli log cat` 显示 uid 1000/system_server 也加载了本模块）
+- [x] 验证 charge-guard 随开机启动、bootfail 计数正常归零
 - [ ] hook 生效确认后，手动 `action.sh disable` 关 inkdye（勿提前禁用，避免触觉空窗）
+- [ ] 接入真实手写笔做功能验收（吸附弹窗 / 按键 / 触觉 / 充满闭环）
+
+## P1.4 卡死根因修复（2026-09-18 实机定位）
+- [x] 现象：hook + 模块同开 → 卡开机动画，system_server 停在 PMS 扫描，`boot_completed` 永不为真
+- [x] 根因：`SystemStylusHooks` 中 `SystemServer#startOtherServices`/`#run` 的 after-hook **无 try/catch**，`init()` 异常逃逸进 system_server 启动序列
+- [x] 修复：回调全部包 `catch (Throwable)`；`PhoneWindowManager` 回调同样加保护
+- [x] 二分验证：仅 KSU 模块 → 正常；修复后 hook + 模块同开 → 正常（连续 2 次重启验证，<1min 到 boot_completed）
+- [x] 其余踩坑入档：`charge-guard.sh` 权限位漏配、密钥库口令丢失（重建 + `keys/tb522fu.pass`）、`lspd` 库归属 Vector
 
 ## P1.5 启动失败自保（2026-09-18 实现）
 - [x] `post-fs-data.sh`：`app_process` 调用加 `timeout 20`（无 timeout 时回退后台+轮询），消除唯一会阻塞开机的无界调用
@@ -61,6 +71,6 @@
 - [x] boot guard：`post-fs-data.sh` 记账 → `service.sh` 确认 `boot_completed=1` 才清零 → 连续 >3 次失败自动生成 `disable`（计数文件 `/data/adb/tb522fu_pen_bridge.bootfail`）
 - [x] `module/panic.sh`：一键恢复（enable inkdye / 杀进程 / tx=1 / 清标记 / 默认停用模块），支持 `--keep`
 - [x] `uninstall.sh`：清理 boot-guard 计数与 `disable`，避免重装后立刻熔断
-- [x] `docs/install-lsposed-route.md` 增「启动失败与救援」分层说明（模块自保 + KSU 安全模式 + ksud + Recovery）
+- [x] `docs/install-vector-route.md` 增「启动失败与救援」分层说明（模块自保 + KSU 安全模式 + ksud + Recovery）
 - [ ] 实机验证：正常开机计数归零（`cat /data/adb/tb522fu_pen_bridge.bootfail` 应为空/0）
 - [ ] 实机验证：人为制造 4 次失败开机 → 确认自动熔断 + inkdye 自动恢复
