@@ -76,7 +76,10 @@ tb522fu_pen_bridge`；或 Recovery 里删模块目录。详见
    `service.sh` 调用点改为 `[ -f ] && sh`（不依赖执行位）。
 
 ## TB522FU 新增功能：充电守护（charge-guard.sh v2）
-- **磁吸通知**：沿用 monitor_hall_capsule（已映射到 `och1909/hall3`）。
+- **磁吸通知**：沿用 monitor_hall_capsule（已映射到 `och1909/hall3`）。胶囊电量优先取新鲜样本，
+  取不到则退化到最后一次真实采样，**不再等待新鲜油表采样**（否则吸附后要空等 10~21 秒）。
+- **充电状态真值**：`service.sh` 的 `read_cps_charging()` 与守护同源，都读 `11-0041/tx_status`
+  的 `cps_wls_en`；CPS 节点按 I2C 地址 `*-0041` 运行时解析，兼容 pineapple / sun 两块板。
 - **充电状态修正**：实测 IPeManager `ipe_pencil_charging_state` 恒 0，由守护按真实 吸附+TX 状态回写。
 - **充满通知**：吸附 + 电量>=100 + TX 关闭 → 通知「已充满，已停止充电」。
   ⚠️ ColorOS 丢弃 uid 0（shell）通知 → UI 走 Hook APK 的 `SHOW_PENCIL_CAPSULE` 广播，`cmd notification` 仅作 AOSP 兜底。
@@ -92,6 +95,12 @@ tb522fu_pen_bridge`；或 Recovery 里删模块目录。详见
 硬件节点侦察已完成：TB710FU 的 `pen1_hall/pen2_hall`、CPS I2C/GPIO 在 TB522FU 无对应物，
 已改用 `och1909/hall3`（磁吸，注意节点内容前缀是驱动 bug 的 `hall13`）+
 CPS8601 `11-0041/tx_status`（充电）。详见 `docs/p0-recon-20260918.md`。
+
+磁吸胶囊延迟已修复并回归（2026-09-18）：原为**吸附后 10~21 秒**才弹、偶发不弹，
+根因是胶囊广播硬卡 `lenovo_pen_hardware_battery_valid==1`，而该标志在吸附边沿被主动清 0，
+本机又无内核侧新鲜电量源（`CPS_UEVENT` 写死为 pineapple 的 `i2c-2/2-0041`，`penraw/uevent`
+无 `LEVEL`），只能空等厂家 BLE 首帧样本。修复后 4 次吸附延迟为 **1s / 0s / 0s / 1s**。
+详见 `TODO.md` → P2.6。
 
 待办见 `TODO.md`，下一步是接入真实手写笔做功能验收（吸附弹窗/按键/触觉/充满闭环）。
 

@@ -72,5 +72,19 @@
 - [x] `module/panic.sh`：一键恢复（enable inkdye / 杀进程 / tx=1 / 清标记 / 默认停用模块），支持 `--keep`
 - [x] `uninstall.sh`：清理 boot-guard 计数与 `disable`，避免重装后立刻熔断
 - [x] `docs/install-vector-route.md` 增「启动失败与救援」分层说明（模块自保 + KSU 安全模式 + ksud + Recovery）
-- [ ] 实机验证：正常开机计数归零（`cat /data/adb/tb522fu_pen_bridge.bootfail` 应为空/0）
+- [ ] 实机验证：正常开机计数归零（`cat /data/adb/tb522fu_pen_bridge.bootfail` 应为空/0）— ✅ 2026-09-18 已验证为空
 - [ ] 实机验证：人为制造 4 次失败开机 → 确认自动熔断 + inkdye 自动恢复
+
+## P2.6 磁吸胶囊延迟修复（2026-09-18 实机定位 + 验证）
+- [x] 现象：磁吸吸附后胶囊要等很久才弹（实测 10~21 秒），有时干脆不弹
+- [x] 证据：`pen-bridge.log` 四次吸附全部一致 —— dock 边沿 `trusted=false`（`lenovo_pen_hardware_battery_valid=0`），随后成串 `magnetic capsule delayed: fresh battery sample unavailable`，第 14:45 那次等满 40 次才成功，另两次分别在 20/29 次后 **abandoned**
+- [x] 三处成因：
+  1. `monitor_hall_capsule` 在吸附边沿**主动**把 `lenovo_pen_hardware_battery_valid` 清 0（避免用上一轮缓存）
+  2. `request_pen_capsule()` 硬卡 `valid==1` 才广播
+  3. 本机内核侧**没有任何**新鲜电量源：`CPS_UEVENT` 写死为 pineapple 的 `i2c-2/2-0041`（本机不存在），`lenovo_penraw/uevent` 只有 `MAJOR/MINOR/DEVNAME` 无 `LEVEL` → 只能等厂家 BLE 栈首帧 GATT 样本
+- [x] 修复 A（核心）：`request_pen_capsule()` 改用 `read_hardware_battery()`——新鲜优先、退化到最后一次真实采样；`valid!=1` 时只记一条日志，不再卡门
+- [x] 修复 B：`resolve_cps_nodes()` 按 I2C 地址 `*-0041` 运行时解析 CPS 节点（`/sys/bus/i2c/devices/`），取代写死路径；新增 `read_cps_charging()` 从 `tx_status.cps_wls_en` 取充电真值（语义与 charge-guard.sh 一致）
+- [x] 修复 C：`request_pen_capsule_when_ready` 加 worker 标记文件去重 —— 此前吸附边沿 hall 抖动会并存 2~3 个重试循环，日志出现成对重复行
+- [x] 回归验证（真实笔，重启后）：4 次吸附延迟分别为 **1s / 0s / 0s / 1s**；其中 1s 那次正是 `trusted=false`（原 21 秒路径）；`delayed` 与 `abandoned` 零出现；成对重复行消失
+- [x] 附带收益：`charging` 不再恒 0，改由 `cps_wls_en` 驱动（吸附时 `charging=1`）；`CPS uevent requested` 首次出现，证明路径解析生效
+- [ ] 观察项：笔接近满电时驱动会脉冲 `cps_wls_en`（1↔0），`charging` 因此可能轻微抖动（`monitor_charging_cache` 已按变化才发布，实际约每 10s 最多一次）

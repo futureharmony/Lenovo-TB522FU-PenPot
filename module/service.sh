@@ -38,11 +38,32 @@ CPS_GPIODEV=/dev/gpiochip0
 CPS_GPIOSET=/system/bin/gpioset
 CPS_HELPER="$MODDIR/bin/pen-cps-gpio"
 CPS_PEN_HALL=/sys/devices/virtual/hall/och1909/hall3
-CPS_UEVENT=/sys/devices/platform/soc/9c0000.qcom,qupv3_i2c_geni_se/98c000.i2c/i2c-2/2-0041/uevent
+# CPS8601 无线充节点。此前写死的是 pineapple/SM8650Q 的地址
+# （…/qupv3_i2c_geni_se/98c000.i2c/i2c-2/2-0041），在 sun/SM8750P 上该路径
+# 根本不存在，于是所有 CPS 读取静默空转、模块自己永远产不出新鲜样本
+# （2026-09-18 实测：本机挂在 11-0041）。CPS8601 的 I2C 地址恒为 0x41，
+# 用总线符号链接按地址解析即可同时兼容两块板子；这也是 charge-guard.sh
+# 已经验证过的稳定路径形式。
+CPS_UEVENT=
+CPS_TX_STATUS=
+CPS_PS_ONLINE=
+resolve_cps_nodes() {
+    for dir in /sys/bus/i2c/devices/*-0041; do
+        [ -d "$dir" ] || continue
+        [ -r "$dir/tx_status" ] || continue
+        CPS_TX_STATUS="$dir/tx_status"
+        [ -r "$dir/uevent" ] && CPS_UEVENT="$dir/uevent"
+        break
+    done
+    [ -r /sys/class/power_supply/cps_wls_tx/online ] && \
+        CPS_PS_ONLINE=/sys/class/power_supply/cps_wls_tx/online
+}
+resolve_cps_nodes
 CPS_PIDFILE="$MODDIR/cps-gpio.pid"
 CPS_DISABLED="$MODDIR/disable"
 HALL_STATE_FILE="$MODDIR/pen-hall.state"
 CAPSULE_DEDUP_FILE="$MODDIR/pen-capsule.last"
+CAPSULE_WORKER_FILE="$MODDIR/pen-capsule.worker"
 CAPSULE_DEDUP_SECONDS=4
 SERVICE_LOCK="$MODDIR/.service.lock"
 HIDCTL_SERVICE=com.aclaniakea.penhidctl/.PenHidService
@@ -134,6 +155,9 @@ LOG_MAX_BYTES=524288
 if [ -f "$LOGFILE" ]; then
     mv -f "$LOGFILE" "$LOGFILE.1" 2>/dev/null
 fi
+# 上一次服务实例可能被 kill 在胶囊重试循环中间，留下 worker 标记文件；
+# 不清掉会让本次开机所有磁吸边沿都不再尝试广播胶囊。
+rm -f "$CAPSULE_WORKER_FILE" 2>/dev/null
 
 trim_log_if_large() {
     size=$(wc -c <"$LOGFILE" 2>/dev/null)
@@ -532,6 +556,27 @@ read_charge_from_file() {
     done
 }
 
+read_cps_charging() {
+    # CPS8601 收发器真值。本机 DT uevent 里没有 CHARGING/ATTACHED 键，
+    # 所以收发器节点是唯一可信的内核侧来源：
+    #   tx_status "cps_wls_en:1" -> 线圈在送电（正在充电）
+    #   tx_status "cps_wls_en:0" -> 驱动已断（充满或未吸附）
+    # 语义已由 charge-guard.sh 在 2026-09-18 实测确认：笔充满时驱动会自己
+    # 置 cps_wls_en:0。因此它同时是「充电中」与「笔在不在线圈上」的真值。
+    state=
+    if [ -n "$CPS_TX_STATUS" ] && [ -r "$CPS_TX_STATUS" ]; then
+        IFS= read -r line <"$CPS_TX_STATUS"
+        case "$line" in
+            *cps_wls_en:1*) state=1 ;;
+            *cps_wls_en:0*) state=0 ;;
+        esac
+    fi
+    if [ -z "$state" ] && [ -n "$CPS_PS_ONLINE" ] && [ -r "$CPS_PS_ONLINE" ]; then
+        state=$(tr -d '\r' <"$CPS_PS_ONLINE" 2>/dev/null)
+    fi
+    case "$state" in 0|1) echo "$state" ;; esac
+}
+
 cache_hardware_charging() {
     state="$1"
     case "$state" in
@@ -574,6 +619,19 @@ read_hardware_charging() {
             fi
             cache_hardware_charging 0
             echo 0
+            return 0
+            ;;
+    esac
+    # 本机（sun/SM8750P）的 CPS DT uevent 不带任何键值，上面整块会空转，
+    # 于是充电状态只能退到 BLE 记忆值。改从 CPS 收发器 tx_status 取真值。
+    # 插在这里而非 UEVENT 之后：两者都是 CPS 硬件路径，该来源比 BLE 记忆
+    # 更权威；而本机 lenovo_penraw uevent 只有 MAJOR/MINOR/DEVNAME，取不到
+    # 值，所以对 pineapple（其 CPS uevent 带键值、在上面已 return）无影响。
+    charge_state=$(read_cps_charging)
+    case "$charge_state" in
+        0|1)
+            cache_hardware_charging "$charge_state"
+            echo "$charge_state"
             return 0
             ;;
     esac
@@ -712,16 +770,21 @@ request_pen_capsule() {
         echo "[$(date '+%F %T')] magnetic capsule delayed: BLE link not ready"
         return 1
     fi
-    battery_valid=$(settings get global lenovo_pen_hardware_battery_valid 2>/dev/null | tr -d '\r')
-    if [ "$battery_valid" != 1 ]; then
-        echo "[$(date '+%F %T')] magnetic capsule delayed: fresh battery sample unavailable"
-        return 1
-    fi
-    battery=$(settings get global ipe_pencil_battery_level 2>/dev/null | tr -d '\r')
+    # 胶囊是「磁吸吸附」这个物理动作的即时反馈，必须在吸附边沿弹出，不能
+    # 等一次新鲜油表采样。此前这里硬卡 lenovo_pen_hardware_battery_valid==1，
+    # 而该标志恰好在吸附边沿被主动清 0（见 monitor_hall_capsule），本机内核
+    # 侧又没有任何新鲜电量源（CPS 路径写错、penraw uevent 无 LEVEL），于是
+    # 只能等厂家 BLE 栈推首帧 GATT 样本 —— 实测 10~21 秒，且多次直接超时
+    # 不弹。改为：优先新鲜样本，取不到就退化到最后一次真实采样（hook 侧的
+    # invalidateHardwareBattery 本来就设计成保留上一次电量可见）。
+    battery=$(read_hardware_battery)
     if ! valid_level "$battery"; then
-        echo "[$(date '+%F %T')] magnetic capsule delayed: invalid battery sample=$battery"
+        echo "[$(date '+%F %T')] magnetic capsule delayed: no battery sample yet"
         return 1
     fi
+    battery_valid=$(settings get global lenovo_pen_hardware_battery_valid 2>/dev/null | tr -d '\r')
+    [ "$battery_valid" = 1 ] || \
+        echo "[$(date '+%F %T')] magnetic capsule uses last valid battery=$battery (fresh sample pending)"
     now=$(date '+%s' 2>/dev/null)
     previous=$(cat "$CAPSULE_DEDUP_FILE" 2>/dev/null)
     previous_time=${previous%%:*}
@@ -752,12 +815,25 @@ request_pen_capsule() {
 }
 
 request_pen_capsule_when_ready() {
+    # 同一个吸附边沿只允许一个重试循环。此前每次 dock 边沿都 fork 一个新
+    # worker，而 hall 在吸附瞬间会抖动，再加上开机路径那个延迟 22 秒的
+    # worker，常有两三个循环同时存活 —— pen-bridge.log 里成对的重复行就是
+    # 它们写的，胶囊也被重复尝试广播。用标记文件去重；任何退出路径都必须
+    # 清理，否则会永久堵死后续边沿（服务启动时会先清一次）。
+    if [ -e "$CAPSULE_WORKER_FILE" ]; then
+        return 0
+    fi
+    : >"$CAPSULE_WORKER_FILE"
     attempts=0
     while [ "$attempts" -lt 40 ] && [ "$(read_hall_state)" = 1 ]; do
-        request_pen_capsule && return 0
+        if request_pen_capsule; then
+            rm -f "$CAPSULE_WORKER_FILE"
+            return 0
+        fi
         attempts=$((attempts + 1))
         sleep_sec 0.5
     done
+    rm -f "$CAPSULE_WORKER_FILE"
     echo "[$(date '+%F %T')] magnetic capsule abandoned: link/battery not ready after ${attempts} attempts"
 }
 
