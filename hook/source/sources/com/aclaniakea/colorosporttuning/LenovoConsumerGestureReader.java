@@ -111,7 +111,12 @@ final class LenovoConsumerGestureReader implements Runnable {
                     BufferedReader bufferedReader = new BufferedReader(new FileReader(file));
                     try {
                         String line = bufferedReader.readLine();
-                        if (line != null && line.toLowerCase().contains("lenovo tab pen pro consumer control")) {
+                        // TB522FU names this node "Lenovo Tab Pen Pro 2 Consumer
+                        // Control" — the old needle "lenovo tab pen pro consumer
+                        // control" (no " 2") never matched. Match on the two
+                        // stable parts instead.
+                        if (line != null && line.toLowerCase().contains("lenovo tab pen")
+                                && line.toLowerCase().contains("consumer control")) {
                             String str = "/dev/input/event" + i;
                             bufferedReader.close();
                             return str;

@@ -306,19 +306,41 @@ final class SystemStylusHooks {
             HookUtils.log("suppressed pen key during magnetic transition code=" + keyCode + " scan=" + scanCode);
             return true;
         }
-        if (lowerCase.contains("lenovo tab pen pro consumer control")) {
+        // Touch strip ("Consumer Control") device.
+        //
+        // TB522FU reality (getevent -lp /dev/input/event9, 2026-09-18):
+        //   name  = "Lenovo Tab Pen Pro 2 Consumer Control"   (note the " 2")
+        //   KEY   = KEY_UNKNOWN only  (keycode 240)
+        //   MSC   = MSC_SCAN
+        // Every gesture arrives as  EV_MSC/MSC_SCAN <code> + EV_KEY KEY_UNKNOWN
+        // DOWN/UP, i.e. the keycode is always 240 and the gesture is carried by
+        // the scancode.  The previous port matched the name WITHOUT " 2" and
+        // branched on keyCodes 131/132/133, so on this device neither the name
+        // nor the keycode ever matched and the touch strip was dead.
+        //
+        // Measured scancodes (one per gesture, on the UP event):
+        //   0x000c0613 (787987) = swipe up
+        //   0x000c0612 (787986) = swipe down
+        //   0x000c0601 (787969) = double tap
+        if (lowerCase.contains("lenovo tab pen") && lowerCase.contains("consumer control")) {
             if (keyEvent.getRepeatCount() <= 0 && keyEvent.getAction() == 1) {
-                if (keyCode == 131) {
-                    HookUtils.log("mapped touch strip: swipe down -> native 767");
-                    injectNativePenKey(context, 767);
-                } else if (keyCode == 132) {
-                    HookUtils.log("mapped touch strip: swipe up -> native 768");
-                    injectNativePenKey(context, 768);
-                } else if (keyCode == 133) {
-                    HookUtils.log("mapped touch strip: double tap -> native 769");
-                    injectNativePenKey(context, 769);
-                } else {
-                    HookUtils.log("unmapped consumer key code=" + keyCode + " scan=" + scanCode);
+                switch (scanCode) {
+                    case 787987: // 0x000c0613 swipe up
+                        HookUtils.log("mapped touch strip: swipe up -> native 768");
+                        injectNativePenKey(context, 768);
+                        break;
+                    case 787986: // 0x000c0612 swipe down
+                        HookUtils.log("mapped touch strip: swipe down -> native 767");
+                        injectNativePenKey(context, 767);
+                        break;
+                    case 787969: // 0x000c0601 double tap
+                        HookUtils.log("mapped touch strip: double tap -> native 769");
+                        injectNativePenKey(context, 769);
+                        break;
+                    default:
+                        HookUtils.log("unmapped consumer scancode=0x"
+                                + Integer.toHexString(scanCode) + " keyCode=" + keyCode);
+                        break;
                 }
             }
             return true;

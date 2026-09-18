@@ -34,11 +34,16 @@
   - 相关文档：`docs/install-vector-route.md` 踩坑表；技能 `android-ksu-vector-module-triage` 的 Bootloop triage。
 
 ## 已知缺口（2026-09-18 观测）
+- [x] **笔身触控条手势打通（v4.1.5）**：设备名串少了 ` 2` + 框架路径错按 `keyCode 131/132/133` 分派（该设备只上报 `KEY_UNKNOWN`(240)），
+      两处已修：名称放宽为 `lenovo tab pen` + `consumer control`，分派改按 `getScanCode()`。实测扫描码
+      `787987`=上滑 / `787986`=下滑 / `787969`=双击（TB522FU 实测，见 `docs/install-vector-route.md` 踩坑 #11）。
+      ⚠️ 待实测确认：三种手势能否分别落到注入键 768/767/769 且下游有响应（需要人各做一次手势看日志）。
 - [ ] `LenovoConsumerGestureReader` 依赖 native 库 `libpeninput.so`（`System.load(nativeLibraryDir+"/libpeninput.so")` 提供 `nativeGrab`=EVIOCGRAB），
-      移植版 Hook APK **未打包**该 .so（v4.1.3 / v4.1.4 均无 `lib/`），运行期报
+      移植版 Hook APK **未打包**该 .so（v4.1.3 / v4.1.4 / v4.1.5 均无 `lib/`），运行期报
       `native pen input load failed: UnsatisfiedLinkError … libpeninput.so not found` →「consumer gesture reader」这条路（Lenovo Tab Pen Pro
-      触控条原始事件直读）当前不可用。触控条另走 `PhoneWindowManager.interceptKeyBeforeQueueing` 的键映射路径，功能非全丢。
-      待办：从原始 TB710FU 移植源确认 native 源码/预编译 .so 是否随仓库存在，决定是否补进 APK。
+      触控条原始事件直读）当前不可用。**但触控条已由框架路径（`PhoneWindowManager` 拦截 + `getScanCode` 分派）覆盖，功能不受影响**；
+      且此路 `EVIOCGRAB` 会独占设备，与框架路径**只能二选一**。名称串已同步修好，仅作将来备选。
+      若要启用：从原始 TB710FU 移植源取预编译 .so 放进 `hook/source/resources/lib/arm64-v8a/`，或自写 ~20 行 JNI（一个 `ioctl` 封装）。
 
 ## P1 — 最小闭环（连接 + 电量）
 - [ ] 构建 Hook APK（`hook/tools/build_hook_source.py`）并按 scope.list 勾选 LSPosed 作用域
