@@ -1,0 +1,33 @@
+# Lenovo Tab Pen Pro 2 keylayout for ColorOS/AOSP frameworks.
+# Module overlay (tb522fu_pen_bridge): replaces the ROM's 3-group mapping with
+# SIX distinct keys so every touch-strip gesture is independently dispatchable.
+#
+# Device observed on ColorOS port:
+#   Lenovo Tab Pen Pro 2 Consumer Control / Mouse (uhid 0005:17EF:622E)
+# Raw getevent samples (HID consumer usages via EV_MSC/MSC_SCAN):
+#   0x0c0601 -> two-tap / two-click
+#   0x0c0612 -> touch-film slide down
+#   0x0c0613 -> touch-film slide up
+#   0x0c0614 -> single click
+#   0x0c0611 -> long press
+#   0x0c0619 -> squeeze
+#
+# Mapping (v4.1.14; the module's SystemStylusHooks.stripGesture() must match):
+#   F1 (131) single click      0x0c0614
+#   F2 (132) two-click         0x0c0601
+#   F3 (133) long press        0x0c0611
+#   F4 (134) squeeze           0x0c0619   (same action family as long press)
+#   F5 (135) slide up          0x0c0613
+#   F6 (136) slide down        0x0c0612
+#
+# NOTE: the ROM file groups slide-up/down/click into F1, which is why every
+# swipe behaved as "single click" (colour palette). SystemStylusHooks handles
+# 131..136 itself, so the generic fallback mapping for 134/135 in its generic
+# branch is never reached from this device.
+
+key usage 0x0c0614   F1
+key usage 0x0c0601   F2
+key usage 0x0c0611   F3
+key usage 0x0c0619   F4
+key usage 0x0c0613   F5
+key usage 0x0c0612   F6

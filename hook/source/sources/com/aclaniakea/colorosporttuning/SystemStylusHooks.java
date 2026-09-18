@@ -325,6 +325,9 @@ final class SystemStylusHooks {
     private static final int STRIP_SINGLE_CLICK = 1;
     private static final int STRIP_DOUBLE_CLICK = 2;
     private static final int STRIP_LONG_PRESS = 3;
+    private static final int STRIP_SQUEEZE = 4;
+    private static final int STRIP_SLIDE_UP = 5;
+    private static final int STRIP_SLIDE_DOWN = 6;
 
     /**
      * Map the key-layout-mapped touch-strip key code to a gesture bucket.
@@ -332,17 +335,26 @@ final class SystemStylusHooks {
      * <p>Returns 0 when the code is not one of the touch-strip codes, so the
      * caller can fall through to the generic pen-button mapping.
      *
-     * <p>131/132/133 are the F1/F2/F3 the ROM key layout assigns to the pen's
-     * consumer-control usages.
+     * <p>131..136 are the F1..F6 the MODULE key layout overlay
+     * (module/system/usr/keylayout/Vendor_17ef_Product_622e.kl, v4.1.14)
+     * assigns to the pen's six consumer-control usages. The ROM's own layout
+     * grouped slide-up/down/click into F1 -- the reason every swipe used to
+     * act as "single click".
      */
     private static int stripGesture(int keyCode) {
         switch (keyCode) {
-            case 131: // F1: touch-film slide down | slide up | single click
+            case 131: // F1: 0x0c0614 single click
                 return STRIP_SINGLE_CLICK;
-            case 132: // F2: two-click (double tap)
+            case 132: // F2: 0x0c0601 two-click (double tap)
                 return STRIP_DOUBLE_CLICK;
-            case 133: // F3: long press | squeeze
+            case 133: // F3: 0x0c0611 long press
                 return STRIP_LONG_PRESS;
+            case 134: // F4: 0x0c0619 squeeze
+                return STRIP_SQUEEZE;
+            case 135: // F5: 0x0c0613 slide up
+                return STRIP_SLIDE_UP;
+            case 136: // F6: 0x0c0612 slide down
+                return STRIP_SLIDE_DOWN;
             default:
                 return 0;
         }
@@ -354,6 +366,12 @@ final class SystemStylusHooks {
                 return "double-click action";
             case STRIP_LONG_PRESS:
                 return "long-press action";
+            case STRIP_SQUEEZE:
+                return "squeeze action";
+            case STRIP_SLIDE_UP:
+                return "slide-up action";
+            case STRIP_SLIDE_DOWN:
+                return "slide-down action";
             default:
                 return "single-click action";
         }
@@ -383,7 +401,12 @@ final class SystemStylusHooks {
                         click(context, true);
                         break;
                     case STRIP_LONG_PRESS:
+                    case STRIP_SQUEEZE:
                         longAction(context);
+                        break;
+                    case STRIP_SLIDE_UP:
+                    case STRIP_SLIDE_DOWN:
+                        swipeAction(context, gesture == STRIP_SLIDE_UP);
                         break;
                     default:
                         // A touch-strip DOUBLE tap reaches the framework as TWO
@@ -426,14 +449,16 @@ final class SystemStylusHooks {
         //     and NEVER reaches the key queue, so it must not be matched.
         //   every gesture arrives as a DOWN+UP pair with
         //     getScanCode() == 240   (KEY_UNKNOWN, the raw Linux code: CONSTANT)
-        //     getKeyCode()  == 131 / 132 / 133  (F1 / F2 / F3)
+        //     getKeyCode()  == 131..136  (F1..F6 with the v4.1.14 module .kl
+        //                                  overlay; the ROM layout grouped
+        //                                  slide-up/down/click into F1)
         //   i.e. the gesture is carried by the KEYCODE and the scan code is a
-        //   constant.  The F1/F2/F3 codes come from the ROM key layout
-        //   /system/usr/keylayout/Vendor_17ef_Product_622e.kl, whose
-        //   "key usage <hid-usage> <key>" lines group the six consumer usages:
-        //     F1 (131) <- 0x0c0612 slide down | 0x0c0613 slide up | 0x0c0614 click
-        //     F2 (132) <- 0x0c0601 two-click (double tap)
-        //     F3 (133) <- 0x0c0611 long press    | 0x0c0619 squeeze
+        //   constant.  The F1..F6 codes come from the MODULE key layout
+        //   /system/usr/keylayout/Vendor_17ef_Product_622e.kl (magic-mounted
+        //   from module/system/usr/keylayout/), whose "key usage" lines are:
+        //     F1 (131) <- 0x0c0614 click       F4 (134) <- 0x0c0619 squeeze
+        //     F2 (132) <- 0x0c0601 two-click   F5 (135) <- 0x0c0613 slide up
+        //     F3 (133) <- 0x0c0611 long press  F6 (136) <- 0x0c0612 slide down
         //
         // v4.1.5 got this wrong twice: it dispatched on getScanCode() (a
         // constant 240 here, so it always fell into the default branch) and it
@@ -526,6 +551,61 @@ final class SystemStylusHooks {
         String str = z ? "com.oplus.ipemanager.action.PENCIL_DOUBLE_CLICK" : "com.oplus.ipemanager.action.PENCIL_SINGLE_CLICK";
         for (String str2 : i == HID_HOST_PROFILE ? new String[]{"com.oplus.healthservice"} : new String[]{"com.coloros.note", "com.oplus.screenshot"}) {
             sendAll(context, new Intent(str).setPackage(str2).putExtra("action", i).addFlags(268435456), i == HID_HOST_PROFILE ? "com.oplus.ipemanager.permission.receiver.DOUBLE_CLICK" : null);
+        }
+    }
+
+    /**
+     * Action layer for the touch-strip SLIDE gestures (v4.1.14).
+     *
+     * <p>Configured per direction via Settings.Global
+     * {@code ipe_pencil_slide_up} / {@code ipe_pencil_slide_down} using the
+     * same value enum as the click settings, plus one extension:
+     *
+     * <ul>
+     *   <li>0 none; 1 switch_eraser; 2 switch_recent; 3 show_color;
+     *       4 open_wheel (healthservice roulette)</li>
+     *   <li>5 smart_collect 随心圈 — the OEM circle-to-collect session.
+     *       Implemented by replaying exactly what the OEM long-press does:
+     *       STYLUS_BUTTON_STATE_CHANGED "down" arms StylusTouchInterceptService
+     *       (verified live 2026-09-18: service starts, colordirectservice
+     *       intercept window comes up), the user circles with the pen, and the
+     *       pre-existing 30 s EXPIRE_LONG / pen-down latch cleans up.</li>
+     * </ul>
+     *
+     * <p>Defaults match the user's configuration on this device:
+     * slide up = 随心圈 (5), slide down = 调色盘 (3).
+     */
+    private static void swipeAction(Context context, boolean up) {
+        int i;
+        try {
+            i = Settings.Global.getInt(context.getContentResolver(),
+                    up ? "ipe_pencil_slide_up" : "ipe_pencil_slide_down",
+                    up ? 5 : 3);
+        } catch (Throwable th) {
+            i = up ? 5 : 3;
+        }
+        HookUtils.log("touch strip slide " + (up ? "up" : "down") + " action=" + i);
+        if (i == 0) {
+            return;
+        }
+        if (i == 5) {
+            // 随心圈: same path as the OEM long-press collect session.
+            longAction(context);
+            return;
+        }
+        if (i == 4) {
+            // open wheel: ONLY healthservice consumes this (see click()).
+            sendAll(context, new Intent("com.oplus.ipemanager.action.PENCIL_SINGLE_CLICK")
+                    .setPackage("com.oplus.healthservice")
+                    .putExtra("action", 4).addFlags(268435456), null);
+            return;
+        }
+        // 1/2/3: in-app pen-mode switch. Only the doodle-engine owners handle
+        // these; healthservice ignores the "action" extra and always pops the
+        // wheel, so it must NOT be in this list (load-bearing, see click()).
+        for (String pkg : new String[]{"com.coloros.note", "com.oplus.screenshot"}) {
+            sendAll(context, new Intent("com.oplus.ipemanager.action.PENCIL_SINGLE_CLICK")
+                    .setPackage(pkg).putExtra("action", i).addFlags(268435456), null);
         }
     }
 

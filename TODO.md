@@ -64,6 +64,8 @@
       逐次 `click(false)` 会让 OEM 把转盘**开一下又关一下**（净无反应）；`tap()` 归并成一次 `click(true)`。132（F2/双击）路径也实测可达。
       ⏳ **待决策**：目前「滑动/单击/双击」全部落到同一个转盘，未做区分（框架层天然分不开上滑/下滑）。
       若要四手势各自独立 → 见下一条 `.kl` overlay 方案。
+      ✅ **已解决（v4.1.14，2026-09-18 23:19 实机验证）**：`.kl` overlay + `stripGesture()` 六手势 +
+      `swipeAction()` 上下滑动作层全部落地。见下一条。
 - [x] **手势原始判别位已拿到（供将来细分 6 手势）**：笔的 HID notify `00002a4d-…` 报文字节可区分手势 ——
       `02 00 08 00 00`=上滑、`02 00 04 00 00`=下滑、`02 02 00 00 00`=双击、`02 00 00 02 00`=长按（与日志时间戳一一对应）。
       但 ROM 的 `Vendor_17ef_Product_622e.kl` 把「上滑|下滑|单击」都并成 **F1(131)**、「双击」→F2(132)、「长按|挤捏」→F3(133)，
@@ -72,6 +74,15 @@
       （KernelSU magic mount 在 post-fs-data 生效，早于 system_server 读 keylayout）。
       ⚠️ 磁盘上现有那份 `.kl` **属于 ROM**（无模块覆盖，md5 `eb89c57180b3309badb03aaf9d2630bf`）；覆盖它前先确认 `dumpsys input` 里
       该节点的 `KeyLayoutFile` 指向新文件。
+      ✅ **已落地（v4.1.14，2026-09-18 实机验证）**：
+      - `module/system/usr/keylayout/Vendor_17ef_Product_622e.kl`：6 usage → F1..F6（131 单击 / 132 双击 / 133 长按 / 134 挤捏 / 135 上滑 / 136 下滑）；
+      - `SystemStylusHooks.stripGesture()` 扩到 6 项；新增 `swipeAction()`：读 `ipe_pencil_slide_up`/`ipe_pencil_slide_down`
+        （默认 **上滑=5 随心圈 / 下滑=3 调色盘**；值 5 = 复用 OEM 长按圈选会话 `longAction()`，即
+        `STYLUS_BUTTON_STATE_CHANGED down` → `StylusTouchInterceptService` 圈选浮窗，已真机广播验证链路通）；
+      - ⚠️ 热替换 `.kl` 的坑：bind mount 的临时文件必须 `chcon u:object_r:system_file:s0`，否则 InputReader
+        读 `shell_data_file` 被拒 → 回退 Generic.kl → keyCode=0（抓 `dmesg | grep avc` 定位）；
+        且换 `.kl` / 换 APK 后需**重启**（system_server 的 hook 代码是开机注入的，热装 APK 不生效）。
+      - 实机（合成事件 + 真笔 GATT 双重验证）：135→`slide-up action`→圈选 armed；136→`slide-down action=3`→色盘广播；132→双击。
 - [ ] `LenovoConsumerGestureReader` 依赖 native 库 `libpeninput.so`（`System.load(nativeLibraryDir+"/libpeninput.so")` 提供 `nativeGrab`=EVIOCGRAB），
       移植版 Hook APK **未打包**该 .so（v4.1.3 / v4.1.4 / v4.1.5 均无 `lib/`），运行期报
       `native pen input load failed: UnsatisfiedLinkError … libpeninput.so not found` →「consumer gesture reader」这条路（Lenovo Tab Pen Pro
