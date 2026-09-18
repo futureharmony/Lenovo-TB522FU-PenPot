@@ -39,3 +39,4 @@
 - [ ] 实机验证恢复充电通知（电量回落到 <=95）
 - [ ] 实机验证 ipe_pencil_charging_state 在低于 100% 吸附时被修正为 1
 - [ ] P1 Hook APK 中实现 SHOW_PENCIL_CAPSULE 接收端（弹胶囊/发通知）
+- [x] service.sh：inkdye 禁用改为仅当 hook APK 就位时执行（消除触觉反馈空窗）
