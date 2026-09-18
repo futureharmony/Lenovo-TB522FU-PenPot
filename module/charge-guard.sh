@@ -61,10 +61,14 @@ pen_battery() {
 }
 
 notify() {
-    # 通知失败要留痕：cmd notification 在部分 SELinux 域下可能被拒
+    # 实测（2026-09-18）：cmd notification post rc=0 且系统接收，
+    # 但 ColorOS 会静默丢弃 shell(uid 0) 来源的通知（dumpsys 无记录、不显示）。
+    # 因此 UI 展示由 P1 的 Hook APK（有身份的应用）承担：
+    #   守护 → SHOW_PENCIL_CAPSULE 广播 → Hook 收到后弹胶囊/发通知。
+    # 保留 cmd notification：在原生 AOSP 上可用，ColorOS 上无害。
     out=$(cmd notification post -S bigtext -t "手写笔" "pen_charge_guard" "$1" 2>&1)
     rc=$?
-    log "notify rc=$rc out=$out msg=$1"
+    log "notify rc=$rc msg=$1 (ColorOS drops shell notifs; UI via hook broadcast)"
     am broadcast -a com.aclaniakea.lenovopenbridge.action.SHOW_PENCIL_CAPSULE \
         --es text "$1" >/dev/null 2>&1
 }

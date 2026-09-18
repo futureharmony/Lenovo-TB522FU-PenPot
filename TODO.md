@@ -35,3 +35,7 @@
 - [ ] 补受控实验：笔到 100% 后保持不动，确认 online 是否自行归零（区分"充满自动断电"vs"取笔"）
 - [ ] 实机验证恢复充电通知（电量回落到 <=95）
 - [ ] 验证 ipe_pencil_charging_state 在低于 100% 吸附时被修正为 1
+- [x] 实机验证充满通知闭环：守护触发 ✅、兜底断电 ✅；确认 ColorOS 丢弃 shell 通知 → UI 展示移入 P1 Hook APK（SHOW_PENCIL_CAPSULE 广播链路已预留）
+- [ ] 实机验证恢复充电通知（电量回落到 <=95）
+- [ ] 实机验证 ipe_pencil_charging_state 在低于 100% 吸附时被修正为 1
+- [ ] P1 Hook APK 中实现 SHOW_PENCIL_CAPSULE 接收端（弹胶囊/发通知）
