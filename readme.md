@@ -24,6 +24,14 @@ docs/         分析与验证记录
 2. `module/service.sh`：Root 侧设备门同步改；新增 inkdye 禁用/恢复逻辑
 3. `module/module.prop`、`customize.sh`：模块 ID 改为 `tb522fu_pen_bridge`，避免与原模块冲突
 
+## TB522FU 新增功能：充电守护（charge-guard.sh v2）
+- **磁吸通知**：沿用 monitor_hall_capsule（hall3 已映射）。
+- **充电状态修正**：实测 IPeManager `ipe_pencil_charging_state` 恒 0，由守护按真实 吸附+TX 状态回写。
+- **充满通知**：吸附 + 电量>=100 + TX 关闭 → 系统通知「已充满，已停止充电」（`cmd notification` + 胶囊广播兜底）。
+- **充满断电**：实测由 cps-wls-charger 驱动自带（笔满自发 `cps_wls_en:0`）；守护仅在驱动异常时兜底写 `0`。
+  - ⚠️ TX 写入为**瞬时**：`echo 1` 后约 30s 被驱动按自身策略改回；写入只认裸数字 `0`/`1`。
+- 开关：`touch $MODDIR/disable-charge-guard` 临时停用；卸载时自动恢复 TX=1。
+
 ## 待验证 / 进行中
 
 见 `TODO.md`。最关键卡点：**Hall/CPS 硬件节点**（TB710FU 的 `pen1_hall/pen2_hall`、CPS I2C/GPIO 在 TB522FU 均不存在，需先跑 `scripts/recon_sysfs.sh` 找替代节点）。

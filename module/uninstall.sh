@@ -24,3 +24,16 @@ if [ -f "$INKDYE_STATE" ]; then
         echo "WARN: failed to re-enable $INKDYE_PKG; run manually: pm enable $INKDYE_PKG" >&2
     rm -f "$INKDYE_STATE"
 fi
+
+# --- 收回充电守护：停进程并把无线发射恢复到开启态（裸数字写法）---
+CG_PID="$MODDIR/charge-guard.pid"
+if [ -r "$CG_PID" ]; then
+    pid=$(cat "$CG_PID" 2>/dev/null)
+    case "$pid" in
+        ''|*[!0-9]*) ;;
+        *) kill "$pid" 2>/dev/null ;;
+    esac
+    rm -f "$CG_PID"
+fi
+[ -w /sys/bus/i2c/devices/11-0041/tx_status ] && \
+    echo 1 >/sys/bus/i2c/devices/11-0041/tx_status 2>/dev/null

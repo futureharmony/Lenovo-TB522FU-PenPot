@@ -26,3 +26,10 @@
 - [ ] Hook 包名是否改名（当前沿用 com.aclaniakea.lenovopenbridge，改包名需同步 build 脚本/签名/scope）
 - [ ] 本机 LSPosed 版本与 lspd 路径同步机制验证（post-fs-data 的 lsposed-path-sync）
 - [ ] 无线 adb 不稳，调试期改 USB
+
+## P2.5 充电守护（新增，2026-09-18 实现）
+- [x] `module/charge-guard.sh` v2：磁吸观察 + 充满通知 + 兜底断电 + IPeManager 状态修正（已实机起进程验证启动）
+- [x] `service.sh` 挂载、`uninstall.sh` 恢复 TX=1
+- [ ] 实机验证充满通知（吸附 + 电量 100）闭环
+- [ ] 实机验证恢复充电通知（电量回落到 <=95）
+- [ ] 验证 ipe_pencil_charging_state 在低于 100% 吸附时被修正为 1

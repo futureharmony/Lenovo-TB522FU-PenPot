@@ -1246,6 +1246,10 @@ monitor_battery_cache &
 monitor_charging_cache &
 monitor_real_bt_state &
 
+# TB522FU: 充满断电 + 充电通知 + IPeManager 充电状态修正。
+# 独立脚本，可用 `touch $MODDIR/disable-charge-guard` 临时停用。
+[ -x "$MODDIR/charge-guard.sh" ] && sh "$MODDIR/charge-guard.sh" &
+
 monitor_hid_latch &
 
 # The ported IPeManager package carries the vendor Bluetooth receivers in
