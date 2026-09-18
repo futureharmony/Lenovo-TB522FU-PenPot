@@ -1,54 +1,71 @@
 #!/system/bin/sh
 # ============================================================================
-# TB522FU 手写笔充电守护 (charge guard)  v2
+# TB522FU 手写笔充电守护 (charge guard) v3 —— 纯观察者
 # ----------------------------------------------------------------------------
-# 设计依据（2026-09-18 实测）：
-#   * TX 写入是瞬时的：echo 1 后约 30s 被 cps-wls-charger 驱动按自身策略改回。
-#     笔充满时驱动自发 cps_wls_en:0（dmesg: Notcharging）→ 充满断电由驱动负责。
-#   * 因此守护定位为「观察 + 通知 + 状态修正」，只在驱动"该关没关"时兜底写 0。
-#   * 实测 ipe_pencil_charging_state 恒 0（内核在充、IPeManager 不知道）→ 由本守护回写。
+# v2 → v3 的关键变更（2026-09-18，反向分析驱动 + 受控实验后）
 #
-# 功能：
-#   1) 磁吸状态：och1909 hall3，0=吸附；
-#   2) 充满通知：吸附且电量>=FULL_TH 且 TX 关闭 → 通知一次"已充满，已停止充电"；
-#   3) 兜底断电：同一状态下若 TX 仍为 1（驱动异常），写 0 强制断；
-#   4) 恢复充电：吸附且已满分且电量<=RESUME_TH → 通知"恢复充电"；
-#   5) 修正 ipe_pencil_charging_state：按真实 吸附+TX 状态回写。
+# v2 会主动写 tx_status=0 强制断电。但把 CPS8601 驱动本体
+# （/vendor_dlkm/lib/modules/cps_wls_charger.ko）拉下来分析后确认：
+#
+#   * 该驱动是【原厂 Lenovo TB522FU 构建】（整个 /vendor_dlkm 308 个模块同源，
+#     含 dhall_och1909 / lenovo_sys_temp / lenovo_thermal_control 等 Lenovo 专属
+#     驱动），ColorOS 只提供 system/product/odm，没有介入 CPS。
+#   * 充满截止是驱动自己的事：它自己读 hall_status，通过带内 ASK/FSK 从笔拿
+#     charging_soc / charging_status / charging_cmd，笔要求停就 close tx；
+#     另有 cps_handle_rechg_work 做补充充电。设备树与模块 parameters 里
+#     没有任何策略配置 —— 策略硬编码在驱动内。
+#
+# 受控实验（停用本守护、笔重新吸附后保持不动，2 秒一采样）：
+#   15:10:41 吸附确认 → 驱动开 TX（此时电量已 100%）
+#   15:21:03 驱动【自行】关 TX（笔仍吸附 hall3=0）—— 全程守护未动作
+#   → 驱动会自关，耗时约 10 分钟（涓流 + 确认周期）。
+#
+# 而 v2 的强制写会在吸附后 3~6 秒就抢先关掉，打断驱动的正常周期；更要命的是
+# v2 用【BLE 侧电量】当判据、驱动用【带内 charging_soc】，两者不一致时 v2 会
+# 挡住合法补电（表现为"笔吸上去不充电"）。
+#
+# 所以 v3 定位为【纯观察者】：**不写 tx_status**，只做
+#   1) 观察驱动动作 → 发「已充满 / 已恢复充电」通知；
+#   2) 回写 ipe_pencil_charging_state（ColorOS 的 IPeManager 恒 0，是移植缺口）。
+#
+# ⚠️ 已披露的边界情况：若将来换成不支持该带内协议的笔，驱动拿不到 charging_cmd
+#    就可能长期不关 TX。届时应加长超时兜底（而不是恢复到 v2 的秒级强制关）。
+#    分析详见 docs/cps-charger-driver-analysis.md。
 #
 # 硬件接口（实测）：
-#   /sys/bus/i2c/devices/11-0041/tx_status   写裸数字 0/1（带字样会被判 0！）
-#   /sys/devices/virtual/hall/och1909/hall3  实际内容为 "hall13 value = 0"
-#     （驱动格式串 bug：前缀是 hall13 不是 hall3。解析只取行尾数字，
-#      两种前缀都兼容，勿依赖前缀判断。）
-# 注意：adb/shell 直接内联引号会丢失，一律以脚本文件执行本脚本。
+#   <i2c>-0041/tx_status   内容 cps_boost_mode:%d, cps_wls_en:%d —— 唯一可信的
+#                          "正在送电"判据是 cps_wls_en；写入只认裸数字 0/1
+#   /sys/devices/virtual/hall/och1909/hall3  内容 "hall13 value = 0"（驱动格式串
+#                          bug，前缀是 hall13 不是 hall3；解析只取行尾数字）
+# 注意：CPS 节点按 I2C 地址 0x41 运行时解析，兼容 pineapple(2-0041)/sun(11-0041)。
 # ============================================================================
 
 MODDIR=${0%/*}
 LOG="$MODDIR/charge-guard.log"
 PIDFILE="$MODDIR/charge-guard.pid"
 
-TX_NODE=/sys/bus/i2c/devices/11-0041/tx_status
 HALL3=/sys/devices/virtual/hall/och1909/hall3
-POLL_SEC=${POLL_SEC:-30}
+POLL_SEC=${POLL_SEC:-15}
 FULL_TH=${FULL_TH:-100}
 RESUME_TH=${RESUME_TH:-95}
 GUARD_DISABLE="$MODDIR/disable-charge-guard"
 
+# CPS8601 的 I2C 地址恒为 0x41，按总线符号链接解析
+TX_NODE=
+for d in /sys/bus/i2c/devices/*-0041; do
+    [ -r "$d/tx_status" ] && { TX_NODE="$d/tx_status"; break; }
+done
+
 log() { echo "[$(date '+%F %T')] $*" >>"$LOG"; }
 
 tx_get() {
+    [ -n "$TX_NODE" ] || { echo -1; return; }
     v=$(cat "$TX_NODE" 2>/dev/null)
     case "$v" in
         *cps_wls_en:1*) echo 1 ;;
         *cps_wls_en:0*) echo 0 ;;
         *) echo -1 ;;
     esac
-}
-
-tx_set() {
-    case "$1" in 0|1) : ;; *) return 1 ;; esac
-    [ -w "$TX_NODE" ] || return 1
-    echo "$1" >"$TX_NODE" 2>/dev/null
 }
 
 hall_docked() {
@@ -65,7 +82,7 @@ pen_battery() {
 notify() {
     # 实测（2026-09-18）：cmd notification post rc=0 且系统接收，
     # 但 ColorOS 会静默丢弃 shell(uid 0) 来源的通知（dumpsys 无记录、不显示）。
-    # 因此 UI 展示由 P1 的 Hook APK（有身份的应用）承担：
+    # 因此 UI 展示由 Hook APK（有身份的应用）承担：
     #   守护 → SHOW_PENCIL_CAPSULE 广播 → Hook 收到后弹胶囊/发通知。
     # 保留 cmd notification：在原生 AOSP 上可用，ColorOS 上无害。
     out=$(cmd notification post -S bigtext -t "手写笔" "pen_charge_guard" "$1" 2>&1)
@@ -85,7 +102,8 @@ sync_ipe_state() {
 
 main_loop() {
     prev_docked=dummy
-    full_notified=0
+    prev_tx=dummy
+    notified_full=0
 
     while true; do
         [ -f "$GUARD_DISABLE" ] && { sleep "$POLL_SEC"; continue; }
@@ -95,9 +113,13 @@ main_loop() {
         tx=$(tx_get)
 
         if [ "$docked" != "1" ]; then
-            [ "$prev_docked" = "1" ] && log "pen detached (battery=$batt)"
-            [ "$prev_docked" != "0" ] && full_notified=0
+            if [ "$prev_docked" = "1" ]; then
+                log "pen detached (battery=$batt)"
+                # 离开即会话结束，为下一次吸附重置通知状态
+                notified_full=0
+            fi
             prev_docked=0
+            prev_tx=$tx
             sleep "$POLL_SEC"
             continue
         fi
@@ -105,32 +127,28 @@ main_loop() {
         [ "$prev_docked" != "1" ] && log "pen docked (battery=$batt tx=$tx)"
         prev_docked=1
 
-        if [ "$batt" -ge "$FULL_TH" ] 2>/dev/null; then
-            if [ "$tx" = "1" ]; then
-                # 驱动该关没关 → 兜底
-                if tx_set 0; then
-                    log "driver left TX on at full ($batt); forced off"
-                else
-                    log "WARN: TX off failed at full ($batt)"
-                fi
-            fi
-            if [ "$full_notified" = "0" ]; then
-                full_notified=1
-                sync_ipe_state 0
+        # 充电状态镜像：以驱动真值(cps_wls_en)为准，只在变化时写
+        case "$tx" in
+            0) sync_ipe_state 0 ;;
+            1) sync_ipe_state 1 ;;
+        esac
+
+        # 观察驱动的"充满断电"：TX 由 1 变 0 且电量已满 —— 只通知，不干涉
+        if [ "$prev_tx" = "1" ] && [ "$tx" = "0" ] && [ "$notified_full" = "0" ]; then
+            if [ "$batt" -ge "$FULL_TH" ] 2>/dev/null; then
+                notified_full=1
+                log "driver closed TX at full (battery=$batt); observing - not overriding"
                 notify "手写笔已充满，已停止充电"
-            fi
-        else
-            if [ "$full_notified" = "1" ] && [ "$batt" -ge 0 ] && [ "$batt" -le "$RESUME_TH" ]; then
-                full_notified=0
-                notify "手写笔电量 $batt%，已恢复充电"
-            fi
-            if [ "$tx" = "1" ] && [ "$batt" -ge 0 ]; then
-                sync_ipe_state 1
-            elif [ "$tx" = "0" ]; then
-                sync_ipe_state 0
             fi
         fi
 
+        # 电量回落到阈值以下 → 视为恢复充电
+        if [ "$notified_full" = "1" ] && [ "$batt" -ge 0 ] && [ "$batt" -le "$RESUME_TH" ]; then
+            notified_full=0
+            notify "手写笔电量 $batt%，已恢复充电"
+        fi
+
+        prev_tx=$tx
         sleep "$POLL_SEC"
     done
 }
@@ -144,5 +162,5 @@ if [ -r "$PIDFILE" ]; then
 fi
 echo $$ >"$PIDFILE"
 
-log "charge-guard v2 started (full>=$FULL_TH resume<=$RESUME_TH poll=${POLL_SEC}s)"
+log "charge-guard v3 (observer) started: tx_node=${TX_NODE:-NONE} full>=$FULL_TH resume<=$RESUME_TH poll=${POLL_SEC}s - never writes tx_status"
 main_loop
