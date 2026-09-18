@@ -6,6 +6,9 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 /* loaded from: classes.dex */
 public final class UiWorkingSetPrefetch implements IXposedHookLoadPackage {
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam loadPackageParam) {
+        HookUtils.log("handleLoadPackage pkg=" + (loadPackageParam == null ? "<null>"
+                : loadPackageParam.packageName) + " proc=" + (loadPackageParam == null ? "<null>"
+                : loadPackageParam.processName));
         if (!DeviceGate.supported() || loadPackageParam == null || loadPackageParam.packageName == null) {
             // Diagnostic: the entry point runs but bails out. Silent before, which
             // made a wrong DeviceGate (or a missing scope) look like "no hook".
@@ -22,7 +25,12 @@ public final class UiWorkingSetPrefetch implements IXposedHookLoadPackage {
                 HookUtils.log("broadcast/Binder target active: " + loadPackageParam.packageName);
                 break;
             case "android":
-                SystemStylusHooks.install(loadPackageParam);
+                // Deferred/async: installing hooks makes the framework
+                // deoptimise the targets (ART SuspendAll). Doing that from this
+                // callback can deadlock against system_server's own binder JNI
+                // calls and hang the boot, so it is handed to a worker thread
+                // with a short delay. See SystemStylusHooks.installAsync.
+                SystemStylusHooks.installAsync(loadPackageParam);
                 break;
             case "com.oplus.ipemanager":
                 IpeManagerHooks.install(loadPackageParam);

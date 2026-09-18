@@ -206,9 +206,92 @@ final class SystemStylusHooks {
                 }
             }
         };
-        HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.SystemServer", "startOtherServices", xC_MethodHook);
-        HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.SystemServer", "run", xC_MethodHook);
-        HookUtils.log("system_server stylus hooks installed");
+        int nOther = HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.SystemServer", "startOtherServices", xC_MethodHook);
+        int nRun = HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.SystemServer", "run", xC_MethodHook);
+        // Hook counts are logged because this install now runs deferred/async: if
+        // the deferral ever overshoots and startOtherServices has already been
+        // entered, the count shows 0 (or the hook silently never fires) instead
+        // of the failure looking like "the pen features just stopped".
+        HookUtils.log("system_server stylus hooks installed (startOtherServices=" + nOther
+                + " run=" + nRun + ")");
+    }
+
+    /*
+     * Deferred/async install.
+     *
+     * Installing an Xposed hook makes the framework deoptimise the target
+     * methods, which needs ART's ThreadList::SuspendAll and therefore the
+     * exclusive mutator lock.  If system_server's main thread happens to be at
+     * the exit of a binder JNI call at that instant, it blocks in
+     * artJniMethodEnd waiting for the same lock: the two wait on each other and
+     * the device hangs on the boot animation forever.  Watchdog cannot break it
+     * either, because dumping stacks needs the mutator lock too.
+     *
+     * Observed twice in a row on this port:
+     *   main thread : SystemServer.startCoreServices -> BatteryService.onStart
+     *                 -> IHealth.update -> BinderProxy.transact
+     *                 -> artJniMethodEnd -> ConditionVariable::WaitHoldingLocks
+     *   Vector      : art::ThreadList::SuspendAll  (holding the mutator lock)
+     *
+     * So the install is moved off the framework callback thread onto our own,
+     * after a short delay, to keep the deopt out of the densest part of the
+     * boot: PackageManager / BatteryService / SensorService all sit in
+     * startCoreServices in the first seconds, while the hooks that actually
+     * have to be in place -- SystemServer#startOtherServices and #run -- do not
+     * run until much later (measured ~18s after injection on this device, with
+     * the 20s bootSettle window in init() starting from install time).
+     *
+     * This is a probability reduction, not a guarantee: the underlying
+     * collision is an ART/framework interaction we cannot fix from a module.
+     * Tune at runtime without rebuilding via
+     *   setprop persist.lenovo.penbridge.install_delay_ms <ms>     (0 disables)
+     */
+    private static final int INSTALL_DELAY_DEFAULT_MS = 2500;
+    private static volatile boolean installStarted;
+
+    static void installAsync(final XC_LoadPackage.LoadPackageParam loadPackageParam) {
+        if (installStarted) {
+            return;
+        }
+        installStarted = true;
+        Thread worker = new Thread(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.4
+            @Override
+            public void run() {
+                int delay = INSTALL_DELAY_DEFAULT_MS;
+                try {
+                    Class<?> sp = Class.forName("android.os.SystemProperties");
+                    Object raw = sp.getMethod("get", String.class)
+                            .invoke(null, "persist.lenovo.penbridge.install_delay_ms");
+                    if (raw != null && String.valueOf(raw).trim().length() > 0) {
+                        delay = Integer.parseInt(String.valueOf(raw).trim());
+                    }
+                } catch (Throwable ignored) {
+                }
+                if (delay < 0) {
+                    delay = 0;
+                }
+                if (delay > 30000) {
+                    delay = 30000;
+                }
+                HookUtils.log("system_server install deferred by " + delay + "ms");
+                if (delay > 0) {
+                    try {
+                        Thread.sleep(delay);
+                    } catch (InterruptedException ignored) {
+                    }
+                }
+                long startedAt = SystemClock.elapsedRealtime();
+                try {
+                    install(loadPackageParam);
+                    HookUtils.log("deferred install done in "
+                            + (SystemClock.elapsedRealtime() - startedAt) + "ms");
+                } catch (Throwable th) {
+                    HookUtils.log("deferred install failed: " + th);
+                }
+            }
+        }, "LenovoPenInstall");
+        worker.setDaemon(true);
+        worker.start();
     }
 
     /* JADX INFO: Access modifiers changed from: private */

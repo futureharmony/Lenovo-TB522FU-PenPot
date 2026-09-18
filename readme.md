@@ -120,11 +120,15 @@ Hook 已确认在 system_server 内工作（开机日志）：`system_server sty
 > （构建脚本标注为可选），`native pen input load failed` 后模块优雅降级，`global stylus
 > input monitor` 仍正常注册。
 
-> ⚠️ **已知阻塞性风险（2026-09-18 实机命中一次）**：Hook 注入 system_server 会**偶发卡开机**
+> ⚠️ **已知阻塞性风险（2026-09-18 实机命中一次，已落降险）**：Hook 注入 system_server 会**偶发卡开机**
 > —— 同配置多数开机正常，偶发卡死在开机动画且不自恢复。根因是 Vector 安装 hook 的
 > `ThreadList::SuspendAll`（持独占 mutator 锁）与 system_server 主线程在 binder JNI 调用
-> （`BatteryService.onStart → IHealth.update()`）退出处的重新加锁互等 → 死锁。**重启即可恢复**；
-> 诊断与降险方案见 `TODO.md` P0.5 与 `docs/install-vector-route.md` 踩坑表第 8 条。
+> （`BatteryService.onStart → IHealth.update()`）退出处的重新加锁互等 → 死锁。
+> **降险已部署（Hook APK v4.1.4）**：`install()` 改到守护线程里延迟 2500ms 执行，把 deopt 挪出启动最密的
+> `startCoreServices` 窗口；**连续 6 次重启均正常开机**，日志可见 `install deferred by 2500ms` →
+> `stylus hooks installed (startOtherServices=1 run=1)` → `deferred install done`。
+> 这是**概率降低非根治**（底层 ART/framework 竞态无法从模块侧消除），仍需持续多刷回归。
+> Vector 侧无「免 deopt」配置（已证伪）。诊断与方案见 `TODO.md` P0.5 与 `docs/install-vector-route.md` 踩坑表第 7、8 条。
 
 硬件节点侦察已完成：TB710FU 的 `pen1_hall/pen2_hall`、CPS I2C/GPIO 在 TB522FU 无对应物，
 已改用 `och1909/hall3`（磁吸，注意节点内容前缀是驱动 bug 的 `hall13`）+

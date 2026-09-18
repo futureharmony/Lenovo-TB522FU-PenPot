@@ -20,14 +20,14 @@
 | 文件 | 说明 |
 |---|---|
 | `releases/tb522fu-pen-bridge-v0.1.0.zip` | KernelSU 模块（含 Hook 副本、PenHidCtl priv-app、charge-guard、panic） |
-| `releases/PenBridge-Hook-tb522fu-v4.1.3.apk` | Xposed 模块本体（com.aclaniakea.lenovopenbridge） |
+| `releases/PenBridge-Hook-tb522fu-v4.1.4.apk` | Xposed 模块本体（com.aclaniakea.lenovopenbridge）；v4.1.4 起为**延迟安装**版并镜像日志到 logcat |
 | `releases/PenHidCtl-tb522fu-1.1.0.apk` | HID 控制器（以 priv-app 形式随模块装载） |
 
 ## 2. 部署（全部可脚本化）
 
 ```sh
 # 1) 装/更新 Hook APK —— 注意：adb install 会被 ColorOS 拦（Failure [-99]），必须走 root pm
-adb push releases/PenBridge-Hook-tb522fu-v4.1.3.apk /data/local/tmp/PenBridge-Hook.apk
+adb push releases/PenBridge-Hook-tb522fu-v4.1.4.apk /data/local/tmp/PenBridge-Hook.apk
 adb shell su -c 'pm install -r -d /data/local/tmp/PenBridge-Hook.apk'
 
 # 2) 用 vector-cli 启用模块 + 配置作用域（1 + 7 项，全部 user 0）
@@ -155,8 +155,8 @@ adb shell su -c 'ksud module uninstall tb522fu_pen_bridge'
 | 4 | charge-guard 静默不启动 | `customize.sh` 的 `set_perm` 漏了 `charge-guard.sh` → 装成 0644 → `[ -x ]` 判定失败 | 补 `set_perm`，并把调用改为 `[ -f ] && sh`（不依赖执行位） |
 | 5 | 担心 path-sync 损坏框架库 | `/data/adb/lspd/config/modules_config.db` **是 Vector 的活库**（API 102），`LsposedPathSync` 按 LSPosed schema 写有风险 | 默认禁用，`touch $MODDIR/enable-lsposed-path-sync` 可重新开启 |
 | 6 | **hook 看似没工作**：应用进程有 hook 日志，但触觉/笔键/磁吸等 system_server 侧功能全无效，`grep 'stylus hooks installed'` 为 0 | 作用域名写成 `android`。框架**回调**给的 `packageName` 是 `android`（所以 `case "android"` 是对的），但作用域**匹配**用的是伪包名 `system` → 模块永不进 system_server | 作用域改为 `system`（`scope.list` + `arrays.xml` + 运行时 `cli scope`），重启后 `system_server stylus hooks installed` 出现，全部 hook 生效 |
-| 7 | 定位"hook 到底有没有加载"很费劲 | `HookUtils.log` 走框架日志、logcat 缓冲区会轮转，容易误判为"没日志" | 查 KernelSU 存档 `/data/adb/ksu/log/logcat.log`（跨开机保留）；`handleLoadPackage` 早退路径现已补一条 `skip <pkg> (gate=…)` 诊断日志 |
-| 8 | **偶发卡开机**：同配置多数开机正常，偶发卡死在开机动画且**不自恢复**（`boot_completed` 空、`bootanim=running`），Watchdog 也不救 | Vector 安装 hook 要 `ThreadList::SuspendAll`（持**独占 mutator 锁**），而 system_server 主线程此时正卡在 `BatteryService.onStart → IHealth.update()` 的 **binder JNI 调用**中，`artJniMethodEnd` 需重新获取 mutator 锁 → **互等死锁** | 重启即可（本次 35s 起来）。诊断用 `su -c 'debuggerd -b <system_server_pid>'`：主线程停在 `artJniMethodEnd → ConditionVariable::WaitHoldingLocks`，另有一线程在 `com.v7878.vmtools` 里 `ThreadList::SuspendAll`；Vector 日志停在 `Loading class …` 无后续。降险方案见 TODO.md P0.5 |
+| 7 | 定位"hook 到底有没有加载"很费劲 | ① `HookUtils.log` 原本只走框架日志（`XposedBridge.log` → Vector module log），而该 sink **会丢弃注入早期的消息**（实测注入时刻日志一条不落盘，第一条存活日志要 ~18s 后才出现）；② 系统 logcat 默认环形缓冲在启动洪流下会把早期行冲掉 | 已让 `HookUtils.log` **同时镜像到 `android.util.Log`**，用 `adb logcat -s LenovoPenBridge` 读；读启动早期日志前先放大缓冲 `su -c 'setprop persist.logd.size 64M'`（开机即生效，会持久化）。另有 KernelSU 存档 `/data/adb/ksu/log/logcat.log` 可跨开机保留 |
+| 8 | **偶发卡开机**：同配置多数开机正常，偶发卡死在开机动画且**不自恢复**（`boot_completed` 空、`bootanim=running`），Watchdog 也不救 | Vector 安装 hook 要 `ThreadList::SuspendAll`（持**独占 mutator 锁**），而 system_server 主线程此时正卡在 `BatteryService.onStart → IHealth.update()` 的 **binder JNI 调用**中，`artJniMethodEnd` 需重新获取 mutator 锁 → **互等死锁** | 诊断用 `su -c 'debuggerd -b <system_server_pid>'`：主线程停在 `artJniMethodEnd → ConditionVariable::WaitHoldingLocks`，另有一线程在 `com.v7878.vmtools` 里 `ThreadList::SuspendAll`。**降险已落地（v4.1.4）**：`SystemStylusHooks.installAsync()` 在守护线程里延迟 2500ms 再 `install()`，把 deopt 挪出启动最密的 `startCoreServices` 窗口（详见 TODO.md P0.5）。Vector 侧无免 deopt 配置（已证伪）。⚠️ 概率降低非根治，需继续多刷回归 |
 | 9 | charge-guard **整轮不启动**：`ps` 无进程、本轮日志无 started 行、pidfile mtime 停在上一轮，而 service.sh 明明活着并已越过启动点 | 单实例守卫只做 `kill -0 "$old"`，而 pidfile 在 `/data` **跨重启保留**、PID 号被内核复用 → 旧 PID 命中无关进程 → 守护**静默 exit 0** | 改为 **boot_id + `/proc/<pid>/cmdline` 双校验**，pidfile 记 `pid bootid`；service.sh 补启动日志 + 后台 liveness 复核。旧 pidfile（单字段）仍兼容 |
 | 10 | inkdye **"日志说禁了其实没禁"**：日志有 `inkdye disabled by default`，但 `dumpsys` 仍 `enabled=0`、`pm list packages -d` 里没有 | 落地动作写在 `exec >>"$LOGFILE"` **之前**的 service.sh 早期段，此时 **PackageManager 尚未就绪**，`pm disable-user` 静默失败（logcat 有 `Missing permission state for package …`） | 移到 `exec` 之后的后台 `apply_inkdye_state()`：**重试（40×3s）+ 用 `pm list packages -d --user 0` 复核状态**后再打印成功 |
 

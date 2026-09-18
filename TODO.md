@@ -11,14 +11,34 @@
 - [ ] 若无内核节点：确认退化路径（纯 GATT 事件源，无磁吸充电管理）
 
 ## P0.5 严重已知问题（阻塞性风险，2026-09-18 实机命中一次）
-- [ ] **Hook 注入 system_server 会「偶发卡开机」** —— 同配置多数开机正常，偶发卡死在开机动画且**不自恢复**（Watchdog 也救不了）。
+- [~] **Hook 注入 system_server 会「偶发卡开机」** —— 同配置多数开机正常，偶发卡死在开机动画且**不自恢复**（Watchdog 也救不了）。
   - 根因（`debuggerd -b` 实证）：Vector 安装 hook 需 `ThreadList::SuspendAll`（持独占 mutator 锁），
     而 system_server 主线程此时正卡在 `BatteryService.onStart → IHealth.update()` 的 **binder JNI 调用**里，
     JNI 退出处要重新获取 mutator 锁 → 互等死锁。Vector 日志停在 `Loading class …UiWorkingSetPrefetch`，无后续完成行。
   - 恢复：重启即可（本次重启 35s 起来）。`debuggerd -b <pid>` 对全线程 suspend/resume **有可能短暂打破该死的锁**（实测疑似生效）。
-  - [ ] 降险方案评估中，候选：① 把 `SystemStylusHooks.install()` 延后/异步（`Handler.postDelayed`）以避开主线程最忙的 JNI 窗口；
-        ② 查 Vector 是否有 per-module「免 deopt / 懒加载」配置；③ 保留「作用域回退到 app-only」的降级开关（牺牲 system_server 侧功能但保证能开机）。
+  - 方案②（Vector 免 deopt / 懒加载配置）：**已关闭，无解**。CLI `config get` 全部候选键被拒；`modules_config.db` 的 `configs` 表无任何 hook 时序项；
+    上游 `--late-inject`（#564）是 NeoZygisk 专用且**仍会 deopt**，不能规避死锁。
+  - 方案①（延后/异步安装）：**已落地并验证**（v4.1.4，2026-09-18）。
+    - 实现：`UiWorkingSetPrefetch case "android"` → `SystemStylusHooks.installAsync()`，在 `LenovoPenInstall` 守护线程里
+      `sleep(2500ms)` 后才真正 `install()`。延迟可运行时调：`setprop persist.lenovo.penbridge.install_delay_ms <ms>`（0 关闭，上限 30000）。
+      依据：注入后 system_server 最忙的 `startCoreServices`（PackageManager/BatteryService/SensorService）在前几秒，
+      而真正要 hook 的 `SystemServer#startOtherServices` / `#run` 约 18s 后才进；2.5s 延迟把 deopt 挪出最密窗口。
+    - 验证（连续 6 次重启，无一次卡开机）：每次均见
+      `handleLoadPackage pkg=android` → `install deferred by 2500ms` → `stylus hooks installed (startOtherServices=1 run=1)` → `deferred install done`，
+      随后完整钩子链（`PEN_FRAMEWORK uevent bridge started` / `NVT transition suppressor registered` / `touchscreen haptics initialized` / `pen state synced`）。
+    - ⚠️ 这是**概率降低而非根治**：底层 ART/framework 竞态无法从模块侧消除。**统计样本仍偏小**，后续回归矩阵需继续多刷几次。
+  - [ ] 方案③（作用域回退 app-only 的降级开关）：仍作为最后保底，暂未实现。
+  - ⚠️ **可观测性前提**：框架侧 `XposedBridge.log` → Vector module log **会丢弃注入早期的消息**（实测注入时刻的日志一条都不落盘，
+    第一条存活日志要 ~18s 后才出现）。因此 `HookUtils.log` 已同时镜像到 `android.util.Log`，用
+    `adb logcat -s LenovoPenBridge` 读取；读启动早期日志前建议先放大缓冲：`setprop persist.logd.size 64M`（开机即生效）。
   - 相关文档：`docs/install-vector-route.md` 踩坑表；技能 `android-ksu-vector-module-triage` 的 Bootloop triage。
+
+## 已知缺口（2026-09-18 观测）
+- [ ] `LenovoConsumerGestureReader` 依赖 native 库 `libpeninput.so`（`System.load(nativeLibraryDir+"/libpeninput.so")` 提供 `nativeGrab`=EVIOCGRAB），
+      移植版 Hook APK **未打包**该 .so（v4.1.3 / v4.1.4 均无 `lib/`），运行期报
+      `native pen input load failed: UnsatisfiedLinkError … libpeninput.so not found` →「consumer gesture reader」这条路（Lenovo Tab Pen Pro
+      触控条原始事件直读）当前不可用。触控条另走 `PhoneWindowManager.interceptKeyBeforeQueueing` 的键映射路径，功能非全丢。
+      待办：从原始 TB710FU 移植源确认 native 源码/预编译 .so 是否随仓库存在，决定是否补进 APK。
 
 ## P1 — 最小闭环（连接 + 电量）
 - [ ] 构建 Hook APK（`hook/tools/build_hook_source.py`）并按 scope.list 勾选 LSPosed 作用域

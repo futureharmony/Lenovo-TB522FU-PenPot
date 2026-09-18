@@ -584,6 +584,17 @@ final class HookUtils {
 
     static void log(String str) {
         String message = "LenovoPenBridge: " + str;
+        // Always mirror to logcat as well.  The framework log sink
+        // (XposedBridge.log -> LSPosed/Vector module log) is not reliable for
+        // messages emitted during the very early injection window: on this port
+        // the first module line to survive in modules_*.log appeared ~18s after
+        // injection, so install-time diagnostics were being silently dropped.
+        // logcat keeps them (adb logcat -s LenovoPenBridge) which is what makes
+        // the deferred-install path observable at all.
+        try {
+            android.util.Log.i("LenovoPenBridge", message);
+        } catch (Throwable ignored) {
+        }
         // The exported hardware receiver also runs in the module APK's normal
         // process, where LSPosed classes are intentionally absent.  Resolve the
         // logger lazily so real Hall/battery broadcasts cannot crash that path.
@@ -591,7 +602,6 @@ final class HookUtils {
             Class<?> bridge = Class.forName("de.robv.android.xposed.XposedBridge");
             bridge.getMethod("log", String.class).invoke(null, message);
         } catch (Throwable ignored) {
-            android.util.Log.i("LenovoPenBridge", message);
         }
     }
 
