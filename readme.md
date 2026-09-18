@@ -28,7 +28,10 @@ vector-cli 用法、踩坑记录、救援分层）。
 ## 安装/回退
 
 - **安装**：`scripts/push_to_device.sh` 推送产物 → 装 Hook APK（root `pm install`）
-  → `vector-cli modules enable` + `scope set` 8 项 → `ksud module install` → 重启。
+  → `vector-cli modules enable` + `scope set`（**1 + 7 项**；system_server 必须用伪包名
+  `system`，写 `android` 会让 hook 永不进 system_server，详见
+  [`docs/install-vector-route.md`](docs/install-vector-route.md) 第 3 节）
+  → `ksud module install` → 重启。
 - **inkdye 默认禁用**：模块开机把系统内置笔桥 `com.inkdye.lenovopentocoloros`
   （实际装在 `/system/priv-app/LenovoPenBridge/`）`disable-user`，笔能力由本模块
   （Root 服务 + Hook）接管。想回退到系统内置笔桥：在 KSU/Magisk 管理器「执行」
@@ -74,6 +77,11 @@ tb522fu_pen_bridge`；或 Recovery 里删模块目录。详见
    schema 不同，写入有损坏风险），留 `enable-lsposed-path-sync` opt-in。
 7. `customize.sh`：补 `charge-guard.sh` 的 `set_perm 0755`（漏配导致守护静默不启动），
    `service.sh` 调用点改为 `[ -f ] && sh`（不依赖执行位）。
+8. **修复 hook 不进 system_server（2026-09-18）**：模块作用域原写 `android`，但 Vector
+   的作用域**匹配**用的是伪包名 `system`（框架**回调**仍以 `packageName="android"` 回调，
+   故 `case "android"` 无误）。改为 `system` 后 system_server 恢复加载，触觉/笔键/磁吸/
+   输入门控全部生效。`scope.list` + `arrays.xml` 已同步；`handleLoadPackage` 早退路径
+   补 `skip <pkg> (gate=…)` 诊断日志，便于日后定位。
 
 ## TB522FU 新增功能：充电守护（charge-guard.sh v2）
 - **磁吸通知**：沿用 monitor_hall_capsule（已映射到 `och1909/hall3`）。胶囊电量优先取新鲜样本，
@@ -99,8 +107,18 @@ tb522fu_pen_bridge`；或 Recovery 里删模块目录。详见
 
 ## 当前状态（2026-09-18 实测）
 
-已实机部署并验证：**boot_completed=1、Vector 注入 system_server 成功、charge-guard
-随开机启动、PenHidCtl 以 priv-app 装载、bootfail 计数正常归零**。
+已实机部署并验证：**boot_completed=1、Vector 注入 system_server 成功（`system` 作用域
+修复后）、charge-guard 随开机启动、PenHidCtl 以 priv-app 装载、bootfail 计数正常归零**。
+
+Hook 已确认在 system_server 内工作（开机日志）：`system_server stylus hooks installed`
+→ `PEN_FRAMEWORK uevent bridge started` → `NVT transition suppressor registered` →
+`touchscreen haptics initialized` → `real HID connected: pen input gate restored` →
+`ColorOS pen state synced: connected=true battery=100 charging=1`。
+
+> 遗留（非阻塞）：① Hook 读取的联想 hall 节点在 TB522FU 不存在（`Lenovo pen hall nodes are
+> not readable`），吸附判定改由 CPS/uevent 路径承担；② `libpeninput.so` 未打进 APK
+> （构建脚本标注为可选），`native pen input load failed` 后模块优雅降级，`global stylus
+> input monitor` 仍正常注册。
 
 硬件节点侦察已完成：TB710FU 的 `pen1_hall/pen2_hall`、CPS I2C/GPIO 在 TB522FU 无对应物，
 已改用 `och1909/hall3`（磁吸，注意节点内容前缀是驱动 bug 的 `hall13`）+

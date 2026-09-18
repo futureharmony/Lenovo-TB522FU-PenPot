@@ -7,6 +7,11 @@ import de.robv.android.xposed.callbacks.XC_LoadPackage;
 public final class UiWorkingSetPrefetch implements IXposedHookLoadPackage {
     public void handleLoadPackage(XC_LoadPackage.LoadPackageParam loadPackageParam) {
         if (!DeviceGate.supported() || loadPackageParam == null || loadPackageParam.packageName == null) {
+            // Diagnostic: the entry point runs but bails out. Silent before, which
+            // made a wrong DeviceGate (or a missing scope) look like "no hook".
+            // Also confirms which packages the framework actually injects into.
+            HookUtils.log("skip " + (loadPackageParam == null ? "<null>" : loadPackageParam.packageName)
+                    + " (gate=" + DeviceGate.supported() + ")");
             return;
         }
         String str = loadPackageParam.packageName;

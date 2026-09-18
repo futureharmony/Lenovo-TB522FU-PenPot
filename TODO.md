@@ -60,17 +60,25 @@
 - [x] 本机工具链：/tmp/android-sdk（build-tools android-15 + platform-35），自签 keys/tb522fu.jks（不入库）
 - [x] 安装/验证流程文档化：`docs/install-vector-route.md`；产物推送脚本 `scripts/push_to_device.sh`（含 md5 校验）
 - [x] 刷入模块 zip + 重启（`ksud module install`；ColorOS 拦截 `adb install`，Hook APK 走 root `pm install`）
-- [x] Vector 作用域配置（`vector-cli scope set` 8 项，全 user 0）——**框架是 Vector，不是 LSPosed**
-- [x] 验证 hook 加载（`vector-cli log cat` 显示 uid 1000/system_server 也加载了本模块）
+- [x] Vector 作用域配置（`vector-cli scope set`，**1 + 7 项**全 user 0）——**框架是 Vector，不是 LSPosed**。⚠️ system_server 用伪包名 `system`（曾误写 `android`，见 P1.5）
+- [x] 验证 hook 加载（`vector-cli log cat` 显示 uid 1000/`system` 也加载了本模块）
 - [x] 验证 charge-guard 随开机启动、bootfail 计数正常归零
 - [ ] 确认 inkdye 被默认禁用后基础书写（NVTCapacitivePen HID）与触觉反馈不受影响（Hook 未生效期间触觉可能空窗，必要时 `action.sh enable` 临时回退）
 - [ ] 接入真实手写笔做功能验收（吸附弹窗 / 按键 / 触觉 / 充满闭环）
+
+## P1.5 hook 不进 system_server 修复（2026-09-18 实机定位）
+- [x] 现象：应用进程有 hook 日志（`WirelessSettings hooks installed` 等），但触觉/笔键/磁吸/输入门控全无效；`grep 'stylus hooks installed'` 恒为 0
+- [x] 定位手段：KernelSU logcat 存档 `/data/adb/ksu/log/logcat.log`（跨开机保留，普通 `logcat -d` 已轮转）+ Vector `verbose_*.log` 的 `VectorConfigCache`/`VectorLegacyBridge` 行 + 对 `handleLoadPackage` 插桩
+- [x] 根因：模块作用域写成 `android`。Vector 作用域**匹配**用伪包名 `system`，但框架**回调**仍以 `packageName="android"` 回调（故代码 `case "android"` 正确）
+- [x] 修复：`scope.list` + `arrays.xml` 的 `android` → `system`；运行时 `vector-cli scope set ... system/0`；移除多余 `android/0`
+- [x] 验证：重启后 `system_server stylus hooks installed` 出现，随后 uevent 桥/触觉/输入门控/状态同步全部生效；boot_completed 25s
+- [x] 增强：`handleLoadPackage` 早退路径补 `skip <pkg> (gate=…)` 诊断日志（此前静默，是误判"框架没工作"的主因）
 
 ## P1.4 卡死根因修复（2026-09-18 实机定位）
 - [x] 现象：hook + 模块同开 → 卡开机动画，system_server 停在 PMS 扫描，`boot_completed` 永不为真
 - [x] 根因：`SystemStylusHooks` 中 `SystemServer#startOtherServices`/`#run` 的 after-hook **无 try/catch**，`init()` 异常逃逸进 system_server 启动序列
 - [x] 修复：回调全部包 `catch (Throwable)`；`PhoneWindowManager` 回调同样加保护
-- [x] 二分验证：仅 KSU 模块 → 正常；修复后 hook + 模块同开 → 正常（连续 2 次重启验证，<1min 到 boot_completed）
+- [x] 二分验证：仅 KSU 模块 → 正常。⚠️ 注意：当时的"hook + 模块同开 → 正常"结论**无效**——彼时 hook 因作用域写成 `android` 压根没进 system_server（见 P1.5）。修复作用域后重新验证：hook 真正在 system_server 运行 + 模块同开 → `boot_completed` 25s，正常
 - [x] 其余踩坑入档：`charge-guard.sh` 权限位漏配、密钥库口令丢失（重建 + `keys/tb522fu.pass`）、`lspd` 库归属 Vector
 
 ## P1.5 启动失败自保（2026-09-18 实现）

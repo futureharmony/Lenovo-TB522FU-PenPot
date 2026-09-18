@@ -30,11 +30,12 @@
 adb push releases/PenBridge-Hook-tb522fu-v4.1.3.apk /data/local/tmp/PenBridge-Hook.apk
 adb shell su -c 'pm install -r -d /data/local/tmp/PenBridge-Hook.apk'
 
-# 2) 用 vector-cli 启用模块 + 配置作用域（8 项，全部 user 0）
+# 2) 用 vector-cli 启用模块 + 配置作用域（1 + 7 项，全部 user 0）
+#    ⚠️ system_server 用伪包名 `system`，不要写成 `android`（见第 3 节）
 CLI=/data/adb/modules/zygisk_vector/cli
 adb shell su -c "$CLI modules enable com.aclaniakea.lenovopenbridge"
 adb shell su -c "$CLI scope set com.aclaniakea.lenovopenbridge \
-  android/0 com.coloros.note/0 com.oplus.exsystemservice/0 com.oplus.healthservice/0 \
+  system/0 com.coloros.note/0 com.oplus.exsystemservice/0 com.oplus.healthservice/0 \
   com.heytap.mydevices/0 com.oplus.ipemanager/0 com.oplus.wirelesssettings/0 com.oplus.screenshot/0"
 
 # 3) 刷 Root 模块
@@ -57,12 +58,13 @@ cli log cat                # 导出框架日志（含 VectorLegacyBridge 加载�
 cli db backup|restore|reset
 ```
 
-## 3. 作用域（8 项）
+## 3. 作用域（1 + 7 项）
 
-来自 `hook/source/resources/res/values/arrays.xml`，作用域决定注入哪些进程：
+来自 `hook/source/resources/res/values/arrays.xml`（以及 `META-INF/xposed/scope.list`），
+作用域决定注入哪些进程：
 
 ```
-android                       # system_server：笔按键、刷新率投票、uevent 桥
+system                        # system_server：笔按键、刷新率投票、uevent 桥、触觉、输入门控
 com.oplus.ipemanager          # 笔卡片/状态核心（最大一块，2818 行 hook）
 com.heytap.mydevices          # 「我的设备」卡片
 com.coloros.note              # 笔记工具
@@ -74,6 +76,14 @@ com.oplus.wirelesssettings    # 无线设置（充电相关 UI）
 
 缺哪一项，对应功能静默失效（不报错）。
 
+> ⚠️ **致命坑（2026-09-18 定位）：system_server 的作用域名必须是 `system`，不是 `android`。**
+> 框架回调用 `packageName="android"` 回调模块（代码里 `case "android"` 是对的），
+> 但**作用域匹配用的是伪包名 `system`**。写成 `android` 时：模块能进所有应用进程，
+> 唯独**永远不进 system_server**——触觉/笔键/磁吸/输入门控全部静默失效，且日志里
+> 只有应用的 hook 行、没有 `system_server stylus hooks installed`，极易误判为"框架没工作"。
+> 排查口诀：`grep 'stylus hooks installed'` 为 0 ⟺ system_server 没注入 ⟺ 作用域名写错。
+> 参考：另一个 hook 系统服务的模块 `io.github.artifical0.fcmfix.coloros` 用的也是 `system`。
+
 ## 4. 验证清单
 
 ### 4.1 框架层
@@ -81,8 +91,13 @@ com.oplus.wirelesssettings    # 无线设置（充电相关 UI）
 adb shell su -c '/data/adb/modules/zygisk_vector/cli log cat' | grep VectorLegacyBridge
 ```
 预期：出现 `Loading legacy module com.aclaniakea.lenovopenbridge` +
-`Loading class com.aclaniakea.colorosporttuning.UiWorkingSetPrefetch`，
-并对 **uid 1000（system_server）** 也出现（证明注入 system_server 成功）。
+`Loading class com.aclaniakea.colorosporttuning.UiWorkingSetPrefetch`。
+
+**关键判据（system_server 是否真的注入）**——查 KernelSU 的 logcat 存档最省事：
+```sh
+adb shell su -c "grep 'system_server stylus hooks installed' /data/adb/ksu/log/logcat.log"
+```
+有这一行 = 成功；没有 = 作用域写成了 `android`（见第 3 节）。
 
 ### 4.2 模块层
 - `charge-guard: RUNNING`（进程存在）
@@ -139,6 +154,8 @@ adb shell su -c 'ksud module uninstall tb522fu_pen_bridge'
 | 3 | 换签名后无法覆盖安装 | 密钥库口令丢失（旧会话生成未记录） | 重新生成 `keys/tb522fu.jks`（alias `tb522fu`），口令落 `keys/tb522fu.pass`，构建脚本默认读它；先 `pm uninstall` 再装 |
 | 4 | charge-guard 静默不启动 | `customize.sh` 的 `set_perm` 漏了 `charge-guard.sh` → 装成 0644 → `[ -x ]` 判定失败 | 补 `set_perm`，并把调用改为 `[ -f ] && sh`（不依赖执行位） |
 | 5 | 担心 path-sync 损坏框架库 | `/data/adb/lspd/config/modules_config.db` **是 Vector 的活库**（API 102），`LsposedPathSync` 按 LSPosed schema 写有风险 | 默认禁用，`touch $MODDIR/enable-lsposed-path-sync` 可重新开启 |
+| 6 | **hook 看似没工作**：应用进程有 hook 日志，但触觉/笔键/磁吸等 system_server 侧功能全无效，`grep 'stylus hooks installed'` 为 0 | 作用域名写成 `android`。框架**回调**给的 `packageName` 是 `android`（所以 `case "android"` 是对的），但作用域**匹配**用的是伪包名 `system` → 模块永不进 system_server | 作用域改为 `system`（`scope.list` + `arrays.xml` + 运行时 `cli scope`），重启后 `system_server stylus hooks installed` 出现，全部 hook 生效 |
+| 7 | 定位"hook 到底有没有加载"很费劲 | `HookUtils.log` 走框架日志、logcat 缓冲区会轮转，容易误判为"没日志" | 查 KernelSU 存档 `/data/adb/ksu/log/logcat.log`（跨开机保留）；`handleLoadPackage` 早退路径现已补一条 `skip <pkg> (gate=…)` 诊断日志 |
 
 ## 7. 构建环境
 
