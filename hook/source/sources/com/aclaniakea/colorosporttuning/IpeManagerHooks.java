@@ -1742,6 +1742,48 @@ final class IpeManagerHooks {
                         });
                     }
                 });
+        // Kill the visible radio flicker on open: while a bridge option owns
+        // the page, the OEM fragment still marks its own stock row (async init
+        // reads the stock key) and our +400ms resync then cleared it -- the
+        // user saw 当前工具与橡皮擦切换 flash before 截图.  Veto any stock-row
+        // setChecked(true) outright so the wrong mark never gets drawn.  When
+        // the user clicks a stock row to switch back, the performClick hook
+        // below clears the bridge keys FIRST, so the subsequent setChecked
+        // passes this veto (bridge is already -1).
+        final String[] markSources = {"androidx.preference.TwoStatePreference",
+                "com.coui.appcompat.preference.COUIMarkPreference"};
+        for (final String markSource : markSources) {
+            HookUtils.hookAll(lpp.classLoader, markSource, "setChecked",
+                    new XC_MethodHook() {
+                        @Override protected void beforeHookedMethod(MethodHookParam hook) {
+                            try {
+                                if (!(hook.args[0] instanceof Boolean)
+                                        || !((Boolean) hook.args[0])) return;
+                                Object pref = hook.thisObject;
+                                String key = (String) pref.getClass()
+                                        .getMethod("getKey").invoke(pref);
+                                if (key == null || key.startsWith("item_wb_")) return;
+                                Object ctx = pref.getClass()
+                                        .getMethod("getContext").invoke(pref);
+                                android.app.Activity act =
+                                        activityOf((android.content.Context) ctx);
+                                if (act == null) return;
+                                String type;
+                                synchronized (gesturePageTypes) {
+                                    type = gesturePageTypes.get(act);
+                                }
+                                if (type == null) return;
+                                int bridge = Settings.Global.getInt(
+                                        act.getContentResolver(), gestureWbKey(type), -1);
+                                if (bridge >= 100) {
+                                    hook.setResult(null);
+                                    HookUtils.log("veto stock mark " + key
+                                            + " (" + type + " bridge=" + bridge + ")");
+                                }
+                            } catch (Throwable ignored) { }
+                        }
+                    });
+        }
         // A stock option clicked while a bridge option is selected must stop
         // the bridge from stealing the gesture back: clear the wb keys and
         // uncheck the bridge rows on the spot.
@@ -1789,7 +1831,139 @@ final class IpeManagerHooks {
                         }
                     }
                 });
+        installPanelAssignmentBridge(lpp);
         HookUtils.log("pen gesture custom-option hooks installed");
+    }
+
+    /** The PencilPanelActivity popup derives its per-gesture assignment label
+     * (the "assignment" TextView next to 下滑触控条/双击触控条/上滑触控条)
+     * from the STOCK keys only, so a bridge selection keeps showing the stock
+     * label (e.g. 当前工具与橡皮擦切换 instead of 截图).  After the panel
+     * binds its rows, rewrite the assignment text from the bridge key.  Rows
+     * owned by a stock option are left exactly as the OEM rendered them. */
+    private static void installPanelAssignmentBridge(final XC_LoadPackage.LoadPackageParam lpp) {
+        HookUtils.hookAll(lpp.classLoader, "android.app.Activity", "onResume",
+                new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam hook) {
+                        if (!"com.oplus.ipemanager.btadsorb.pencilPanel.activity.PencilPanelActivity"
+                                .equals(hook.thisObject.getClass().getName())) {
+                            return;
+                        }
+                        final android.app.Activity activity =
+                                (android.app.Activity) hook.thisObject;
+                        schedulePanelPass(activity.getWindow().getDecorView(),
+                                activity.getContentResolver());
+                    }
+                });
+        // The popup card is NOT the translucent activity's own view hierarchy
+        // (the decor walk found 0 titles on device) -- it is a Dialog window
+        // shown on top.  Scan dialog windows too.
+        HookUtils.hookAll(lpp.classLoader, "android.app.Dialog", "show",
+                new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam hook) {
+                        try {
+                            android.view.Window w = (android.view.Window) hook.thisObject
+                                    .getClass().getMethod("getWindow").invoke(hook.thisObject);
+                            if (w == null || w.getDecorView() == null) return;
+                            schedulePanelPass(w.getDecorView(),
+                                    w.getContext().getContentResolver());
+                        } catch (Throwable ignored) { }
+                    }
+                });
+    }
+
+    private static void schedulePanelPass(final android.view.View root,
+            final android.content.ContentResolver resolver) {
+        for (final long delay : new long[]{300L, 900L}) {
+            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                @Override public void run() {
+                    fixPanelAssignments(root, resolver);
+                }
+            }, delay);
+        }
+    }
+
+    private static void fixPanelAssignments(android.view.View root,
+            android.content.ContentResolver resolver) {
+        try {
+            java.util.List<android.widget.TextView> titles = new java.util.ArrayList<>();
+            java.util.List<android.widget.TextView> assigns = new java.util.ArrayList<>();
+            java.util.ArrayDeque<android.view.View> stack = new java.util.ArrayDeque<>();
+            stack.push(root);
+            while (!stack.isEmpty()) {
+                android.view.View v = stack.pop();
+                if (v instanceof android.view.ViewGroup) {
+                    android.view.ViewGroup g = (android.view.ViewGroup) v;
+                    for (int i = 0; i < g.getChildCount(); i++) stack.push(g.getChildAt(i));
+                }
+                if (!(v instanceof android.widget.TextView)) continue;
+                android.widget.TextView tv = (android.widget.TextView) v;
+                if (titleToGestureType(String.valueOf(tv.getText())) != null) {
+                    titles.add(tv);
+                } else if ("assignment".equals(idName(tv))) {
+                    assigns.add(tv);
+                }
+            }
+            HookUtils.log("panel assignments pass: titles=" + titles.size()
+                    + " assigns=" + assigns.size());
+            for (android.widget.TextView a : assigns) {
+                int best = -1, bestDist = Integer.MAX_VALUE;
+                for (int i = 0; i < titles.size(); i++) {
+                    int d = Math.abs(centerY(a) - centerY(titles.get(i)));
+                    if (d < bestDist) { bestDist = d; best = i; }
+                }
+                if (best < 0 || bestDist > 80) continue;   // not same row
+                String type = titleToGestureType(
+                        String.valueOf(titles.get(best).getText()));
+                if (type == null) continue;
+                int bridge = Settings.Global.getInt(resolver,
+                        gestureWbKey(type), -1);
+                if (bridge < 100) continue;   // stock option owns it; OEM label stays
+                String want = GESTURE_CUSTOM_LABELS[bridge - 101];
+                if (!want.equals(String.valueOf(a.getText()))) {
+                    a.setText(want);
+                    HookUtils.log("panel assignment " + type + " -> " + want);
+                }
+            }
+        } catch (Throwable th) {
+            HookUtils.log("panel assignments walk: " + th);
+        }
+    }
+
+    private static String titleToGestureType(String txt) {
+        if ("下滑触控条".equals(txt)) return "single_click";
+        if ("双击触控条".equals(txt)) return "double_click";
+        if ("上滑触控条".equals(txt)) return "long_click_v2";
+        return null;
+    }
+
+    private static int centerY(android.view.View v) {
+        int[] out = new int[2];
+        v.getLocationOnScreen(out);
+        return out[1] + v.getHeight() / 2;
+    }
+
+    private static String idName(android.view.View v) {
+        try {
+            int id = v.getId();
+            if (id == android.view.View.NO_ID) return null;
+            return v.getResources().getResourceEntryName(id);
+        } catch (Throwable th) {
+            return null;
+        }
+    }
+
+    /** Unwrap ContextWrapper chains to find the owning Activity. */
+    private static android.app.Activity activityOf(android.content.Context c) {
+        while (c != null) {
+            if (c instanceof android.app.Activity) return (android.app.Activity) c;
+            if (c instanceof android.content.ContextWrapper) {
+                c = ((android.content.ContextWrapper) c).getBaseContext();
+            } else {
+                return null;
+            }
+        }
+        return null;
     }
 
     private static void configurePenGestureActivity(android.app.Activity activity) {
