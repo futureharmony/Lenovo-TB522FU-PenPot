@@ -1859,9 +1859,10 @@ final class IpeManagerHooks {
 
             Object current = find.invoke(screen, "lenovo_pen_gesture_extra");
             if (current != null) {
-                syncGestureMarks(loader, screen, type,
-                        Settings.Global.getInt(context.getContentResolver(),
-                                gestureWbKey(type), -1));
+                int sel = Settings.Global.getInt(context.getContentResolver(),
+                        gestureWbKey(type), -1);
+                syncGestureMarks(loader, screen, type, sel);
+                scheduleLateGestureResync(loader, screen, type, sel);
                 return;
             }
             Class<?> categoryType = Class.forName(
@@ -1946,6 +1947,11 @@ final class IpeManagerHooks {
                         }
                     }));
             category.getClass().getMethod("addPreference", pref).invoke(category, resetRow);
+            // COUIMarkPreference's default render state is CHECKED; every other
+            // row gets an explicit setChecked at creation, so if the reset row
+            // never gets one it shows up pre-marked on a freshly opened page.
+            setRowChecked(resetRow, false);
+            scheduleLateGestureResync(loader, screen, type, selected);
             HookUtils.log("gesture page " + type + ": bridge rows injected");
         } catch (Throwable th) {
             HookUtils.log("gesture rows inject: " + th);
@@ -2065,6 +2071,23 @@ final class IpeManagerHooks {
             return k instanceof String ? (String) k : null;
         } catch (Throwable ignored) {
             return null;
+        }
+    }
+
+    /** The OEM fragment re-marks its own stock row some time AFTER onResume
+     * (its async row init reads the stock key), so a single sync right after
+     * resume loses the race: the page then shows the bridge option AND the
+     * stock option both checked (seen on device 2026-09-19).  Re-assert the
+     * model twice on a delay so the last write is ours. */
+    private static void scheduleLateGestureResync(final ClassLoader loader,
+            final Object screen, final String type, final int selected) {
+        if (selected < 100) return;   // stock option owns the page; leave it
+        for (final long delay : new long[]{400L, 1200L}) {
+            new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                @Override public void run() {
+                    syncGestureMarks(loader, screen, type, selected);
+                }
+            }, delay);
         }
     }
 
