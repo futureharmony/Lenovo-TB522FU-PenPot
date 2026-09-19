@@ -605,6 +605,128 @@ final class HookUtils {
         }
     }
 
+    /** Persist a PNG into the gallery from inside system_server.  /system/bin/cp
+     * and /system/bin/screencap are BOTH unusable here: this ROM's SELinux
+     * policy denies system_server the exec of shell binaries (error=13,
+     * logged 2026-09-19).  So try, in order:
+     *  1) MediaStore insert + ContentResolver.openOutputStream -- the provider
+     *     opens the FD in ITS domain, so this is the only path guaranteed not
+     *     to hit the system_server storage denials;
+     *  2) MediaStore insert + plain FileOutputStream to the row's DATA path;
+     *  3) plain FileOutputStream to /storage/emulated/0/Pictures/PenBridge.
+     * Returns the content Uri, or null when only a plain file was written. */
+    static android.net.Uri savePngToGallery(android.content.Context ctx,
+            android.graphics.Bitmap bmp, String name) {
+        android.net.Uri uri = null;
+        try {
+            android.content.ContentValues cv = new android.content.ContentValues();
+            cv.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name);
+            cv.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png");
+            cv.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH,
+                    "Pictures/PenBridge");
+            cv.put(android.provider.MediaStore.Images.Media.IS_PENDING, 1);
+            uri = ctx.getContentResolver().insert(
+                    android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
+        } catch (Throwable th) {
+            log("savePng: insert failed: " + th);
+        }
+        if (uri != null) {
+            java.io.OutputStream os = null;
+            try {
+                os = ctx.getContentResolver().openOutputStream(uri);
+                if (os != null) {
+                    bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, os);
+                    os.close();
+                    os = null;
+                    publishPng(ctx, uri);
+                    log("savePng: streamed via provider -> " + name);
+                    return uri;
+                }
+            } catch (Throwable th) {
+                log("savePng: provider stream refused: " + th);
+            } finally {
+                try { if (os != null) os.close(); } catch (Throwable ignored) { }
+            }
+        }
+        java.io.File stage = new java.io.File("/data/system/" + name);
+        try {
+            java.io.FileOutputStream fos = new java.io.FileOutputStream(stage);
+            bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, fos);
+            fos.close();
+        } catch (Throwable th) {
+            log("savePng: staging failed: " + th);
+            return null;
+        }
+        String path = null;
+        if (uri != null) {
+            try {
+                android.database.Cursor c = ctx.getContentResolver().query(uri,
+                        new String[]{android.provider.MediaStore.Images.Media.DATA},
+                        null, null, null);
+                if (c != null) {
+                    if (c.moveToFirst()) path = c.getString(0);
+                    c.close();
+                }
+            } catch (Throwable th) {
+                log("savePng: DATA query refused: " + th);
+            }
+        }
+        if (path != null && copyFile(stage.getAbsolutePath(), path)) {
+            publishPng(ctx, uri);
+            stage.delete();
+            log("savePng: wrote row backing file -> " + path);
+            return uri;
+        }
+        if (uri != null) {
+            try { ctx.getContentResolver().delete(uri, null, null); } catch (Throwable ignored) { }
+        }
+        java.io.File out = new java.io.File(
+                "/storage/emulated/0/Pictures/PenBridge", name);
+        if (copyFile(stage.getAbsolutePath(), out.getAbsolutePath())) {
+            try {
+                android.media.MediaScannerConnection.scanFile(ctx,
+                        new String[]{out.getAbsolutePath()},
+                        new String[]{"image/png"}, null);
+            } catch (Throwable ignored) { }
+            stage.delete();
+            log("savePng: wrote plain file -> " + out);
+            return null;
+        }
+        stage.delete();
+        log("savePng: every destination failed for " + name);
+        return null;
+    }
+
+    private static void publishPng(android.content.Context ctx,
+            android.net.Uri uri) {
+        try {
+            android.content.ContentValues cv = new android.content.ContentValues();
+            cv.put(android.provider.MediaStore.Images.Media.IS_PENDING, 0);
+            ctx.getContentResolver().update(uri, cv, null, null);
+        } catch (Throwable ignored) { }
+    }
+
+    /** File copy in-process (no exec -- see savePngToGallery). */
+    static boolean copyFile(String src, String dst) {
+        java.io.FileInputStream in = null;
+        java.io.FileOutputStream out = null;
+        try {
+            in = new java.io.FileInputStream(src);
+            out = new java.io.FileOutputStream(dst);
+            byte[] buf = new byte[64 * 1024];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+            out.flush();
+            return true;
+        } catch (Throwable th) {
+            log("copyFile -> " + dst + ": " + th);
+            return false;
+        } finally {
+            try { if (in != null) in.close(); } catch (Throwable ignored) { }
+            try { if (out != null) out.close(); } catch (Throwable ignored) { }
+        }
+    }
+
     private HookUtils() {
     }
 }

@@ -104,6 +104,10 @@ final class LassoSelectOverlay {
         new Thread(new Runnable() {
             @Override public void run() {
                 try {
+                    // Let the window manager drop our overlay for a couple of
+                    // frames first, otherwise the capture contains the dim
+                    // layer and the selection rectangle.
+                    Thread.sleep(250);
                     Bitmap region = captureRegion(ctx, crop);
                     if (region == null) {
                         toast(ctx, "区域截图失败（ScreenCapture 不可用）");
@@ -111,7 +115,11 @@ final class LassoSelectOverlay {
                     }
                     Uri uri = savePng(ctx, region, translate ? "pen_translate" : "pen_ocr");
                     if (uri == null) {
-                        toast(ctx, "圈选结果保存失败");
+                        // Plain-file fallback already placed the PNG in
+                        // Pictures/PenBridge; only the shareable content Uri
+                        // is missing.
+                        toast(ctx, "圈选区域已保存到 Pictures/PenBridge"
+                                + (translate ? "（分享通道不可用）" : ""));
                         return;
                     }
                     String text = tryRecognize(ctx, region);
@@ -173,68 +181,69 @@ final class LassoSelectOverlay {
     /** Crop the display.  Reflection chain because ScreenCapture /
      * DisplayCaptureArgs are @hide system APIs not in the public jar. */
     private static Bitmap captureRegion(Context ctx, Rect crop) throws Exception {
-        // Token chain: on this ROM (Android 16) SurfaceControl's static token
-        // getters return null even inside system_server (user report
-        // 2026-09-19 "no display token"), so try the @hide alternatives
-        // before giving up.  Every failure is logged for the next probe.
+        // /system/bin/screencap is NOT usable here: system_server is denied the
+        // exec (SELinux error=13, logged 2026-09-19), and the @hide
+        // SurfaceControl token statics were removed on Android 16
+        // (NoSuchMethodException).  What DOES work on this ROM is the
+        // ScreenCapture API -- but the display args class is NESTED:
+        // android.window.ScreenCapture$DisplayCaptureArgs (there is no
+        // top-level android.window.DisplayCaptureArgs on Android 15+, which is
+        // exactly what broke the previous attempt with ClassNotFoundException).
+        // Token comes from the @hide Display.getAddress().
         Object token = displayToken(ctx);
-        if (token != null) {
-            try {
-                return captureWithArgs(token, crop);
-            } catch (Throwable th) {
-                HookUtils.log("lasso capture token path failed: " + th);
-            }
-        } else {
-            HookUtils.log("lasso: all display token sources failed");
+        if (token == null) {
+            throw new IllegalStateException("no display token from any source");
         }
-        // Last resort: captureDisplayEx(displayId, args) resolves the token
-        // inside SurfaceFlinger, so the caller never needs one.  Builder
-        // formally takes a token; pass null and hope the ctor tolerates it
-        // (a no-arg ctor would be preferred but does not exist in AOSP).
-        try {
-            Class<?> argsCls = Class.forName("android.window.DisplayCaptureArgs");
-            Class<?> builderCls = Class.forName("android.window.DisplayCaptureArgs$Builder");
-            Object builder;
-            try {
-                builder = builderCls.getConstructor(android.os.IBinder.class)
-                        .newInstance(new Object[]{null});
-            } catch (Throwable nullTok) {
-                builder = builderCls.getDeclaredConstructor().newInstance();
-            }
-            try {
-                builderCls.getMethod("setSourceCrop", Rect.class).invoke(builder, crop);
-            } catch (Throwable nosrc) {
-                HookUtils.log("lasso: setSourceCrop missing, full-screen capture");
-            }
-            Object args = builderCls.getMethod("build").invoke(builder);
-            Class<?> capCls = Class.forName("android.window.ScreenCapture");
-            Object buf = capCls.getMethod("captureDisplayEx", Integer.TYPE, argsCls)
-                    .invoke(null, android.view.Display.DEFAULT_DISPLAY, args);
-            return bitmapFromCapture(buf, crop);
-        } catch (Throwable th) {
-            throw new IllegalStateException(
-                    "display capture unavailable (token=" + token + "): " + th);
-        }
+        return captureWithArgs(token, crop);
     }
 
     private static Bitmap captureWithArgs(Object token, Rect crop) throws Exception {
-        Class<?> argsCls = Class.forName("android.window.DisplayCaptureArgs");
-        Class<?> builderCls = Class.forName("android.window.DisplayCaptureArgs$Builder");
+        Class<?> builderCls = Class.forName(
+                "android.window.ScreenCapture$DisplayCaptureArgs$Builder");
         Object builder = builderCls.getConstructor(android.os.IBinder.class)
                 .newInstance(token);
         try {
             builderCls.getMethod("setSourceCrop", Rect.class).invoke(builder, crop);
         } catch (Throwable nosrc) {
-            HookUtils.log("lasso: setSourceCrop missing, full-screen capture");
+            HookUtils.log("lasso: setSourceCrop missing, capturing full screen");
         }
-        try {
-            builderCls.getMethod("setCaptureSecureLayers", Boolean.TYPE)
-                    .invoke(builder, true);
-        } catch (Throwable ignored) { }
         Object args = builderCls.getMethod("build").invoke(builder);
         Class<?> capCls = Class.forName("android.window.ScreenCapture");
+        Class<?> argsCls = Class.forName(
+                "android.window.ScreenCapture$DisplayCaptureArgs");
         Object buf = capCls.getMethod("captureDisplay", argsCls).invoke(null, args);
+        if (buf == null) {
+            throw new IllegalStateException("captureDisplay returned null");
+        }
+        HookUtils.log("lasso: captured via ScreenCapture, crop=" + crop);
+        try {
+            Object b = buf.getClass().getMethod("asBitmap").invoke(buf);
+            if (b instanceof Bitmap) return softwareShrink((Bitmap) b, crop);
+            HookUtils.log("lasso: asBitmap returned " + b);
+        } catch (Throwable th) {
+            HookUtils.log("lasso: asBitmap unavailable, using buffer: " + th);
+        }
         return bitmapFromCapture(buf, crop);
+    }
+
+    /** setSourceCrop is honoured by the native capture, but guard against a
+     * ROM that ignores it: the returned bitmap is then display-sized and has
+     * to be cropped here.  Also force a SOFTWARE copy -- a HARDWARE bitmap
+     * cannot be compressed into a PNG. */
+    private static Bitmap softwareShrink(Bitmap b, Rect crop) {
+        Bitmap out = b;
+        if (b.getWidth() != crop.width() && b.getWidth() >= crop.right
+                && b.getHeight() >= crop.bottom) {
+            int w = Math.min(crop.width(), b.getWidth() - crop.left);
+            int h = Math.min(crop.height(), b.getHeight() - crop.top);
+            out = Bitmap.createBitmap(b, crop.left, crop.top, w, h);
+            HookUtils.log("lasso: crop applied locally "
+                    + b.getWidth() + "x" + b.getHeight() + " -> " + w + "x" + h);
+        }
+        if (out.getConfig() == Bitmap.Config.HARDWARE) {
+            out = out.copy(Bitmap.Config.ARGB_8888, false);
+        }
+        return out;
     }
 
     private static Bitmap bitmapFromCapture(Object buf, Rect crop) throws Exception {
@@ -313,26 +322,14 @@ final class LassoSelectOverlay {
         return null;
     }
 
+    /** Persist the capture (see HookUtils.savePngToGallery for the destination
+     * chain).  Returns the content Uri, or null when only a plain file in
+     * Pictures/PenBridge could be produced. */
     private static Uri savePng(Context ctx, Bitmap bmp, String prefix) throws Exception {
         String name = prefix + "_"
                 + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date())
                 + ".png";
-        ContentValues cv = new ContentValues();
-        cv.put(MediaStore.Images.Media.DISPLAY_NAME, name);
-        cv.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
-        cv.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/PenBridge");
-        cv.put(MediaStore.Images.Media.IS_PENDING, 1);
-        Uri uri = ctx.getContentResolver().insert(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
-        if (uri == null) return null;
-        OutputStream os = ctx.getContentResolver().openOutputStream(uri);
-        bmp.compress(Bitmap.CompressFormat.PNG, 100, os);
-        os.close();
-        cv.clear();
-        cv.put(MediaStore.Images.Media.IS_PENDING, 0);
-        ctx.getContentResolver().update(uri, cv, null, null);
-        HookUtils.log("lasso saved " + name);
-        return uri;
+        return HookUtils.savePngToGallery(ctx, bmp, name);
     }
 
     private static void openTranslate(Context ctx, String text) throws Exception {

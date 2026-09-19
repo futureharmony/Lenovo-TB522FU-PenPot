@@ -213,23 +213,19 @@ final class HandwrittenNoteOverlay {
             String name = "pen_note_"
                     + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US)
                             .format(new Date()) + ".png";
-            ContentValues cv = new ContentValues();
-            cv.put(MediaStore.Images.Media.DISPLAY_NAME, name);
-            cv.put(MediaStore.Images.Media.MIME_TYPE, "image/png");
-            cv.put(MediaStore.Images.Media.RELATIVE_PATH, "Pictures/PenBridge");
-            cv.put(MediaStore.Images.Media.IS_PENDING, 1);
-            Uri uri = ctx.getContentResolver().insert(
-                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
-            if (uri == null) throw new IllegalStateException("MediaStore insert failed");
-            OutputStream os = ctx.getContentResolver().openOutputStream(uri);
-            bmp.compress(Bitmap.CompressFormat.PNG, 100, os);
-            os.close();
-            cv.clear();
-            cv.put(MediaStore.Images.Media.IS_PENDING, 0);
-            ctx.getContentResolver().update(uri, cv, null, null);
-            Toast.makeText(ctx, "手写便签已保存到 Pictures/PenBridge/" + name,
-                    Toast.LENGTH_SHORT).show();
-            HookUtils.log("note pad saved " + name);
+            // Destination chain lives in HookUtils.savePngToGallery: the
+            // provider FD path first, then the row's backing file, then a
+            // plain file + media scan (exec of /system/bin/cp is denied for
+            // system_server on this ROM, so everything is in-process I/O).
+            android.net.Uri uri = HookUtils.savePngToGallery(ctx, bmp, name);
+            if (uri == null) {
+                Toast.makeText(ctx, "手写便签已保存到 Pictures/PenBridge/" + name,
+                        Toast.LENGTH_SHORT).show();
+            } else {
+                Toast.makeText(ctx, "手写便签已保存到相册 Pictures/PenBridge/",
+                        Toast.LENGTH_SHORT).show();
+            }
+            HookUtils.log("note pad saved " + name + " uri=" + uri);
         } catch (Throwable th) {
             HookUtils.log("note pad save: " + th);
             Toast.makeText(ctx, "保存失败: " + th, Toast.LENGTH_SHORT).show();

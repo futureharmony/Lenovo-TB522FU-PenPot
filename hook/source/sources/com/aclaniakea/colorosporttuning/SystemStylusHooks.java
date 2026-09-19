@@ -713,7 +713,13 @@ final class SystemStylusHooks {
                     injectKey(KeyEvent.KEYCODE_PAGE_DOWN);
                     break;
                 case 111:
-                    HandwrittenNoteOverlay.toggle(context);
+                    // Prefer the built-in ColorOS handwriting note: the user
+                    // wants the stock Notes experience, not our bare pad
+                    // (2026-09-19).  QuickPaintActivity is OPPO_COMPONENT_SAFE
+                    // protected, which uid 1000 (system_server) bypasses.
+                    if (!launchColorOSQuickNote(context)) {
+                        HandwrittenNoteOverlay.toggle(context);
+                    }
                     break;
                 case 112:
                     LassoSelectOverlay.start(context, false);
@@ -727,6 +733,24 @@ final class SystemStylusHooks {
             }
         } catch (Throwable th) {
             HookUtils.log("custom action " + code + ": " + th);
+        }
+    }
+
+    /** Launch the ColorOS Notes quick handwriting page.  Returns false when
+     * the app/activity is unavailable so the caller can fall back to the
+     * built-in overlay pad. */
+    private static boolean launchColorOSQuickNote(Context context) {
+        try {
+            Intent i = new Intent();
+            i.setClassName("com.coloros.note",
+                    "com.nearme.note.paint.QuickPaintActivity");
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            context.startActivity(i);
+            HookUtils.log("custom: ColorOS QuickPaint launched");
+            return true;
+        } catch (Throwable th) {
+            HookUtils.log("custom: QuickPaint launch failed: " + th);
+            return false;
         }
     }
 

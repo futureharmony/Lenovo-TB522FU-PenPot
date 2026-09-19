@@ -2033,16 +2033,25 @@ final class IpeManagerHooks {
         }
     }
 
-    /** Add 长按 / 捏握 slots to the panel card (the OEM UI only exposes three
+    /** Add 长按 / 捏握 slots to the panel (the OEM UI only exposes three
      * gesture slots; the pen also emits 0x0c0611 long-press and 0x0c0619
      * squeeze).  Constraints discovered on-device:
      *  - The panel rows are adapter-backed RecyclerView children.  addView on
      *    the RecyclerView crashes the process (ViewHolder.shouldIgnore NPE).
-     *  - Adding rows INSIDE a row card overlaps its content (v4.3.4 garble).
-     * So: convert the LAST gesture row card (上滑触控条) into a vertical
-     * stack -- its original content becomes the first sub-row, then our two
-     * sub-rows follow, each styled exactly like the stock card (same
-     * background / padding / height, separated by the stock card gap). */
+     *  - Stock anatomy (pixel-measured 2026-09-19): one RecyclerView item ==
+     *    ONE row.  The item view ITSELF carries the visible #353535 card
+     *    (full item width, ~1712x126px, padding 0); its first child is a
+     *    TRANSPARENT content layout inset by 40px side margins, followed by
+     *    the chevron / divider children.  Rows touch each other and are
+     *    separated by a 1px #5D5D5D divider inset to the content width.
+     * So: turn that item into a vertical stack -- the original row first
+     * (wrapped untouched), then one [divider + row] per extra slot.  Each
+     * injected row is a TRANSPARENT child with the same 40px side margins, so
+     * the item's own card layer simply GROWS to cover it, with stock-copied
+     * typography and a stock-shaped chevron.
+     * v4.4.5 (v4.4.2 had cloned the inner content child's geometry and
+     * re-applied the card drawable against the module's theme, producing a
+     * lighter #4A4A4A card inset twice as far as the stock one). */
     private static void addExtraPanelRows(Context ctx, android.view.ViewGroup refInner) {
         try {
             // Locate the row card: climb from the title's inner layout up to
@@ -2082,51 +2091,102 @@ final class IpeManagerHooks {
             android.widget.LinearLayout rowCard = (android.widget.LinearLayout) card;
             if (rowCard.getOrientation() != android.widget.LinearLayout.HORIZONTAL) return;
 
-            // Style snapshot BEFORE mutating the card.  The light-gray rounded
-            // layer is NOT always on the row card itself: some builds draw it
-            // on the item wrapper above (2026-09-19: injected rows came out
-            // transparent).  Climb to the first ancestor that owns a
-            // background drawable and copy bg + padding from it, stopping at
-            // the list container so the window background is never picked up.
-            android.view.ViewGroup bgOwner = rowCard;
-            if (bgOwner.getBackground() == null) {
-                android.view.ViewGroup cur = rowCard;
-                while (true) {
-                    android.view.ViewParent p = cur.getParent();
-                    if (!(p instanceof android.view.ViewGroup)) break;
-                    android.view.ViewGroup up = (android.view.ViewGroup) p;
-                    if (up.getClass().getName().contains("RecyclerView")) break;
-                    cur = up;
-                    if (up.getBackground() != null) { bgOwner = up; break; }
+            // The item view IS the row card here; injected rows must be
+            // TRANSPARENT children of it with identical 40px side margins so
+            // the card layer simply grows over them.  Never re-apply a card
+            // drawable to an injected view: the drawable is theme-resolved and
+            // rendered #4A4A4A once attached under another theme context.
+            android.view.View stockContent = null;
+            for (int i = 0; i < rowCard.getChildCount(); i++) {
+                android.view.View c = rowCard.getChildAt(i);
+                if (subtreeHasGestureTitle(c)) {
+                    stockContent = c;
+                    break;
                 }
             }
-            android.graphics.drawable.Drawable cardBg = bgOwner.getBackground();
-            if (cardBg == null) {
-                // Nothing owns a background (likely an ItemDecoration paints
-                // the gray): synthesize a plausible COUI list card instead of
-                // leaving the injected rows transparent.
-                android.graphics.drawable.GradientDrawable synth =
-                        new android.graphics.drawable.GradientDrawable();
-                synth.setColor(0xFFF5F6F7);
-                synth.setCornerRadius(24f);
-                cardBg = synth;
-                HookUtils.log("panel extra rows: no bg owner found, synthesized gray");
+            if (stockContent == null) return;
+            if (rowCard.getBackground() == null) {
+                // Defensive: some builds paint the card on the content child.
+                // Without a card layer the injected rows would float on the
+                // sheet background, so borrow one from a sibling item.
+                android.graphics.drawable.Drawable sibBg =
+                        stockContent.getBackground();
+                try {
+                    android.view.ViewGroup list =
+                            (android.view.ViewGroup) rowCard.getParent();
+                    for (int i = 0; i < list.getChildCount()
+                            && sibBg == null; i++) {
+                        android.view.View s = list.getChildAt(i);
+                        if (s != rowCard) sibBg = s.getBackground();
+                    }
+                } catch (Throwable ignored) { }
+                if (sibBg != null) rowCard.setBackground(sibBg);
+                HookUtils.log("panel extra rows: no card bg on item; borrowed "
+                        + (sibBg == null ? "nothing (rows stay transparent)"
+                                : sibBg.getClass().getName()));
             }
-            int padL = bgOwner.getPaddingLeft(), padT = bgOwner.getPaddingTop();
-            int padR = bgOwner.getPaddingRight(), padB = bgOwner.getPaddingBottom();
-            if (bgOwner != rowCard) {
-                HookUtils.log("panel extra rows: bg owner="
-                        + bgOwner.getClass().getName()
-                        + " bg=" + cardBg.getClass().getName());
-            }
-            int cardHeight = rowCard.getHeight();
-            int gap = estimateRowGap(rowCard);
 
-            // Style sources: stock title / assignment / chevron inside the card.
+            // The stock side inset (40px measured) lives in the content
+            // child's layout margins -- reuse it verbatim.
+            int insetL = 0, insetR = 0;
+            android.view.ViewGroup.LayoutParams srcLP =
+                    stockContent.getLayoutParams();
+            if (srcLP instanceof android.view.ViewGroup.MarginLayoutParams) {
+                android.view.ViewGroup.MarginLayoutParams mp =
+                        (android.view.ViewGroup.MarginLayoutParams) srcLP;
+                insetL = mp.leftMargin;
+                insetR = mp.rightMargin;
+            }
+            // Row height: match a SIBLING stock row.  Our own item measures
+            // 132px while the stock rows render at 126px (pitch 127 including
+            // the 1px divider), so take the smallest sibling row height.
+            int rowH = rowCard.getHeight();
+            try {
+                android.view.ViewGroup shelf = rowCard;
+                while (shelf.getParent() instanceof android.view.ViewGroup
+                        && !shelf.getClass().getName().contains("RecyclerView")) {
+                    shelf = (android.view.ViewGroup) shelf.getParent();
+                }
+                for (int i = 0; i < shelf.getChildCount(); i++) {
+                    android.view.View s = shelf.getChildAt(i);
+                    HookUtils.log("panel extra rows: shelf[" + i + "] "
+                            + s.getClass().getSimpleName() + " h=" + s.getHeight()
+                            + " gestureRow=" + subtreeHasGestureTitle(s));
+                    if (s != rowCard && s.getHeight() > 0
+                            && subtreeHasGestureTitle(s) && s.getHeight() < rowH) {
+                        rowH = s.getHeight();
+                    }
+                }
+            } catch (Throwable th) {
+                HookUtils.log("panel extra rows: sibling scan: " + th);
+            }
+            // Clone the stock divider's colour when it is a plain colour.
+            int divColor = 0xFF5D5D5D, divH = 1;
+            for (int i = 0; i < rowCard.getChildCount(); i++) {
+                android.view.View c = rowCard.getChildAt(i);
+                if (c == stockContent || c.getHeight() <= 0 || c.getHeight() > 6) {
+                    continue;
+                }
+                if (c.getBackground()
+                        instanceof android.graphics.drawable.ColorDrawable) {
+                    divColor = ((android.graphics.drawable.ColorDrawable)
+                            c.getBackground()).getColor();
+                    divH = c.getHeight();
+                    break;
+                }
+            }
+            HookUtils.log("panel extra rows: inset=" + insetL + "/" + insetR
+                    + " rowH=" + rowH + " divider=#"
+                    + Integer.toHexString(divColor) + "h" + divH);
+
+            // Everything is created with the ITEM's own context so themed
+            // resources and text colours resolve exactly like the stock rows.
+            android.content.Context tctx = rowCard.getContext();
+
+            // Style sources: stock title / assignment inside the row.
             android.widget.TextView srcTitle = null, srcAssign = null;
-            android.widget.ImageView srcChevron = null;
             java.util.ArrayDeque<android.view.View> stack = new java.util.ArrayDeque<>();
-            stack.push(rowCard);
+            stack.push(stockContent);
             while (!stack.isEmpty()) {
                 android.view.View v = stack.pop();
                 if (v instanceof android.view.ViewGroup) {
@@ -2141,61 +2201,62 @@ final class IpeManagerHooks {
                             String.valueOf(tv.getText())) != null) {
                         srcTitle = tv;
                     }
-                } else if (srcChevron == null && v instanceof android.widget.ImageView
-                        && "coui_preference_widget_jump".equals(idName(v))) {
-                    srcChevron = (android.widget.ImageView) v;
                 }
             }
             if (srcTitle == null) return;
 
-            // 1) Wrap the original card content as the first vertical sub-row.
-            java.util.List<android.view.View> kids = new java.util.ArrayList<>();
-            for (int i = 0; i < rowCard.getChildCount(); i++) kids.add(rowCard.getChildAt(i));
-            android.widget.LinearLayout origRow = newSubRow(ctx, cardBg,
-                    padL, padT, padR, padB, cardHeight);
-            rowCard.setOrientation(android.widget.LinearLayout.VERTICAL);
-            rowCard.setBackground(null);
-            rowCard.setPadding(0, 0, 0, 0);
-            for (android.view.View v : kids) {
-                rowCard.removeView(v);
-                origRow.addView(v);
+            // The OEM chevron, so the injected rows end with the same arrow.
+            android.view.View srcArrow = findStockArrow(rowCard, stockContent);
+
+            // 1) Restack: the item becomes vertical and its original children
+            //    move into a full-width wrapper UNTOUCHED, so the stock row
+            //    keeps its geometry, click listener and layout params.
+            java.util.List<android.view.View> orig =
+                    new java.util.ArrayList<>();
+            for (int i = 0; i < rowCard.getChildCount(); i++) {
+                orig.add(rowCard.getChildAt(i));
             }
-            rowCard.addView(origRow, 0);
+            android.widget.LinearLayout row0 = new android.widget.LinearLayout(tctx);
+            row0.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+            row0.setGravity(android.view.Gravity.CENTER_VERTICAL);
+            rowCard.setOrientation(android.widget.LinearLayout.VERTICAL);
+            for (android.view.View v : orig) {
+                rowCard.removeView(v);
+                row0.addView(v);
+            }
+            rowCard.addView(row0, new android.widget.LinearLayout.LayoutParams(
+                    android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                    android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
 
-            // The OEM click listener may live on the card (now the vertical
-            // rowCard) or on one of the original children; after the restack
-            // the user's tap on the stock row must STILL open the stock page
-            // for that row's own slot (2026-09-19: tapping 上滑 opened the
-            // 捏握 page).  A child listener stops the click from bubbling to
-            // the card, making the dispatch deterministic.
-            final android.widget.LinearLayout origRowRef = origRow;
-            origRow.setOnClickListener(new android.view.View.OnClickListener() {
-                @Override public void onClick(android.view.View v) {
-                    String t = gestureTypeOfRow(origRowRef);
-                    showExtraGestureDialog(ctx, t != null ? t : "long_click_v2",
-                            null);
-                }
-            });
-
-            // 2) Append 长按 / 捏握 sub-rows, same card look, with the stock
-            //    inter-card gap as their top margin.
+            // 2) Append one [inset divider + transparent row] per extra slot.
             for (final String gestureType : new String[]{"long_press", "squeeze"}) {
-                android.widget.LinearLayout row = newSubRow(ctx, cardBg,
-                        padL, padT, padR, padB, cardHeight);
+                android.view.View divider = new android.view.View(tctx);
+                divider.setBackgroundColor(divColor);
+                android.widget.LinearLayout.LayoutParams dlp =
+                        new android.widget.LinearLayout.LayoutParams(
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT, divH);
+                dlp.setMargins(insetL, 0, insetR, 0);
+                rowCard.addView(divider, dlp);
+
+                android.widget.LinearLayout row =
+                        new android.widget.LinearLayout(tctx);
+                row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+                row.setGravity(android.view.Gravity.CENTER_VERTICAL);
                 android.widget.LinearLayout.LayoutParams rlp =
                         new android.widget.LinearLayout.LayoutParams(
                                 android.view.ViewGroup.LayoutParams.MATCH_PARENT,
                                 android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
-                rlp.topMargin = gap;
+                rlp.setMargins(insetL, 0, insetR, 0);
                 row.setLayoutParams(rlp);
+                if (rowH > 0) row.setMinimumHeight(rowH);
 
-                android.widget.TextView title = new android.widget.TextView(ctx);
+                android.widget.TextView title = new android.widget.TextView(tctx);
                 copyTextStyle(title, srcTitle);
                 title.setText("long_press".equals(gestureType) ? "长按" : "捏握");
                 row.addView(title, new android.widget.LinearLayout.LayoutParams(0,
                         android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-                android.widget.TextView value = new android.widget.TextView(ctx);
+                android.widget.TextView value = new android.widget.TextView(tctx);
                 copyTextStyle(value, srcAssign != null ? srcAssign : srcTitle);
                 value.setText(extraGestureLabel(ctx, gestureType));
                 value.setTag("lenovo_extra_value_" + gestureType);
@@ -2205,17 +2266,7 @@ final class IpeManagerHooks {
                         android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
                         android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
 
-                if (srcChevron != null && srcChevron.getDrawable() != null) {
-                    android.widget.ImageView chevron = new android.widget.ImageView(ctx);
-                    chevron.setImageDrawable(srcChevron.getDrawable());
-                    chevron.setPadding(srcChevron.getPaddingLeft(),
-                            srcChevron.getPaddingTop(), srcChevron.getPaddingRight(),
-                            srcChevron.getPaddingBottom());
-                    row.addView(chevron, new android.widget.LinearLayout.LayoutParams(
-                            srcChevron.getWidth() > 0 ? srcChevron.getWidth()
-                                    : android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
-                            android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
-                }
+                appendArrow(row, srcArrow, tctx);
 
                 final android.widget.TextView valueRef = value;
                 row.setOnClickListener(new android.view.View.OnClickListener() {
@@ -2225,9 +2276,114 @@ final class IpeManagerHooks {
                 });
                 rowCard.addView(row);
             }
-            HookUtils.log("panel extra rows: long_press/squeeze stacked under 上滑 card");
+            rowCard.setTag("lenovo_panel_extra");
+            HookUtils.log("panel extra rows: 长按/捏握 appended as transparent"
+                    + " inset rows under the 上滑 card");
         } catch (Throwable th) {
             HookUtils.log("panel extra rows: " + th);
+        }
+    }
+
+    /** Locate the OEM chevron inside a stock panel row.  On this build it is a
+     * COUIRoundImageView that exposes NO drawable (logged 2026-09-19), so the
+     * caller falls back to drawing the same shape; every candidate is logged
+     * so the next iteration can clone it directly if one appears. */
+    private static android.view.View findStockArrow(android.view.ViewGroup row,
+            android.view.View content) {
+        java.util.ArrayDeque<android.view.View> q = new java.util.ArrayDeque<>();
+        q.push(row);
+        android.view.View best = null;
+        while (!q.isEmpty()) {
+            android.view.View v = q.pop();
+            if (v instanceof android.view.ViewGroup) {
+                android.view.ViewGroup g = (android.view.ViewGroup) v;
+                for (int i = 0; i < g.getChildCount(); i++) q.push(g.getChildAt(i));
+            }
+            if (v == row || v == content) continue;
+            int w = v.getWidth(), h = v.getHeight();
+            if (w <= 0 || h <= 0 || w > 96 || h > 96) continue;
+            android.graphics.drawable.Drawable bg = v.getBackground();
+            android.graphics.drawable.Drawable fg = v.getForeground();
+            HookUtils.log("panel extra rows: arrow candidate "
+                    + v.getClass().getSimpleName() + " " + w + "x" + h
+                    + " bg=" + (bg == null ? "null" : bg.getClass().getSimpleName())
+                    + " fg=" + (fg == null ? "null" : fg.getClass().getSimpleName()));
+            if (best == null
+                    && (v instanceof android.widget.ImageView || bg != null || fg != null)) {
+                best = v;
+            }
+        }
+        return best;
+    }
+
+    /** Append the row chevron: clone the OEM view when a drawable is readable,
+     * otherwise draw the measured stock shape (12x33px, 3px stroke, #727272 --
+     * pixel-measured 2026-09-19) at the same position and size. */
+    private static void appendArrow(android.widget.LinearLayout row,
+            android.view.View src, android.content.Context ctx) {
+        int w = 12, h = 33;
+        android.view.ViewGroup.LayoutParams slp = null;
+        if (src != null) {
+            if (src.getWidth() > 0) w = src.getWidth();
+            if (src.getHeight() > 0) h = src.getHeight();
+            slp = src.getLayoutParams();
+        }
+        android.graphics.drawable.Drawable d = null;
+        if (src instanceof android.widget.ImageView) {
+            android.widget.ImageView iv = (android.widget.ImageView) src;
+            d = iv.getDrawable() != null ? iv.getDrawable() : iv.getBackground();
+        }
+        if (d == null && src != null) {
+            d = src.getForeground() != null ? src.getForeground() : src.getBackground();
+        }
+        android.view.View arrow;
+        if (d != null) {
+            android.widget.ImageView iv = new android.widget.ImageView(ctx);
+            iv.setImageDrawable(d);
+            arrow = iv;
+            HookUtils.log("panel extra rows: chevron cloned from "
+                    + d.getClass().getSimpleName());
+        } else {
+            arrow = new ChevronView(ctx, 0xFF727272, 3);
+            HookUtils.log("panel extra rows: chevron drawn locally");
+        }
+        android.widget.LinearLayout.LayoutParams lp =
+                new android.widget.LinearLayout.LayoutParams(w, h);
+        lp.gravity = android.view.Gravity.CENTER_VERTICAL;
+        if (slp instanceof android.widget.LinearLayout.LayoutParams) {
+            android.widget.LinearLayout.LayoutParams s =
+                    (android.widget.LinearLayout.LayoutParams) slp;
+            lp.setMargins(s.leftMargin, s.topMargin, s.rightMargin, s.bottomMargin);
+        }
+        row.addView(arrow, lp);
+    }
+
+    /** The OEM ">" row arrow, drawn in code because this ROM's chevron view
+     * exposes no drawable to clone.  Geometry mirrors the measured stock
+     * glyph so the injected rows read as native. */
+    static final class ChevronView extends android.view.View {
+        private final android.graphics.Paint paint =
+                new android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG);
+
+        ChevronView(android.content.Context ctx, int color, float stroke) {
+            super(ctx);
+            paint.setColor(color);
+            paint.setStyle(android.graphics.Paint.Style.STROKE);
+            paint.setStrokeWidth(stroke);
+            paint.setStrokeCap(android.graphics.Paint.Cap.ROUND);
+            paint.setStrokeJoin(android.graphics.Paint.Join.ROUND);
+        }
+
+        @Override protected void onDraw(android.graphics.Canvas canvas) {
+            float w = getWidth(), h = getHeight();
+            float stroke = paint.getStrokeWidth();
+            float x0 = stroke * 0.7f, x1 = w - stroke * 0.7f;
+            float y0 = stroke * 0.7f, y1 = h * 0.5f, y2 = h - stroke * 0.7f;
+            android.graphics.Path p = new android.graphics.Path();
+            p.moveTo(x0, y0);
+            p.lineTo(x1, y1);
+            p.lineTo(x0, y2);
+            canvas.drawPath(p, paint);
         }
     }
 
