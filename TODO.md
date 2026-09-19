@@ -258,6 +258,66 @@
 **状态**：选中 / 互斥 / 重击保持 / 恢复原厂勾回 / 落键 101 与 -1 全部实机通过。
 **遗留**：物理下滑 → 截图动作的端到端（消费端已实现，待用户笔势实测确认）。
 
+## P0.12 书写扩展功能包 + 手势×功能自由组合（v4.3.0–v4.3.4，2026-09-19；UI 链路已实机闭环，物理笔动作待测）
+
+**需求**（用户 2026-09-19）：新增「撤销重做 / 手写浮窗便签 / 圈选翻译 / 圈选 OCR / 翻页」，
+并让 **按键（手势槽）和功能项自由组合**。
+
+**动作注册表**（`IpeManagerHooks.GESTURE_CUSTOM_CODES`，101..113 **连续**，label 索引 =
+code-101，别破坏）：
+| 码 | 功能 | 执行 |
+|---|---|---|
+| 107/108 | 撤销/重做 | system_server 注入 Ctrl+Z / Ctrl+Y（`injectCombo`：CTRL down → key down/up → CTRL up） |
+| 109/110 | 翻页上/下 | 注入 PAGE_UP / PAGE_DOWN |
+| 111 | 手写便签 | `HandwrittenNoteOverlay`：system_server 直接 addView 的 TYPE_APPLICATION_OVERLAY 全屏手写层（工具条：关闭/撤销/橡皮/清空/4 色/保存），保存走 MediaStore → Pictures/PenBridge |
+| 112/113 | 圈选识别/翻译 | `LassoSelectOverlay`：透明覆盖层框选 → `android.window.ScreenCapture`（反射，DisplayCaptureArgs.Builder.setSourceCrop）裁剪 → 保存 PNG + 剪贴板（图片）；翻译再弹分享/`ACTION_TRANSLATE`。**OCR 引擎未接**（`tryRecognize` 留 null），DeepThinker 探测未完成 |
+
+**自由组合的两层含义**：
+1. 原 3 个 OEM 手势页（下滑/双击/上滑）继续单选绑定 13 个功能中的任意一个（已有能力）。
+2. **新开长按/捏握两个槽**：笔硬件发 0x0c0611/0x0c0619，OEM UI 不暴露。`IpeManagerHooks`
+   在 PencilPanelActivity 的 Dialog 里追加「长按」「捏握」行（tag=`lenovo_panel_extra`
+   防重复注入），点击弹自建 AlertDialog 全选项单选（原厂 0..5 + 101..113），写入
+   `ipe_pencil_wb_click_long_press` / `_squeeze`。消费端 `SystemStylusHooks.extraGestureAction`：
+   `>=100` 走 runCustomAction；`1..4` 复用 click() 的承重路由（4→healthservice，1..3→note/screenshot）；
+   `0`=关闭；`-1`/`5`=随心圈 collect。
+
+**v4.3.1 实机验证 + 修复（2026-09-19）**：
+- 注入 UI 全量呈现：书写扩展 7 项（107-113）+ 系统快捷 6 项（101-106）+ 恢复原厂选项；单选正常
+  （`gesture marks sync single_click selected=113`，原厂行全部 false）。
+- **修复 veto 范围过宽（v4.3.1）**：原实现拦截页面上所有非 `item_wb_*` 行的 `setChecked(true)`，
+  把「手写笔轮盘设置 → 显示工具名称」（`item_wheel_show_tool_name`，重开页面时框架合法恢复 ON）
+  也拦成了 OFF。改为只 veto `GESTURE_STOCK_ROW_KEYS` 内的原厂单选行。
+- **重开页面持久化验证**：退出→重进，顶部原厂行保持未选、桥接选择保留，无闪烁无 stale 勾选。
+- **恢复原厂选项实机验证**：点击后 bridge=-1、全部扩展行 false、原厂「手写笔轮盘」重新选中。
+
+**v4.3.2–v4.3.4 修复（2026-09-19）**：
+- **PencilSettingActivity 摘要联动（v4.3.2/3）**：手写笔主页面（非弹窗）每行的 assignment TextView
+  也用 `com.oplus.ipemanager:id/assignment` 渲染原厂值，桥接选择后不刷新。修复：面板 assignment
+  重写 hook 同时覆盖 `PencilSettingActivity`（onResume 需额外 hook 具体类——**hookAll 只匹配
+  declared methods，该 activity 重写了 onResume，基类钩子拦不到**，与 P0.11 同坑）；主页面
+  pass 关闭 addExtraPanelRows（弹窗专用），`schedulePanelPass(root, ctx, allowExtraRows)`。
+- **桥接键重启丢失（v4.3.4，根因钉死）**：ipemanager app 进程写的 `Settings.Global` 键在本 ROM
+  **重启后被 provider 丢弃**（app 写入会话内可读回、重启后变 -1；root `settings put` 写入则保留）。
+  修复：system_server 侧注册 `registerBridgeSettingsWriter`（广播
+  `com.aclaniakea.lenovopenbridge.WRITE_GESTURE_KEY`，校验 key 前缀 `ipe_pencil_wb_click_`），
+  app 侧全部 3 处写入（行监听 / 原厂行点击清除 / 长按捏握对话框）改走
+  `persistGestureKey()`：本地 putInt（会话内即时读回）+ 广播镜像（system uid 写入持久）。
+  实机验证：广播 → `bridge settings persisted ipe_pencil_wb_click_single_click=113` → 落库。
+
+**注意**：
+- 设置页注入为**双分类**：「书写扩展」(107-113) + 「系统快捷」(101-106)，reset 行在系统组末尾。
+- 同一文件多个 Edit **并行调用会互相覆盖**（丢更新），必须顺序编辑 —— 本次又踩一次（3 个 Edit 并行，
+  2 个静默丢失），已全部改为逐个提交。
+- `HandwrittenNoteOverlay.toggle` 复用同一手势做开关（开着时再触发即关闭），防止笔被"锁"在便签层。
+
+**待办**：
+- [ ] **物理笔动作验证**（笔重启后未重连，等待重连后测试）：实际触发各手势 → 撤销/重做/翻页/便签/圈选
+- [ ] 长按/捏握面板行 + 对话框绑定落键（重启存续路径）端到端复测
+- [ ] Ctrl+Z 在便签 doodle 引擎是否生效待测（不生效则改 hook note 应用内部 undo）
+- [ ] DeepThinker / ROM OCR 服务探测 → 接入 `LassoSelectOverlay.tryRecognize`
+- [ ] 手写便签的压感宽度、防误触（palm rejection）体验调优
+- [ ] PencilSettingActivity 摘要联动需笔连接状态下复验（未连接时页面隐藏手势行）
+
 ## P0.8 便签手写笔记闪退（native，2026-09-18 完成根因定位，**非本模块引起**）
 
 **现象**：`com.coloros.note` 打开手写笔记后进程崩溃；`/data/tombstones/tombstone_15..23` 共 **9 个**

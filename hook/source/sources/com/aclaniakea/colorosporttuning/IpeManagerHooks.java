@@ -1663,16 +1663,35 @@ final class IpeManagerHooks {
      *   long_click_v2 page -> ipe_pencil_long_click_v2 (上滑, 二值) */
     private static final java.util.Map<Object, String> gesturePageTypes =
             new java.util.HashMap<Object, String>();
-    private static final int[] GESTURE_CUSTOM_CODES = {101, 102, 103, 104, 105, 106};
-    private static final String[] GESTURE_CUSTOM_LABELS =
-            {"截图", "通知栏", "返回", "主屏", "最近任务", "手电筒"};
+    /** Bridge action registry.  Codes are CONTIGUOUS from 101 so that
+     * GESTURE_CUSTOM_LABELS[code - 101] works everywhere (marks sync, panel
+     * assignment rewrite, the long/squeeze dialog).  Categories only affect
+     * which settings-page group a row lands in. */
+    private static final int[] GESTURE_CUSTOM_CODES = {
+            101, 102, 103, 104, 105, 106,            // 系统快捷
+            107, 108, 109, 110, 111, 112, 113};      // 书写扩展
+    private static final String[] GESTURE_CUSTOM_LABELS = {
+            "截图", "通知栏", "返回", "主屏", "最近任务", "手电筒",
+            "撤销", "重做", "翻页上", "翻页下",
+            "手写便签", "圈选识别", "圈选翻译"};
     private static final String[] GESTURE_CUSTOM_SUMMARIES = {
             "截取当前屏幕并进入编辑",
             "展开通知面板",
             "模拟返回键",
             "回到桌面",
             "打开最近任务",
-            "切换手电筒"};
+            "切换手电筒",
+            "向焦点应用发送 Ctrl+Z",
+            "向焦点应用发送 Ctrl+Y",
+            "向上翻页（阅读/演示）",
+            "向下翻页（阅读/演示）",
+            "呼出全屏手写浮窗，随手记一笔",
+            "用笔圈选屏幕区域并提取文字",
+            "用笔圈选屏幕区域并翻译"};
+    /** 0-based indices into GESTURE_CUSTOM_CODES, in settings-page display
+     * order per category. */
+    private static final int[] GESTURE_GROUP_WRITING = {6, 7, 8, 9, 10, 11, 12};
+    private static final int[] GESTURE_GROUP_SYSTEM = {0, 1, 2, 3, 4, 5};
     private static final String[] GESTURE_STOCK_ROW_KEYS = {
             "item_item_close", "item_erase", "item_recent_tool",
             "item_color_picker", "item_global_wheel", "item_smart_collect"};
@@ -1693,6 +1712,28 @@ final class IpeManagerHooks {
 
     private static String gestureWbKey(String clickType) {
         return "ipe_pencil_wb_click_" + clickType;
+    }
+
+    /** Actions written to Settings.Global from THIS app process do not
+     * survive a reboot on this ROM (the provider drops non-system-attributed
+     * global keys at boot -- observed 2026-09-19: in-session read-back fine,
+     * value gone after restart, while a root `settings put` survives).
+     * system_server writes DO persist, so every gesture-key write is mirrored
+     * to a receiver registered inside system_server (SystemStylusHooks).  The
+     * local put stays for instant read-back within the settings UI. */
+    private static void persistGestureKey(Context ctx, String key, int value) {
+        try {
+            Settings.Global.putInt(ctx.getContentResolver(), key, value);
+        } catch (Throwable ignored) { }
+        try {
+            android.content.Intent i = new android.content.Intent(
+                    "com.aclaniakea.lenovopenbridge.WRITE_GESTURE_KEY");
+            i.putExtra("key", key);
+            i.putExtra("value", value);
+            ctx.sendBroadcast(i);
+        } catch (Throwable th) {
+            HookUtils.log("gesture key broadcast: " + th);
+        }
     }
 
     private static final String GESTURE_ACTIVITY_CLASS =
@@ -1762,7 +1803,17 @@ final class IpeManagerHooks {
                                 Object pref = hook.thisObject;
                                 String key = (String) pref.getClass()
                                         .getMethod("getKey").invoke(pref);
-                                if (key == null || key.startsWith("item_wb_")) return;
+                                // Veto ONLY the stock gesture radio rows.  Other
+                                // TwoStatePreferences on this page (e.g. the
+                                // item_wheel_show_tool_name switch in 手写笔轮盘设置)
+                                // legitimately restore setChecked(true) on open and
+                                // must NOT be blocked.
+                                if (key == null) return;
+                                boolean stockRadioRow = false;
+                                for (String k : GESTURE_STOCK_ROW_KEYS) {
+                                    if (k.equals(key)) { stockRadioRow = true; break; }
+                                }
+                                if (!stockRadioRow) return;
                                 Object ctx = pref.getClass()
                                         .getMethod("getContext").invoke(pref);
                                 android.app.Activity act =
@@ -1806,8 +1857,7 @@ final class IpeManagerHooks {
                             for (String t : new String[]{"single_click", "double_click",
                                     "long_click_v2"}) {
                                 // See the reset row: -1 == unset on this ROM.
-                                Settings.Global.putInt(ctx.getContentResolver(),
-                                        gestureWbKey(t), -1);
+                                persistGestureKey(ctx, gestureWbKey(t), -1);
                             }
                             Object pm = hook.thisObject.getClass()
                                     .getMethod("getPreferenceManager").invoke(hook.thisObject);
@@ -1842,19 +1892,37 @@ final class IpeManagerHooks {
      * binds its rows, rewrite the assignment text from the bridge key.  Rows
      * owned by a stock option are left exactly as the OEM rendered them. */
     private static void installPanelAssignmentBridge(final XC_LoadPackage.LoadPackageParam lpp) {
-        HookUtils.hookAll(lpp.classLoader, "android.app.Activity", "onResume",
-                new XC_MethodHook() {
-                    @Override protected void afterHookedMethod(MethodHookParam hook) {
-                        if (!"com.oplus.ipemanager.btadsorb.pencilPanel.activity.PencilPanelActivity"
-                                .equals(hook.thisObject.getClass().getName())) {
-                            return;
+        // NOTE: hookAll only matches DECLARED methods.  An activity that
+        // overrides onResume never runs android.app.Activity.onResume, so hook
+        // the concrete classes too (PencilSettingActivity overrides it,
+        // PencilPanelActivity does not -- hooking both covers either shape).
+        final String[] resumeClasses = {
+                "android.app.Activity",
+                "com.oplus.ipemanager.btadsorb.pencilPanel.activity.PencilPanelActivity",
+                "com.oplus.ipemanager.btadsorb.setting.activity.PencilSettingActivity"};
+        for (final String resumeClass : resumeClasses) {
+            HookUtils.hookAll(lpp.classLoader, resumeClass, "onResume",
+                    new XC_MethodHook() {
+                        @Override protected void afterHookedMethod(MethodHookParam hook) {
+                            String cls = hook.thisObject.getClass().getName();
+                            // The popup panel AND the full 手写笔 settings page both
+                            // render per-gesture "assignment" TextViews from the STOCK
+                            // keys; rewrite both from the bridge key.
+                            if (!"com.oplus.ipemanager.btadsorb.pencilPanel.activity.PencilPanelActivity"
+                                    .equals(cls)
+                                && !"com.oplus.ipemanager.btadsorb.setting.activity.PencilSettingActivity"
+                                    .equals(cls)) {
+                                return;
+                            }
+                            final android.app.Activity activity =
+                                    (android.app.Activity) hook.thisObject;
+                            schedulePanelPass(activity.getWindow().getDecorView(),
+                                    activity,
+                                    "com.oplus.ipemanager.btadsorb.pencilPanel.activity.PencilPanelActivity"
+                                            .equals(cls));
                         }
-                        final android.app.Activity activity =
-                                (android.app.Activity) hook.thisObject;
-                        schedulePanelPass(activity.getWindow().getDecorView(),
-                                activity.getContentResolver());
-                    }
-                });
+                    });
+        }
         // The popup card is NOT the translucent activity's own view hierarchy
         // (the decor walk found 0 titles on device) -- it is a Dialog window
         // shown on top.  Scan dialog windows too.
@@ -1865,27 +1933,32 @@ final class IpeManagerHooks {
                             android.view.Window w = (android.view.Window) hook.thisObject
                                     .getClass().getMethod("getWindow").invoke(hook.thisObject);
                             if (w == null || w.getDecorView() == null) return;
-                            schedulePanelPass(w.getDecorView(),
-                                    w.getContext().getContentResolver());
+                            schedulePanelPass(w.getDecorView(), w.getContext());
                         } catch (Throwable ignored) { }
                     }
                 });
     }
 
     private static void schedulePanelPass(final android.view.View root,
-            final android.content.ContentResolver resolver) {
+            final Context ctx) {
+        schedulePanelPass(root, ctx, true);
+    }
+
+    private static void schedulePanelPass(final android.view.View root,
+            final Context ctx, final boolean allowExtraRows) {
         for (final long delay : new long[]{300L, 900L}) {
             new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
                 @Override public void run() {
-                    fixPanelAssignments(root, resolver);
+                    fixPanelAssignments(root, ctx, allowExtraRows);
                 }
             }, delay);
         }
     }
 
-    private static void fixPanelAssignments(android.view.View root,
-            android.content.ContentResolver resolver) {
+    private static void fixPanelAssignments(android.view.View root, Context ctx,
+            boolean allowExtraRows) {
         try {
+            java.util.List<android.view.ViewGroup> rows = new java.util.ArrayList<>();
             java.util.List<android.widget.TextView> titles = new java.util.ArrayList<>();
             java.util.List<android.widget.TextView> assigns = new java.util.ArrayList<>();
             java.util.ArrayDeque<android.view.View> stack = new java.util.ArrayDeque<>();
@@ -1898,8 +1971,12 @@ final class IpeManagerHooks {
                 }
                 if (!(v instanceof android.widget.TextView)) continue;
                 android.widget.TextView tv = (android.widget.TextView) v;
-                if (titleToGestureType(String.valueOf(tv.getText())) != null) {
+                String type = titleToGestureType(String.valueOf(tv.getText()));
+                if (type != null) {
                     titles.add(tv);
+                    if (tv.getParent() instanceof android.view.ViewGroup) {
+                        rows.add((android.view.ViewGroup) tv.getParent());
+                    }
                 } else if ("assignment".equals(idName(tv))) {
                     assigns.add(tv);
                 }
@@ -1916,7 +1993,7 @@ final class IpeManagerHooks {
                 String type = titleToGestureType(
                         String.valueOf(titles.get(best).getText()));
                 if (type == null) continue;
-                int bridge = Settings.Global.getInt(resolver,
+                int bridge = Settings.Global.getInt(ctx.getContentResolver(),
                         gestureWbKey(type), -1);
                 if (bridge < 100) continue;   // stock option owns it; OEM label stays
                 String want = GESTURE_CUSTOM_LABELS[bridge - 101];
@@ -1925,8 +2002,139 @@ final class IpeManagerHooks {
                     HookUtils.log("panel assignment " + type + " -> " + want);
                 }
             }
+            if (allowExtraRows && !rows.isEmpty()) {
+                addExtraPanelRows(ctx, rows.get(0));
+            }
         } catch (Throwable th) {
             HookUtils.log("panel assignments walk: " + th);
+        }
+    }
+
+    /** Add 长按 / 捏握 rows to the panel card (the OEM UI only exposes three
+     * gesture slots; the pen also emits 0x0c0611 long-press and 0x0c0619
+     * squeeze).  The rows are styled by copying the first OEM row, and each
+     * opens our own single-choice dialog over the FULL option set (stock 0..5
+     * plus every bridge code), so gestures and functions combine freely. */
+    private static void addExtraPanelRows(Context ctx, android.view.ViewGroup refRow) {
+        try {
+            if (refRow.findViewWithTag("lenovo_panel_extra") != null) return;
+            android.view.ViewGroup list = (refRow.getParent()
+                    instanceof android.view.ViewGroup)
+                    ? (android.view.ViewGroup) refRow.getParent() : null;
+            if (list == null) return;
+            android.widget.TextView srcTitle = null, srcAssign = null;
+            for (int i = 0; i < refRow.getChildCount(); i++) {
+                android.view.View c = refRow.getChildAt(i);
+                if (!(c instanceof android.widget.TextView)) continue;
+                if (titleToGestureType(String.valueOf(((android.widget.TextView) c).getText()))
+                        != null) {
+                    srcTitle = (android.widget.TextView) c;
+                } else {
+                    srcAssign = (android.widget.TextView) c;
+                }
+            }
+            if (srcTitle == null) return;
+            int index = list.indexOfChild(refRow);
+            for (final String gestureType : new String[]{"long_press", "squeeze"}) {
+                android.widget.LinearLayout row = new android.widget.LinearLayout(ctx);
+                row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+                row.setTag("lenovo_panel_extra");
+                row.setLayoutParams(refRow.getLayoutParams());
+                if (refRow.getBackground() != null) row.setBackground(refRow.getBackground());
+                row.setPadding(refRow.getPaddingLeft(), refRow.getPaddingTop(),
+                        refRow.getPaddingRight(), refRow.getPaddingBottom());
+
+                android.widget.TextView title = new android.widget.TextView(ctx);
+                title.setText("long_press".equals(gestureType) ? "长按" : "捏握");
+                copyTextStyle(title, srcTitle);
+                android.widget.TextView value = new android.widget.TextView(ctx);
+                copyTextStyle(value, srcAssign != null ? srcAssign : srcTitle);
+                value.setText(extraGestureLabel(ctx, gestureType));
+
+                row.addView(title);
+                row.addView(value);
+                row.setOnClickListener(new android.view.View.OnClickListener() {
+                    @Override public void onClick(android.view.View v) {
+                        showExtraGestureDialog(ctx, gestureType, value);
+                    }
+                });
+                list.addView(row, ++index < list.getChildCount() ? index
+                        : list.getChildCount());
+            }
+            HookUtils.log("panel extra rows: long_press/squeeze added");
+        } catch (Throwable th) {
+            HookUtils.log("panel extra rows: " + th);
+        }
+    }
+
+    private static void copyTextStyle(android.widget.TextView dst,
+            android.widget.TextView src) {
+        dst.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, src.getTextSize());
+        dst.setTextColor(src.getCurrentTextColor());
+        dst.setTypeface(src.getTypeface());
+        dst.setGravity(src.getGravity());
+        dst.setPadding(src.getPaddingLeft(), src.getPaddingTop(),
+                src.getPaddingRight(), src.getPaddingBottom());
+        android.view.ViewGroup.LayoutParams lp = src.getLayoutParams();
+        if (lp != null) dst.setLayoutParams(lp);
+    }
+
+    /** Human label for the current long/squeeze binding. */
+    private static String extraGestureLabel(Context ctx, String type) {
+        int v = Settings.Global.getInt(ctx.getContentResolver(),
+                gestureWbKey(type), -1);
+        if (v >= 100) return GESTURE_CUSTOM_LABELS[v - 101];
+        if (v == 0) return "关闭";
+        if (v == -1 || v == 5) return "随心圈";
+        return v == 1 ? "当前工具与橡皮擦切换"
+                : v == 2 ? "最近工具切换"
+                : v == 3 ? "显示颜色盘" : "手写笔轮盘";
+    }
+
+    /** Free-binding dialog for the long/squeeze slots: every stock action
+     * (0..5) and every bridge action (101..113) is selectable. */
+    private static void showExtraGestureDialog(Context ctx, final String type,
+            final android.widget.TextView valueView) {
+        try {
+            final String[] stockNames = {"关闭", "当前工具与橡皮擦切换", "最近工具切换",
+                    "显示颜色盘", "手写笔轮盘", "随心圈"};
+            String[] items = new String[stockNames.length + GESTURE_CUSTOM_CODES.length];
+            for (int i = 0; i < stockNames.length; i++) items[i] = stockNames[i];
+            for (int i = 0; i < GESTURE_CUSTOM_CODES.length; i++) {
+                items[stockNames.length + i] = GESTURE_CUSTOM_LABELS[i];
+            }
+            final int cur = Settings.Global.getInt(ctx.getContentResolver(),
+                    gestureWbKey(type), -1);
+            int checked = -1;
+            if (cur >= 100) {
+                checked = stockNames.length + (cur - 101);
+            } else if (cur >= 0 && cur <= 5) {
+                checked = cur;
+            } else if (cur == -1) {
+                checked = 5;   // unset long/squeeze defaults to 随心圈 collect
+            }
+            android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(ctx)
+                    .setTitle("long_press".equals(type) ? "长按手势功能" : "捏握手势功能")
+                    .setSingleChoiceItems(items, checked,
+                            new android.content.DialogInterface.OnClickListener() {
+                                @Override public void onClick(android.content.DialogInterface d,
+                                        int which) {
+                                    int value = which < 6 ? which
+                                            : 101 + (which - 6);
+                                    persistGestureKey(ctx, gestureWbKey(type), value);
+                                    if (valueView != null) {
+                                        valueView.setText(which < 6 ? stockNames[which]
+                                                : GESTURE_CUSTOM_LABELS[which - 6]);
+                                    }
+                                    HookUtils.log("panel extra " + type + " -> " + value);
+                                    d.dismiss();
+                                }
+                            })
+                    .setNegativeButton("取消", null)
+                    .create();
+            dlg.show();
+        } catch (Throwable th) {
+            HookUtils.log("panel extra dialog: " + th);
         }
     }
 
@@ -2039,57 +2247,24 @@ final class IpeManagerHooks {
                 scheduleLateGestureResync(loader, screen, type, sel);
                 return;
             }
-            Class<?> categoryType = Class.forName(
-                    "com.coui.appcompat.preference.COUIPreferenceCategory", false, loader);
+            Object categoryWriting = makeGestureCategory(context, pref, screen,
+                    "lenovo_pen_gesture_extra", "书写扩展", 100);
+            Object categorySystem = makeGestureCategory(context, pref, screen,
+                    "lenovo_pen_gesture_extra_sys", "系统快捷", 101);
             Class<?> markType = Class.forName(
                     "com.coui.appcompat.preference.COUIMarkPreference", false, loader);
             Class<?> changeType = Class.forName(
                     "androidx.preference.Preference$OnPreferenceChangeListener", false, loader);
 
-            Object category = categoryType.getConstructor(Context.class,
-                    android.util.AttributeSet.class).newInstance(context, null);
-            pref.getMethod("setKey", String.class).invoke(category, "lenovo_pen_gesture_extra");
-            pref.getMethod("setTitle", CharSequence.class).invoke(category, "扩展功能");
-            pref.getMethod("setOrder", Integer.TYPE).invoke(category, 100);
-            screen.getClass().getMethod("addPreference", pref).invoke(screen, category);
-
             final int selected = Settings.Global.getInt(context.getContentResolver(),
                     gestureWbKey(type), -1);
-            for (int i = 0; i < GESTURE_CUSTOM_CODES.length; i++) {
-                final int code = GESTURE_CUSTOM_CODES[i];
-                Object row = markType.getConstructor(Context.class).newInstance(context);
-                pref.getMethod("setKey", String.class).invoke(row, "item_wb_" + code);
-                pref.getMethod("setTitle", CharSequence.class).invoke(row, GESTURE_CUSTOM_LABELS[i]);
-                pref.getMethod("setSummary", CharSequence.class).invoke(row, GESTURE_CUSTOM_SUMMARIES[i]);
-                pref.getMethod("setPersistent", Boolean.TYPE).invoke(row, false);
-                row.getClass().getMethod("setChecked", Boolean.TYPE).invoke(row, code == selected);
-                pref.getMethod("setOnPreferenceChangeListener", changeType).invoke(row,
-                        Proxy.newProxyInstance(loader, new Class[]{changeType}, new InvocationHandler() {
-                            @Override public Object invoke(Object proxy, Method method, Object[] args) {
-                                if (!"onPreferenceChange".equals(method.getName())) return Boolean.FALSE;
-                                Settings.Global.putInt(context.getContentResolver(),
-                                        gestureWbKey(type), code);
-                                syncGestureMarks(activity.getClassLoader(), screen, type, code);
-                                // CheckBoxPreference.onClick toggles
-                                // (!isChecked) AFTER the listener returned, so
-                                // re-tapping the already-selected row would end
-                                // up unchecked while the key still says
-                                // "selected".  Re-assert once the click is done.
-                                new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
-                                    @Override public void run() {
-                                        syncGestureMarks(activity.getClassLoader(),
-                                                screen, type, code);
-                                    }
-                                }, 120);
-                                HookUtils.log("gesture page " + type + " -> bridge code " + code);
-                                // TRUE = the framework accepts the new value
-                                // and marks this row checked.  Returning FALSE
-                                // silently rejected the click (rows appeared
-                                // unselectable on device 2026-09-19).
-                                return Boolean.TRUE;
-                            }
-                        }));
-                category.getClass().getMethod("addPreference", pref).invoke(category, row);
+            for (final int idx : GESTURE_GROUP_WRITING) {
+                addGestureRow(context, activity, screen, categoryWriting, pref,
+                        markType, changeType, loader, type, idx, selected);
+            }
+            for (final int idx : GESTURE_GROUP_SYSTEM) {
+                addGestureRow(context, activity, screen, categorySystem, pref,
+                        markType, changeType, loader, type, idx, selected);
             }
             // Escape hatch: selecting a bridge option wins over the stock key
             // (SystemStylusHooks checks the wb key first), so the user needs a
@@ -2120,7 +2295,7 @@ final class IpeManagerHooks {
                             return Boolean.FALSE;
                         }
                     }));
-            category.getClass().getMethod("addPreference", pref).invoke(category, resetRow);
+            categorySystem.getClass().getMethod("addPreference", pref).invoke(categorySystem, resetRow);
             // COUIMarkPreference's default render state is CHECKED; every other
             // row gets an explicit setChecked at creation, so if the reset row
             // never gets one it shows up pre-marked on a freshly opened page.
@@ -2130,6 +2305,61 @@ final class IpeManagerHooks {
         } catch (Throwable th) {
             HookUtils.log("gesture rows inject: " + th);
         }
+    }
+
+    private static Object makeGestureCategory(Context context, Class<?> pref,
+            Object screen, String key, String title, int order) throws Exception {
+        Class<?> categoryType = Class.forName(
+                "com.coui.appcompat.preference.COUIPreferenceCategory", false,
+                context.getClassLoader());
+        Object category = categoryType.getConstructor(Context.class,
+                android.util.AttributeSet.class).newInstance(context, null);
+        pref.getMethod("setKey", String.class).invoke(category, key);
+        pref.getMethod("setTitle", CharSequence.class).invoke(category, title);
+        pref.getMethod("setOrder", Integer.TYPE).invoke(category, order);
+        screen.getClass().getMethod("addPreference", pref).invoke(screen, category);
+        return category;
+    }
+
+    /** One COUIMarkPreference bridge row: key item_wb_<code>, single-select
+     * across the whole page via syncGestureMarks, persists the code into
+     * ipe_pencil_wb_click_<type>. */
+    private static void addGestureRow(final Context context,
+            final android.app.Activity activity, final Object screen,
+            final Object category, final Class<?> pref, final Class<?> markType,
+            final Class<?> changeType, final ClassLoader loader,
+            final String type, final int idx, final int selected) throws Exception {
+        final int code = GESTURE_CUSTOM_CODES[idx];
+        Object row = markType.getConstructor(Context.class).newInstance(context);
+        pref.getMethod("setKey", String.class).invoke(row, "item_wb_" + code);
+        pref.getMethod("setTitle", CharSequence.class).invoke(row, GESTURE_CUSTOM_LABELS[idx]);
+        pref.getMethod("setSummary", CharSequence.class).invoke(row, GESTURE_CUSTOM_SUMMARIES[idx]);
+        pref.getMethod("setPersistent", Boolean.TYPE).invoke(row, false);
+        row.getClass().getMethod("setChecked", Boolean.TYPE).invoke(row, code == selected);
+        pref.getMethod("setOnPreferenceChangeListener", changeType).invoke(row,
+                Proxy.newProxyInstance(loader, new Class[]{changeType}, new InvocationHandler() {
+                    @Override public Object invoke(Object proxy, Method method, Object[] args) {
+                        if (!"onPreferenceChange".equals(method.getName())) return Boolean.FALSE;
+                        persistGestureKey(context, gestureWbKey(type), code);
+                        syncGestureMarks(activity.getClassLoader(), screen, type, code);
+                        // CheckBoxPreference.onClick toggles (!isChecked)
+                        // AFTER the listener returned, so re-tapping the
+                        // already-selected row would end up unchecked while the
+                        // key still says "selected".  Re-assert once done.
+                        new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                            @Override public void run() {
+                                syncGestureMarks(activity.getClassLoader(),
+                                        screen, type, code);
+                            }
+                        }, 120);
+                        HookUtils.log("gesture page " + type + " -> bridge code " + code);
+                        // TRUE = the framework accepts the new value and marks
+                        // this row checked.  Returning FALSE silently rejected
+                        // the click (rows appeared unselectable on device).
+                        return Boolean.TRUE;
+                    }
+                }));
+        category.getClass().getMethod("addPreference", pref).invoke(category, row);
     }
 
     /** Walk the whole preference screen (categories included).  The OEM stock

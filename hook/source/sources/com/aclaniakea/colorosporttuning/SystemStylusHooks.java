@@ -698,6 +698,29 @@ final class SystemStylusHooks {
                 case 106:
                     toggleTorch(context);
                     break;
+                case 107:
+                    injectCombo(KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON,
+                            KeyEvent.KEYCODE_Z);
+                    break;
+                case 108:
+                    injectCombo(KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON,
+                            KeyEvent.KEYCODE_Y);
+                    break;
+                case 109:
+                    injectKey(KeyEvent.KEYCODE_PAGE_UP);
+                    break;
+                case 110:
+                    injectKey(KeyEvent.KEYCODE_PAGE_DOWN);
+                    break;
+                case 111:
+                    HandwrittenNoteOverlay.toggle(context);
+                    break;
+                case 112:
+                    LassoSelectOverlay.start(context, false);
+                    break;
+                case 113:
+                    LassoSelectOverlay.start(context, true);
+                    break;
                 default:
                     HookUtils.log("custom action: unknown code " + code);
                     break;
@@ -719,6 +742,74 @@ final class SystemStylusHooks {
         inject.invoke(im, down, 0);
         inject.invoke(im, KeyEvent.changeAction(down, KeyEvent.ACTION_UP), 0);
         HookUtils.log("custom: injected key " + keyCode);
+    }
+
+    /** Inject a modifier chord (e.g. Ctrl+Z): real META down, key down/up with
+     * the meta state set, META up.  Apps that read metaState (undo in the
+     * note doodle engine, page turns in readers) get a well-formed pair. */
+    private static void injectCombo(int meta, int keyCode) throws Exception {
+        long now = SystemClock.uptimeMillis();
+        KeyEvent modDown = new KeyEvent(now, now, KeyEvent.ACTION_DOWN,
+                KeyEvent.KEYCODE_CTRL_LEFT, 0, meta, -1, 0,
+                KeyEvent.FLAG_FROM_SYSTEM | KeyEvent.FLAG_VIRTUAL_HARD_KEY,
+                android.view.InputDevice.SOURCE_KEYBOARD);
+        KeyEvent keyDown = new KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0,
+                meta, -1, 0,
+                KeyEvent.FLAG_FROM_SYSTEM | KeyEvent.FLAG_VIRTUAL_HARD_KEY,
+                android.view.InputDevice.SOURCE_KEYBOARD);
+        KeyEvent modUp = new KeyEvent(now, now, KeyEvent.ACTION_UP,
+                KeyEvent.KEYCODE_CTRL_LEFT, 0, 0, -1, 0,
+                KeyEvent.FLAG_FROM_SYSTEM | KeyEvent.FLAG_VIRTUAL_HARD_KEY,
+                android.view.InputDevice.SOURCE_KEYBOARD);
+        Object im = Class.forName("android.hardware.input.InputManager")
+                .getMethod("getInstance").invoke(null);
+        Method inject = im.getClass().getMethod("injectInputEvent",
+                android.view.InputEvent.class, Integer.TYPE);
+        inject.invoke(im, modDown, 0);
+        inject.invoke(im, keyDown, 0);
+        inject.invoke(im, KeyEvent.changeAction(keyDown, KeyEvent.ACTION_UP), 0);
+        inject.invoke(im, modUp, 0);
+        HookUtils.log("custom: injected combo meta=" + meta + " key=" + keyCode);
+    }
+
+    /** Action layer for the two gestures the OEM UI does not expose:
+     * long-press (0x0c0611) and squeeze (0x0c0619).  The binding lives in
+     * ipe_pencil_wb_click_long_press / _squeeze:
+     *   >= 100  bridge action (runCustomAction)
+     *   1..5    stock action (same dispatch as the stock click path)
+     *   0       explicitly disabled
+     *   -1      unset -> OEM default = 随心圈 collect session */
+    private static void extraGestureAction(Context context, String type) {
+        int wb = wbCustomCode(context, type);
+        if (wb >= 100) {
+            HookUtils.log("touch strip " + type + " custom=" + wb);
+            runCustomAction(context, wb);
+            return;
+        }
+        if (wb == 0) {
+            HookUtils.log("touch strip " + type + " disabled");
+            return;
+        }
+        if (wb >= 1 && wb <= 4) {
+            // Same package split as click(): only the wheel (4) may reach
+            // healthservice; 1/2/3 must go to the doodle-engine owners.
+            if (wb == 4) {
+                sendAll(context, new Intent(
+                        "com.oplus.ipemanager.action.PENCIL_SINGLE_CLICK")
+                        .setPackage("com.oplus.healthservice")
+                        .putExtra("action", 4).addFlags(268435456), null);
+            } else {
+                for (String pkg : new String[]{"com.coloros.note",
+                        "com.oplus.screenshot"}) {
+                    sendAll(context, new Intent(
+                            "com.oplus.ipemanager.action.PENCIL_SINGLE_CLICK")
+                            .setPackage(pkg).putExtra("action", wb)
+                            .addFlags(268435456), null);
+                }
+            }
+            return;
+        }
+        longAction(context);   // -1 / 5: OEM default 随心圈
     }
 
     private static void expandNotifications() throws Exception {
@@ -882,6 +973,7 @@ final class SystemStylusHooks {
             registerTouchscreen(context);
             registerHapticControl(context);
             registerStateSync(context);
+            registerBridgeSettingsWriter(context);
             registerMagneticAttachListener(context);
             LenovoConsumerGestureReader.start(context);
             Handler handler = pollHandler;
@@ -1697,6 +1789,45 @@ final class SystemStylusHooks {
         Handler handler = pollHandler != null ? pollHandler : main;
         handler.removeCallbacks(STATE_SYNC);
         handler.postDelayed(STATE_SYNC, delayMs);
+    }
+
+    /** Persisted writer for pen-gesture bridge keys.  Settings.Global puts
+     * from the ipemanager app process do NOT survive a reboot on this ROM
+     * (provider drops non-system-attributed keys at boot), while system uid
+     * writes do.  The settings-UI side mirrors every gesture-key write here
+     * via a broadcast; we validate the key namespace and re-apply it as
+     * system_server so the value is durable. */
+    private static void registerBridgeSettingsWriter(Context context) {
+        try {
+            BroadcastReceiver bridgeWriter = new BroadcastReceiver() {
+                @Override // android.content.BroadcastReceiver
+                public void onReceive(Context context2, Intent intent) {
+                    try {
+                        String key = intent.getStringExtra("key");
+                        int value = intent.getIntExtra("value", Integer.MIN_VALUE);
+                        if (key == null || value == Integer.MIN_VALUE
+                                || !key.startsWith("ipe_pencil_wb_click_")) {
+                            return;
+                        }
+                        android.provider.Settings.Global.putInt(
+                                context2.getContentResolver(), key, value);
+                        HookUtils.log("bridge settings persisted " + key + "=" + value);
+                    } catch (Throwable th) {
+                        HookUtils.log("bridge settings write: " + th);
+                    }
+                }
+            };
+            IntentFilter intentFilter = new IntentFilter(
+                    "com.aclaniakea.lenovopenbridge.WRITE_GESTURE_KEY");
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(bridgeWriter, intentFilter, 2);
+            } else {
+                context.registerReceiver(bridgeWriter, intentFilter);
+            }
+            HookUtils.log("bridge settings writer registered");
+        } catch (Throwable th) {
+            HookUtils.log("bridge settings writer: " + th);
+        }
     }
 
     private static void registerStateSync(Context context) {
