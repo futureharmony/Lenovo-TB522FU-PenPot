@@ -273,6 +273,7 @@ final class IpeManagerHooks {
         installRiskGuard(loadPackageParam);
         installGestureTextBridge(loadPackageParam);
         installWritingHapticPreference(loadPackageParam);
+        installPenGestureCustomOptions(loadPackageParam);
         installStockTouchFeedbackBridge(loadPackageParam);
         installPencilPanelControlBridge(loadPackageParam);
         installMyDevicesCardBatteryBridge(loadPackageParam);
@@ -1649,6 +1650,492 @@ final class IpeManagerHooks {
         HookUtils.hookAll(loadPackageParam.classLoader, "com.oplus.ipemanager.btadsorb.setting.fragment.t0", "onCreate", xC_MethodHook);
         HookUtils.hookAll(loadPackageParam.classLoader, "com.oplus.ipemanager.btadsorb.setting.fragment.t0", "onCreatePreferences", xC_MethodHook);
         HookUtils.hookAll(loadPackageParam.classLoader, "com.oplus.ipemanager.btadsorb.setting.fragment.t0", "onResume", xC_MethodHook);
+    }
+
+    /** Bridge-custom action rows injected into the stock pen gesture pages
+     * (设备中心 -> 手写笔 -> 双击 / 捏合(单击) / 长按(上滑)).  The stock
+     * 0..5 value space is untouched; our rows persist codes >= 100 into
+     * ipe_pencil_wb_click_<click_type>, which SystemStylusHooks consumes in
+     * system_server BEFORE falling back to the stock keys.  Measured mapping
+     * of the stock pages (2026-09-19):
+     *   single_click page -> ipe_pencil_single_click (下滑+单击共用槽位)
+     *   double_click page -> ipe_pencil_double_click
+     *   long_click_v2 page -> ipe_pencil_long_click_v2 (上滑, 二值) */
+    private static final java.util.Map<Object, String> gesturePageTypes =
+            new java.util.HashMap<Object, String>();
+    private static final int[] GESTURE_CUSTOM_CODES = {101, 102, 103, 104, 105, 106};
+    private static final String[] GESTURE_CUSTOM_LABELS =
+            {"截图", "通知栏", "返回", "主屏", "最近任务", "手电筒"};
+    private static final String[] GESTURE_CUSTOM_SUMMARIES = {
+            "截取当前屏幕并进入编辑",
+            "展开通知面板",
+            "模拟返回键",
+            "回到桌面",
+            "打开最近任务",
+            "切换手电筒"};
+    private static final String[] GESTURE_STOCK_ROW_KEYS = {
+            "item_item_close", "item_erase", "item_recent_tool",
+            "item_color_picker", "item_global_wheel", "item_smart_collect"};
+
+    /** Stock value -> visible row title.  Key names are scrambled on this ROM,
+     * so the reset path matches rows by title instead.  (0无/1橡皮/2最近工具/
+     * 3色盘/4轮盘/5随心圈.) */
+    private static final java.util.Map<String, Integer> GESTURE_STOCK_LABEL_VALUES =
+            new java.util.HashMap<String, Integer>();
+    static {
+        GESTURE_STOCK_LABEL_VALUES.put("关闭", 0);
+        GESTURE_STOCK_LABEL_VALUES.put("当前工具与橡皮擦切换", 1);
+        GESTURE_STOCK_LABEL_VALUES.put("最近工具切换", 2);
+        GESTURE_STOCK_LABEL_VALUES.put("显示颜色盘", 3);
+        GESTURE_STOCK_LABEL_VALUES.put("手写笔轮盘", 4);
+        GESTURE_STOCK_LABEL_VALUES.put("随心圈", 5);
+    }
+
+    private static String gestureWbKey(String clickType) {
+        return "ipe_pencil_wb_click_" + clickType;
+    }
+
+    private static final String GESTURE_ACTIVITY_CLASS =
+            "com.oplus.ipemanager.btadsorb.setting.activity.PencilGestureSettingActivity";
+
+    /** Hook ONLY the stable, manifest-declared activity.  The activity class
+     * is obfuscated-built and does NOT override onCreate/onResume itself, so
+     * hookAll(..., "PencilGestureSettingActivity", "onCreate", ...) matched 0
+     * declared methods and silently did nothing (found on device 2026-09-19:
+     * "hooks installed" logged, activity callbacks never fired).  Instead hook
+     * the framework base android.app.Activity (whose onCreate/onResume ARE
+     * declared) and filter by the target class name inside the callback. */
+    private static void installPenGestureCustomOptions(final XC_LoadPackage.LoadPackageParam lpp) {
+        probeGestureRowApi(lpp.classLoader);
+        HookUtils.hookAll(lpp.classLoader,
+                "android.app.Activity", "onCreate", new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam hook) {
+                        if (!GESTURE_ACTIVITY_CLASS.equals(hook.thisObject.getClass().getName())) {
+                            return;
+                        }
+                        try {
+                            String type = ((android.app.Activity) hook.thisObject)
+                                    .getIntent().getStringExtra("click_type");
+                            synchronized (gesturePageTypes) {
+                                gesturePageTypes.put(hook.thisObject, type);
+                            }
+                            HookUtils.log("gesture activity onCreate, click_type=" + type);
+                        } catch (Throwable th) {
+                            HookUtils.log("gesture page type: " + th);
+                        }
+                    }
+                });
+        HookUtils.hookAll(lpp.classLoader,
+                "android.app.Activity", "onResume", new XC_MethodHook() {
+                    @Override protected void afterHookedMethod(MethodHookParam hook) {
+                        if (!GESTURE_ACTIVITY_CLASS.equals(hook.thisObject.getClass().getName())) {
+                            return;
+                        }
+                        // Post so our sync runs AFTER the stock fragment's own
+                        // onResume (which re-checks the stock radio rows).
+                        final android.app.Activity activity =
+                                (android.app.Activity) hook.thisObject;
+                        new Handler(Looper.getMainLooper()).post(new Runnable() {
+                            @Override public void run() {
+                                configurePenGestureActivity(activity);
+                            }
+                        });
+                    }
+                });
+        // A stock option clicked while a bridge option is selected must stop
+        // the bridge from stealing the gesture back: clear the wb keys and
+        // uncheck the bridge rows on the spot.
+        HookUtils.hookAll(lpp.classLoader, "androidx.preference.Preference",
+                "performClick", new XC_MethodHook() {
+                    @Override protected void beforeHookedMethod(MethodHookParam hook) {
+                        try {
+                            Object key = hook.thisObject.getClass()
+                                    .getMethod("getKey").invoke(hook.thisObject);
+                            if (key == null) return;
+                            boolean stockRow = false;
+                            for (String k : GESTURE_STOCK_ROW_KEYS) {
+                                if (k.equals(key)) { stockRow = true; break; }
+                            }
+                            if (!stockRow) return;
+                            Object ctxObj = hook.thisObject.getClass()
+                                    .getMethod("getContext").invoke(hook.thisObject);
+                            if (!(ctxObj instanceof android.content.Context)) return;
+                            android.content.Context ctx = (android.content.Context) ctxObj;
+                            for (String t : new String[]{"single_click", "double_click",
+                                    "long_click_v2"}) {
+                                // See the reset row: -1 == unset on this ROM.
+                                Settings.Global.putInt(ctx.getContentResolver(),
+                                        gestureWbKey(t), -1);
+                            }
+                            Object pm = hook.thisObject.getClass()
+                                    .getMethod("getPreferenceManager").invoke(hook.thisObject);
+                            Object screen = pm.getClass()
+                                    .getMethod("getPreferenceScreen").invoke(pm);
+                            if (screen == null) return;
+                            ClassLoader loader = hook.thisObject.getClass().getClassLoader();
+                            Class<?> prefC = Class.forName(
+                                    "androidx.preference.Preference", false, loader);
+                            Method findM = screen.getClass()
+                                    .getMethod("findPreference", CharSequence.class);
+                            for (int code : GESTURE_CUSTOM_CODES) {
+                                Object row = findM.invoke(screen, "item_wb_" + code);
+                                if (row != null) setRowChecked(row, false);
+                            }
+                            Object resetRow = findM.invoke(screen, "item_wb_reset");
+                            if (resetRow != null) setRowChecked(resetRow, false);
+                            HookUtils.log("stock row click cleared bridge keys");
+                        } catch (Throwable th) {
+                            HookUtils.log("stock row bridge clear: " + th);
+                        }
+                    }
+                });
+        HookUtils.log("pen gesture custom-option hooks installed");
+    }
+
+    private static void configurePenGestureActivity(android.app.Activity activity) {
+        try {
+            Object fm = activity.getClass()
+                    .getMethod("getSupportFragmentManager").invoke(activity);
+            java.util.List<?> frags = (java.util.List<?>) fm.getClass()
+                    .getMethod("getFragments").invoke(fm);
+            Object matched = null;
+            StringBuilder names = new StringBuilder();
+            for (Object f : frags) {
+                if (f == null) continue;
+                if (names.length() > 0) names.append(", ");
+                names.append(f.getClass().getName());
+                for (Class<?> c = f.getClass(); c != null && c != Object.class;
+                        c = c.getSuperclass()) {
+                    if ("androidx.preference.PreferenceFragmentCompat".equals(c.getName())) {
+                        matched = f;
+                        break;
+                    }
+                }
+            }
+            if (matched != null) {
+                configurePenGestureCustomRows(activity, matched);
+            } else {
+                // Diagnostic: make a wrong fragment-manager/fragment-type
+                // assumption visible instead of silently doing nothing.
+                HookUtils.log("gesture rows walk: no preference fragment"
+                        + " (frags=[" + names + "])");
+            }
+        } catch (Throwable th) {
+            HookUtils.log("gesture rows walk: " + th);
+        }
+    }
+
+    private static String readGesturePageType(Object fragment) {
+        try {
+            Class<?> c = fragment.getClass();
+            while (c != null && c != Object.class) {
+                for (java.lang.reflect.Field fl : c.getDeclaredFields()) {
+                    if (fl.getType() != String.class) continue;
+                    fl.setAccessible(true);
+                    Object v = fl.get(fragment);
+                    if (v instanceof String && ("single_click".equals(v)
+                            || "double_click".equals(v) || "long_click_v2".equals(v))) {
+                        return (String) v;
+                    }
+                }
+                c = c.getSuperclass();
+            }
+        } catch (Throwable ignored) { }
+        return null;
+    }
+
+    private static void configurePenGestureCustomRows(final android.app.Activity activity,
+            final Object fragment) {
+        try {
+            final String type = readGesturePageType(fragment);
+            if (type == null) return;
+            final Context context = activity;
+            Object screen = fragment.getClass()
+                    .getMethod("getPreferenceScreen").invoke(fragment);
+            if (screen == null) return;
+            ClassLoader loader = context.getClassLoader();
+            Class<?> pref = Class.forName("androidx.preference.Preference", false, loader);
+            Method find = screen.getClass().getMethod("findPreference", CharSequence.class);
+
+            Object current = find.invoke(screen, "lenovo_pen_gesture_extra");
+            if (current != null) {
+                syncGestureMarks(loader, screen, type,
+                        Settings.Global.getInt(context.getContentResolver(),
+                                gestureWbKey(type), -1));
+                return;
+            }
+            Class<?> categoryType = Class.forName(
+                    "com.coui.appcompat.preference.COUIPreferenceCategory", false, loader);
+            Class<?> markType = Class.forName(
+                    "com.coui.appcompat.preference.COUIMarkPreference", false, loader);
+            Class<?> changeType = Class.forName(
+                    "androidx.preference.Preference$OnPreferenceChangeListener", false, loader);
+
+            Object category = categoryType.getConstructor(Context.class,
+                    android.util.AttributeSet.class).newInstance(context, null);
+            pref.getMethod("setKey", String.class).invoke(category, "lenovo_pen_gesture_extra");
+            pref.getMethod("setTitle", CharSequence.class).invoke(category, "扩展功能");
+            pref.getMethod("setOrder", Integer.TYPE).invoke(category, 100);
+            screen.getClass().getMethod("addPreference", pref).invoke(screen, category);
+
+            final int selected = Settings.Global.getInt(context.getContentResolver(),
+                    gestureWbKey(type), -1);
+            for (int i = 0; i < GESTURE_CUSTOM_CODES.length; i++) {
+                final int code = GESTURE_CUSTOM_CODES[i];
+                Object row = markType.getConstructor(Context.class).newInstance(context);
+                pref.getMethod("setKey", String.class).invoke(row, "item_wb_" + code);
+                pref.getMethod("setTitle", CharSequence.class).invoke(row, GESTURE_CUSTOM_LABELS[i]);
+                pref.getMethod("setSummary", CharSequence.class).invoke(row, GESTURE_CUSTOM_SUMMARIES[i]);
+                pref.getMethod("setPersistent", Boolean.TYPE).invoke(row, false);
+                row.getClass().getMethod("setChecked", Boolean.TYPE).invoke(row, code == selected);
+                pref.getMethod("setOnPreferenceChangeListener", changeType).invoke(row,
+                        Proxy.newProxyInstance(loader, new Class[]{changeType}, new InvocationHandler() {
+                            @Override public Object invoke(Object proxy, Method method, Object[] args) {
+                                if (!"onPreferenceChange".equals(method.getName())) return Boolean.FALSE;
+                                Settings.Global.putInt(context.getContentResolver(),
+                                        gestureWbKey(type), code);
+                                syncGestureMarks(activity.getClassLoader(), screen, type, code);
+                                // CheckBoxPreference.onClick toggles
+                                // (!isChecked) AFTER the listener returned, so
+                                // re-tapping the already-selected row would end
+                                // up unchecked while the key still says
+                                // "selected".  Re-assert once the click is done.
+                                new Handler(Looper.getMainLooper()).postDelayed(new Runnable() {
+                                    @Override public void run() {
+                                        syncGestureMarks(activity.getClassLoader(),
+                                                screen, type, code);
+                                    }
+                                }, 120);
+                                HookUtils.log("gesture page " + type + " -> bridge code " + code);
+                                // TRUE = the framework accepts the new value
+                                // and marks this row checked.  Returning FALSE
+                                // silently rejected the click (rows appeared
+                                // unselectable on device 2026-09-19).
+                                return Boolean.TRUE;
+                            }
+                        }));
+                category.getClass().getMethod("addPreference", pref).invoke(category, row);
+            }
+            // Escape hatch: selecting a bridge option wins over the stock key
+            // (SystemStylusHooks checks the wb key first), so the user needs a
+            // one-tap way back to the stock radio rows.
+            Object resetRow = markType.getConstructor(Context.class).newInstance(context);
+            pref.getMethod("setKey", String.class).invoke(resetRow, "item_wb_reset");
+            pref.getMethod("setTitle", CharSequence.class).invoke(resetRow, "恢复原厂选项");
+            pref.getMethod("setSummary", CharSequence.class).invoke(resetRow,
+                    "清除扩展功能选择，回到上方原厂选项");
+            pref.getMethod("setPersistent", Boolean.TYPE).invoke(resetRow, false);
+            pref.getMethod("setOnPreferenceChangeListener", changeType).invoke(resetRow,
+                    Proxy.newProxyInstance(loader, new Class[]{changeType}, new InvocationHandler() {
+                        @Override public Object invoke(Object proxy, Method method, Object[] args) {
+                            if (!"onPreferenceChange".equals(method.getName())) return Boolean.FALSE;
+                            // putString(x, null) is stored as the literal
+                            // "null" on this ROM; -1 is read as "unset".
+                            Settings.Global.putInt(context.getContentResolver(),
+                                    gestureWbKey(type), -1);
+                            int stock;
+                            try {
+                                stock = Settings.Global.getInt(context.getContentResolver(),
+                                        "ipe_pencil_" + type, -1);
+                            } catch (Throwable t) {
+                                stock = -1;
+                            }
+                            resetGestureMarks(activity.getClassLoader(), screen, type, stock);
+                            HookUtils.log("gesture page " + type + " -> reset to stock");
+                            return Boolean.FALSE;
+                        }
+                    }));
+            category.getClass().getMethod("addPreference", pref).invoke(category, resetRow);
+            HookUtils.log("gesture page " + type + ": bridge rows injected");
+        } catch (Throwable th) {
+            HookUtils.log("gesture rows inject: " + th);
+        }
+    }
+
+    /** Walk the whole preference screen (categories included).  The OEM stock
+     * row keys are guesses that can silently miss, so anything that is not one
+     * of our rows is treated as a stock row instead. */
+    private static java.util.List<Object> collectPreferences(ClassLoader loader, Object group) {
+        java.util.List<Object> out = new java.util.ArrayList<Object>();
+        try {
+            Class<?> groupType = Class.forName(
+                    "androidx.preference.PreferenceGroup", false, loader);
+            Method count = groupType.getMethod("getPreferenceCount");
+            Method at = groupType.getMethod("getPreference", Integer.TYPE);
+            int n = ((Integer) count.invoke(group)).intValue();
+            for (int i = 0; i < n; i++) {
+                Object p = at.invoke(group, i);
+                if (p == null) continue;
+                out.add(p);
+                if (groupType.isInstance(p)) {
+                    out.addAll(collectPreferences(loader, p));
+                }
+            }
+        } catch (Throwable th) {
+            HookUtils.log("gesture rows collect: " + th);
+        }
+        return out;
+    }
+
+    /** setChecked lives on TwoStatePreference / the COUI MarkPreference, NOT on
+     * androidx.preference.Preference: resolving it on the base class throws
+     * NoSuchMethodException and aborted the whole sync (rows stayed multi-
+     * selected, 2026-09-19).  Resolve it on the row's own hierarchy instead,
+     * then notifyChanged() so the ViewHolder actually repaints. */
+    /** Read a two-state row back.  COUIMarkPreference may or may not expose
+     * isChecked; the value is logged as "?" when it does not. */
+    private static String readRowChecked(Object row) {
+        try {
+            for (Class<?> c = row.getClass(); c != null && c != Object.class;
+                    c = c.getSuperclass()) {
+                try {
+                    Method m = c.getDeclaredMethod("isChecked");
+                    m.setAccessible(true);
+                    return String.valueOf(m.invoke(row));
+                } catch (NoSuchMethodException ignored) { }
+            }
+        } catch (Throwable ignored) { }
+        return "?";
+    }
+
+    /** Install-time probe: proves the row API the sync depends on really exists
+     * in the currently installed IPe, so a silent NoSuchMethodException can no
+     * longer masquerade as "the feature does not work". */
+    private static void probeGestureRowApi(ClassLoader loader) {
+        try {
+            Class<?> mark = Class.forName(
+                    "com.coui.appcompat.preference.COUIMarkPreference", false, loader);
+            StringBuilder chain = new StringBuilder();
+            boolean setChecked = false;
+            for (Class<?> c = mark; c != null && c != Object.class; c = c.getSuperclass()) {
+                if (chain.length() > 0) chain.append(" -> ");
+                chain.append(c.getName());
+                try {
+                    c.getDeclaredMethod("setChecked", Boolean.TYPE);
+                    setChecked = true;
+                } catch (NoSuchMethodException ignored) { }
+            }
+            HookUtils.log("gesture row API: setChecked(boolean)="
+                    + (setChecked ? "present" : "MISSING")
+                    + " notifyChanged="
+                    + (hasMethod(mark, "notifyChanged") ? "present" : "MISSING")
+                    + " isChecked="
+                    + (hasMethod(mark, "isChecked") ? "present" : "MISSING")
+                    + " chain=[" + chain + "]");
+        } catch (Throwable th) {
+            HookUtils.log("gesture row API probe: " + th);
+        }
+    }
+
+    private static boolean hasMethod(Class<?> start, String name) {
+        for (Class<?> c = start; c != null && c != Object.class; c = c.getSuperclass()) {
+            try {
+                c.getDeclaredMethod(name);
+                return true;
+            } catch (NoSuchMethodException ignored) { }
+        }
+        return false;
+    }
+
+    private static boolean setRowChecked(Object row, boolean value) {
+        try {
+            Method m = null;
+            for (Class<?> c = row.getClass(); c != null && c != Object.class;
+                    c = c.getSuperclass()) {
+                try {
+                    m = c.getDeclaredMethod("setChecked", Boolean.TYPE);
+                    break;
+                } catch (NoSuchMethodException ignored) { }
+            }
+            if (m == null) return false;
+            m.setAccessible(true);
+            m.invoke(row, value);
+            Method notify = row.getClass().getMethod("notifyChanged");
+            notify.invoke(row);
+            return true;
+        } catch (Throwable th) {
+            HookUtils.log("setRowChecked: " + th);
+            return false;
+        }
+    }
+
+    private static String preferenceKey(Object p) {
+        try {
+            Object k = p.getClass().getMethod("getKey").invoke(p);
+            return k instanceof String ? (String) k : null;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    /** Single-select across the WHOLE page: our rows mirror the bridge key and
+     * every other radio row (stock included) is cleared as soon as a bridge
+     * option owns the page.  setChecked alone does not repaint the row -- the
+     * ViewHolder only rebinds on notifyChanged, which is why stale marks used
+     * to stay on screen. */
+    private static void syncGestureMarks(ClassLoader loader, Object screen,
+            String type, int selected) {
+        try {
+            Class<?> markType = null;
+            try {
+                markType = Class.forName(
+                        "com.coui.appcompat.preference.COUIMarkPreference", false, loader);
+            } catch (Throwable ignored) { }
+            boolean bridgeSelected = selected >= 100;
+            java.util.List<Object> rows = collectPreferences(loader, screen);
+            StringBuilder keys = new StringBuilder();
+            StringBuilder state = new StringBuilder();
+            for (Object p : rows) {
+                String key = preferenceKey(p);
+                if (key == null) continue;
+                if (keys.length() > 0) keys.append(", ");
+                keys.append(key);
+                boolean isMark = markType != null ? markType.isInstance(p)
+                        : p.getClass().getName().contains("Mark");
+                if (!isMark) continue;   // never touch switches / plain rows
+                boolean want;
+                if (key.startsWith("item_wb_")) {
+                    want = key.equals("item_wb_" + selected);
+                } else if (bridgeSelected) {
+                    want = false;
+                } else {
+                    continue;            // stock option owns the radio group
+                }
+                setRowChecked(p, want);
+                state.append(key).append("=").append(readRowChecked(p)).append(" ");
+            }
+            HookUtils.log("gesture marks sync " + type + " selected=" + selected
+                    + " state=[" + state + "] rows=[" + keys + "]");
+        } catch (Throwable th) {
+            HookUtils.log("gesture marks sync: " + th);
+        }
+    }
+
+    /** Clear the bridge selection and re-mark the stock row that owns the
+     * stock key (used by the "恢复原厂选项" row).  The OEM row keys do NOT
+     * match their labels (item_color_picker is the eraser-toggle row on this
+     * ROM), so rows are matched by their visible title instead. */
+    private static void resetGestureMarks(ClassLoader loader, Object screen,
+            String type, int stockValue) {
+        syncGestureMarks(loader, screen, type, -1);
+        if (stockValue < 0) return;
+        try {
+            Class<?> pref = Class.forName("androidx.preference.Preference", false, loader);
+            Method getTitle = pref.getMethod("getTitle");
+            for (Object p : collectPreferences(loader, screen)) {
+                String key = preferenceKey(p);
+                if (key == null || key.startsWith("item_wb_")) continue;
+                Object title = getTitle.invoke(p);
+                if (!(title instanceof CharSequence)) continue;
+                Integer value = GESTURE_STOCK_LABEL_VALUES.get(title.toString());
+                if (value != null && value == stockValue) {
+                    setRowChecked(p, true);
+                    return;
+                }
+            }
+        } catch (Throwable th) {
+            HookUtils.log("gesture marks reset: " + th);
+        }
     }
 
     /** Attach the bridge only when the stock tactile-feedback page was opened

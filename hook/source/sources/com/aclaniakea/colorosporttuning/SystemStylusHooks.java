@@ -521,6 +521,12 @@ final class SystemStylusHooks {
     }
 
     private static void click(Context context, boolean z) {
+        int wb = wbCustomCode(context, z ? "double_click" : "single_click");
+        if (wb >= 100) {
+            HookUtils.log("touch strip " + (z ? "double" : "single") + " click custom=" + wb);
+            runCustomAction(context, wb);
+            return;
+        }
         haptic(context);
         int i = Settings.Global.getInt(context.getContentResolver(), z ? "ipe_pencil_double_click" : "ipe_pencil_single_click", z ? 1 : HID_HOST_PROFILE);
         if (i == 0) {
@@ -576,6 +582,17 @@ final class SystemStylusHooks {
      * slide up = 随心圈 (5), slide down = 调色盘 (3).
      */
     private static void swipeAction(Context context, boolean up) {
+        // Custom bridge codes (>= 100, persisted by the rows we inject into
+        // the stock pen gesture pages, see IpeManagerHooks) win over the
+        // stock keys.  The stock up-swipe row is long_click_v2; the stock
+        // down-swipe row is single_click (misnamed OEM slots, measured
+        // 2026-09-19).
+        int wb = wbCustomCode(context, up ? "long_click_v2" : "single_click");
+        if (wb >= 100) {
+            HookUtils.log("touch strip slide " + (up ? "up" : "down") + " custom=" + wb);
+            runCustomAction(context, wb);
+            return;
+        }
         int i;
         try {
             if (up) {
@@ -641,6 +658,96 @@ final class SystemStylusHooks {
             pendingTap = null;
             click(context, false);
         }
+    }
+
+    /** Read a bridge-custom gesture code injected by the stock pen gesture
+     * pages (ipe_pencil_wb_click_<single_click|double_click|long_click_v2>).
+     * Codes >= 100 are bridge actions; -1 / 0..5 fall through to stock. */
+    private static int wbCustomCode(Context context, String clickType) {
+        try {
+            return Settings.Global.getInt(context.getContentResolver(),
+                    "ipe_pencil_wb_click_" + clickType, -1);
+        } catch (Throwable th) {
+            return -1;
+        }
+    }
+
+    /** Bridge-custom gesture actions.  Runs in system_server, so every step
+     * is either a system-service call or a broadcast to a receiver we
+     * installed in an OEM process (screenshot lives behind
+     * OplusLongshotUtils in com.oplus.exsystemservice). */
+    private static void runCustomAction(Context context, int code) {
+        try {
+            switch (code) {
+                case 101:
+                    context.sendBroadcast(new Intent("aclaniakea.penbridge.TAKE_SCREENSHOT"));
+                    HookUtils.log("custom: screenshot broadcast sent");
+                    break;
+                case 102:
+                    expandNotifications();
+                    break;
+                case 103:
+                    injectKey(KeyEvent.KEYCODE_BACK);
+                    break;
+                case 104:
+                    injectKey(KeyEvent.KEYCODE_HOME);
+                    break;
+                case 105:
+                    injectKey(KeyEvent.KEYCODE_APP_SWITCH);
+                    break;
+                case 106:
+                    toggleTorch(context);
+                    break;
+                default:
+                    HookUtils.log("custom action: unknown code " + code);
+                    break;
+            }
+        } catch (Throwable th) {
+            HookUtils.log("custom action " + code + ": " + th);
+        }
+    }
+
+    private static void injectKey(int keyCode) throws Exception {
+        long now = SystemClock.uptimeMillis();
+        KeyEvent down = new KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0, 0,
+                -1, 0, KeyEvent.FLAG_FROM_SYSTEM | KeyEvent.FLAG_VIRTUAL_HARD_KEY,
+                android.view.InputDevice.SOURCE_KEYBOARD);
+        Object im = Class.forName("android.hardware.input.InputManager")
+                .getMethod("getInstance").invoke(null);
+        Method inject = im.getClass().getMethod("injectInputEvent",
+                android.view.InputEvent.class, Integer.TYPE);
+        inject.invoke(im, down, 0);
+        inject.invoke(im, KeyEvent.changeAction(down, KeyEvent.ACTION_UP), 0);
+        HookUtils.log("custom: injected key " + keyCode);
+    }
+
+    private static void expandNotifications() throws Exception {
+        Object binder = Class.forName("android.os.ServiceManager")
+                .getMethod("getService", String.class).invoke(null, "statusbar");
+        Object svc = Class.forName("com.android.internal.statusbar.IStatusBarService$Stub")
+                .getMethod("asInterface", android.os.IBinder.class).invoke(null, binder);
+        svc.getClass().getMethod("expandNotificationsPanel").invoke(svc);
+        HookUtils.log("custom: notifications expanded");
+    }
+
+    private static boolean torchOn = false;
+
+    private static void toggleTorch(Context context) throws Exception {
+        android.hardware.camera2.CameraManager cm =
+                (android.hardware.camera2.CameraManager) context.getSystemService(
+                        android.hardware.camera2.CameraManager.class);
+        if (cm == null) throw new IllegalStateException("no CameraManager");
+        for (String id : cm.getCameraIdList()) {
+            Boolean flash = cm.getCameraCharacteristics(id)
+                    .get(android.hardware.camera2.CameraCharacteristics.FLASH_INFO_AVAILABLE);
+            if (flash != null && flash) {
+                torchOn = !torchOn;
+                cm.setTorchMode(id, torchOn);
+                HookUtils.log("custom: torch " + id + " -> " + torchOn);
+                return;
+            }
+        }
+        HookUtils.log("custom: no flash unit");
     }
 
     private static synchronized void tap(final Context context) {

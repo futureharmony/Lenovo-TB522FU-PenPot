@@ -22,6 +22,12 @@ public final class UiWorkingSetPrefetch implements IXposedHookLoadPackage {
         switch (str) {
             case "com.oplus.healthservice":
             case "com.oplus.exsystemservice":
+                if ("com.oplus.exsystemservice".equals(loadPackageParam.packageName)) {
+                    // Hosts the screenshot receiver the pen gesture custom
+                    // actions call out to (OplusLongshotUtils is only
+                    // resolvable inside this OEM process).
+                    ExSystemServiceHooks.install(loadPackageParam);
+                }
                 HookUtils.log("broadcast/Binder target active: " + loadPackageParam.packageName);
                 break;
             case "android":

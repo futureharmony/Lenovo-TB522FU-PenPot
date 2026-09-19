@@ -222,6 +222,42 @@
 在画布激活时**动态注册**的，所以清单里没有属正常；`NoteToolkitHooks` 正是挂在
 `com.oplusos.vfxsdk.doodleengine.toolkit.Toolkit` 的 `receiverSingleClick/receiverDoubleClick` 上。）
 
+## P0.11 手写笔手势设置页注入扩展功能（v4.2.8，2026-09-19 完成并实机闭环）
+
+**需求**：保留原厂 5 项（关闭 / 当前工具与橡皮擦切换 / 最近工具切换 / 显示颜色盘 / 手写笔轮盘），
+在原厂列表下追加「扩展功能」分组，可选自定义动作（截图 / 通知栏 / 返回 / 主屏 / 最近任务 / 手电筒），
+**全局单选**（原厂行与扩展行互斥），并追加一行「恢复原厂选项」。
+
+**宿主**：`com.oplus.ipemanager` 的 `btadsorb.setting.activity.PencilGestureSettingActivity`
+（`click_type` = `single_click` / `double_click` / `long_click_v2`，分别对应下滑 / 双击 / 上滑），
+行控件是 `com.coui.appcompat.preference.COUIMarkPreference`。
+
+**落库键（自建桥接键，不污染 OEM 键）**：`ipe_pencil_wb_click_<click_type>`，
+取值 `101..106` = 扩展动作，`-1` = 未选扩展（走原厂键）。消费端在 `SystemStylusHooks`。
+
+**踩过的 4 个坑（都是承重教训，勿回退）**：
+1. `hookAll` 只匹配 `getDeclaredMethods()`。混淆后的 `PencilGestureSettingActivity` **没有** override
+   `onCreate`/`onResume` → 钩子匹配 0 个方法、**静默失效**。必须挂框架基类 `android.app.Activity`
+   再在回调里按类名过滤。
+2. `androidx.preference.Preference` **没有** `setChecked`（在 `CheckBoxPreference`/`TwoStatePreference`
+   层，dex 反编译 `COUIMarkPreference extends CheckBoxPreference` 证实）。在基类解析 → 第一次调用即
+   `NoSuchMethodException` → 整段同步退出，表现为「扩展行可多选、原厂行取消不掉」。
+   必须 `setRowChecked()` 沿**行自身**类层级解析，并调 `notifyChanged()` 触发重绘（否则只改数据不重画）。
+3. `CheckBoxPreference.onClick` 是 **toggle**（`!isChecked()`）且在监听器**之后**执行 → 点已选中的行会
+   「键仍选中、UI 却被取消」。必须在监听器里 `postDelayed(120ms)` 再断言同步一次。
+4. OEM 行的 **key 与可见标签是错位的**（如 `item_color_picker` 实际对应「当前工具与橡皮擦切换」）。
+   「恢复原厂选项」**必须按可见标题匹配**（关闭0/橡皮1/最近2/色盘3/轮盘4/随心圈5），不能按 key 猜。
+   另：本机 `Settings.Global.putString(key, null)` 会写成字面量 `"null"`，删除语义改用写 `-1`。
+
+**导航通路（自动化验证用）**：`ipemanager` 是插件化应用，PMS 里查不到那些 Activity，`am start` 解析不了。
+可行路径：`su -c am start -a com.oplus.mydevices.ACTION_DEVICE_CARD_HOME_ACTIVITY`（设备中心）
+→ 点手写笔卡片 → 下滑触控条。
+**验证方法**：hook 内嵌 `gesture marks sync ... state=[key=checked]` 日志读模型状态 + `screencap` 目检；
+`uiautomator` 的 `checked` 属性对 COUIMark 自绘控件**不可靠**，不能作为判据。
+
+**状态**：选中 / 互斥 / 重击保持 / 恢复原厂勾回 / 落键 101 与 -1 全部实机通过。
+**遗留**：物理下滑 → 截图动作的端到端（消费端已实现，待用户笔势实测确认）。
+
 ## P0.8 便签手写笔记闪退（native，2026-09-18 完成根因定位，**非本模块引起**）
 
 **现象**：`com.coloros.note` 打开手写笔记后进程崩溃；`/data/tombstones/tombstone_15..23` 共 **9 个**
