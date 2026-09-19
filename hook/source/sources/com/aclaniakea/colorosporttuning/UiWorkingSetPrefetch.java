@@ -17,25 +17,32 @@ public final class UiWorkingSetPrefetch implements IXposedHookLoadPackage {
                     + " (gate=" + DeviceGate.supported() + ")");
             return;
         }
-        String str = loadPackageParam.packageName;
-        str.hashCode();
-        switch (str) {
+        final String pkg = loadPackageParam.packageName;
+        ContractProbe.executeGuarded("pkg_hook_" + pkg,
+                new ContractProbe.PrimaryAction<Void>() {
+                    @Override public Void execute() {
+                        dispatchPackageHook(loadPackageParam, pkg);
+                        return null;
+                    }
+                },
+                new ContractProbe.FallbackAction<Void>() {
+                    @Override public Void execute() {
+                        HookUtils.log("UiWorkingSetPrefetch: Fallback activated for package " + pkg);
+                        return null;
+                    }
+                });
+    }
+
+    private void dispatchPackageHook(XC_LoadPackage.LoadPackageParam loadPackageParam, String pkg) {
+        switch (pkg) {
             case "com.oplus.healthservice":
             case "com.oplus.exsystemservice":
                 if ("com.oplus.exsystemservice".equals(loadPackageParam.packageName)) {
-                    // Hosts the screenshot receiver the pen gesture custom
-                    // actions call out to (OplusLongshotUtils is only
-                    // resolvable inside this OEM process).
                     ExSystemServiceHooks.install(loadPackageParam);
                 }
                 HookUtils.log("broadcast/Binder target active: " + loadPackageParam.packageName);
                 break;
             case "android":
-                // Deferred/async: installing hooks makes the framework
-                // deoptimise the targets (ART SuspendAll). Doing that from this
-                // callback can deadlock against system_server's own binder JNI
-                // calls and hang the boot, so it is handed to a worker thread
-                // with a short delay. See SystemStylusHooks.installAsync.
                 SystemStylusHooks.installAsync(loadPackageParam);
                 break;
             case "com.oplus.ipemanager":
@@ -45,12 +52,6 @@ public final class UiWorkingSetPrefetch implements IXposedHookLoadPackage {
                 WirelessSettingsHooks.install(loadPackageParam);
                 break;
             case "com.coloros.note":
-                // Restore the EGL-layer "ColorOS contract" the bundled GLEW
-                // loader expects (eglGetProcAddress must hand back core GL
-                // functions; eglInitialize must be idempotent). Loaded once,
-                // in-process, before the handwriting engine's glewInit() runs.
-                // See hook/source/jni/egl_contract_shim.c. Scoped to this
-                // package only -- zero blast radius to the rest of the system.
                 EglContractShim.ensureLoaded();
                 NoteToolkitHooks.install(loadPackageParam);
                 break;
@@ -59,6 +60,9 @@ public final class UiWorkingSetPrefetch implements IXposedHookLoadPackage {
                 break;
             case "com.heytap.mydevices":
                 MyDevicesHooks.install(loadPackageParam);
+                break;
+            case "com.coloros.translate":
+                TranslateRegionHooks.install(loadPackageParam);
                 break;
         }
     }

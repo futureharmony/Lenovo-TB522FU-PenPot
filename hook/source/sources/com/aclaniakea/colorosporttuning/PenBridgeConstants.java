@@ -25,7 +25,6 @@ final class PenBridgeConstants {
     static final String OPPO_BOOT_RECOVERY_DEVICE_TYPE = "pencil_boot_recovery";
     static final String OPPO_OAF_DEVICE_FOUND = "com.oplus.ipemanager.ACTION.BROADCAST.OAF_DEVICE_FOUND";
     static final String PHYSICAL_DOCKED = "lenovo_pen_physical_docked";
-    static final String PROVIDER_URI = "content://com.aclaniakea.lenovopenbridge.penstate/state";
     static final String RECONNECT = "com.aclaniakea.lenovopenbridge.action.RECONNECT_PEN";
     static final String REFRESH_ACTIVE = "lenovo_pen_refresh_active";
     static final String SHOW_CAPSULE = "com.aclaniakea.lenovopenbridge.action.SHOW_PENCIL_CAPSULE";

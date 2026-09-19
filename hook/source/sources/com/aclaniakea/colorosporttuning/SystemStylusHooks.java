@@ -162,6 +162,12 @@ final class SystemStylusHooks {
             HookUtils.log("OplusDisplayModeService getInstance hook failed: " + th);
         }
         try {
+            int nPolicy = HookUtils.allowSelfAppStart(loadPackageParam.classLoader);
+            HookUtils.log("coloros startup policy guards=" + nPolicy);
+        } catch (Throwable th) {
+            HookUtils.log("coloros startup policy guard failed: " + th);
+        }
+        try {
             int nPwm = HookUtils.hookAll(loadPackageParam.classLoader, "com.android.server.policy.PhoneWindowManager", "interceptKeyBeforeQueueing", new XC_MethodHook() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.2
                 protected void beforeHookedMethod(XC_MethodHook.MethodHookParam methodHookParam) {
                     try {
@@ -200,7 +206,7 @@ final class SystemStylusHooks {
                                     + " act=" + keyEvent.getAction() + " pen=" + pen + " ctx="
                                     + (HookUtils.context(methodHookParam.thisObject) != null));
                         }
-                        if (pen && SystemStylusHooks.handle(HookUtils.context(methodHookParam.thisObject), keyEvent)) {
+                        if (!DeviceGate.isModuleDisabled() && pen && SystemStylusHooks.handle(HookUtils.context(methodHookParam.thisObject), keyEvent)) {
                             methodHookParam.setResult(0);
                         }
                     } catch (Throwable th) {
@@ -401,8 +407,10 @@ final class SystemStylusHooks {
                         click(context, true);
                         break;
                     case STRIP_LONG_PRESS:
+                        extraGestureAction(context, "long_press");
+                        break;
                     case STRIP_SQUEEZE:
-                        longAction(context);
+                        extraGestureAction(context, "squeeze");
                         break;
                     case STRIP_SLIDE_UP:
                     case STRIP_SLIDE_DOWN:
@@ -425,9 +433,61 @@ final class SystemStylusHooks {
         });
     }
 
+    private static volatile long sSqueezeDownTime = 0L;
+    private static volatile boolean sSqueezeLongTriggered = false;
+    private static volatile Context sLastSqueezeContext = null;
+    private static final long SQUEEZE_HOLD_THRESHOLD_MS = 500L;
+
+    private static final Runnable SQUEEZE_HOLD_RUNNABLE = new Runnable() {
+        @Override
+        public void run() {
+            synchronized (SystemStylusHooks.class) {
+                if (sSqueezeDownTime > 0 && !sSqueezeLongTriggered) {
+                    sSqueezeLongTriggered = true;
+                    HookUtils.log("touch strip: squeeze held > " + SQUEEZE_HOLD_THRESHOLD_MS + "ms -> long-press action");
+                    Context ctx = sLastSqueezeContext;
+                    if (ctx != null) {
+                        extraGestureAction(ctx, "long_press");
+                    }
+                }
+            }
+        }
+    };
+
+    private static void onSqueezeDown(Context context) {
+        synchronized (SystemStylusHooks.class) {
+            sLastSqueezeContext = context;
+            sSqueezeDownTime = SystemClock.uptimeMillis();
+            sSqueezeLongTriggered = false;
+            main.removeCallbacks(SQUEEZE_HOLD_RUNNABLE);
+            main.postDelayed(SQUEEZE_HOLD_RUNNABLE, SQUEEZE_HOLD_THRESHOLD_MS);
+            HookUtils.log("touch strip: squeeze pressed, waiting for release or hold (500ms)");
+        }
+    }
+
+    private static void onSqueezeUp(Context context) {
+        synchronized (SystemStylusHooks.class) {
+            long now = SystemClock.uptimeMillis();
+            long duration = now - sSqueezeDownTime;
+            main.removeCallbacks(SQUEEZE_HOLD_RUNNABLE);
+            sSqueezeDownTime = 0L;
+            if (sSqueezeLongTriggered) {
+                sSqueezeLongTriggered = false;
+                HookUtils.log("touch strip: squeeze released after hold consumed (" + duration + "ms)");
+                return;
+            }
+            if (duration > 3000) {
+                HookUtils.log("touch strip: ignored stale squeeze release (" + duration + "ms)");
+                return;
+            }
+            HookUtils.log("touch strip: quick squeeze released (" + duration + "ms) -> squeeze action");
+            extraGestureAction(context, "squeeze");
+        }
+    }
+
     /* JADX INFO: Access modifiers changed from: private */
     public static boolean handle(final Context context, KeyEvent keyEvent) {
-        if (context == null) {
+        if (context == null || DeviceGate.isModuleDisabled()) {
             return false;
         }
         int keyCode = keyEvent.getKeyCode();
@@ -472,7 +532,19 @@ final class SystemStylusHooks {
         // reach the pipeline (visible in the key probe as dev=Virtual) but no
         // component on this ROM consumes them and none of the four gestures
         // produced any action.  See dispatchStripGesture().
-        if (isPen(keyEvent.getDevice()) && lowerCase.contains("lenovo tab pen")) {
+        if (isPen(keyEvent.getDevice()) && (lowerCase.contains("lenovo tab pen") || (lowerCase.contains("lenovo") && lowerCase.contains("pen")))) {
+            if (keyCode == 134) { // Squeeze onset (Press)
+                if (keyEvent.getRepeatCount() <= 0 && keyEvent.getAction() == KeyEvent.ACTION_UP) {
+                    onSqueezeDown(context);
+                }
+                return true;
+            }
+            if (keyCode == 133 || (keyCode == KeyEvent.KEYCODE_UNKNOWN && scanCode == 240)) { // Squeeze release (Up)
+                if (keyEvent.getRepeatCount() <= 0 && keyEvent.getAction() == KeyEvent.ACTION_UP) {
+                    onSqueezeUp(context);
+                }
+                return true;
+            }
             int gesture = stripGesture(keyCode);
             if (gesture != 0) {
                 if (keyEvent.getRepeatCount() <= 0 && keyEvent.getAction() == KeyEvent.ACTION_UP) {
@@ -482,16 +554,11 @@ final class SystemStylusHooks {
                 }
                 return true;
             }
-            if (keyCode == KeyEvent.KEYCODE_UNKNOWN) {
-                // Seen once per test run between gestures; leave it to the
-                // generic mapping below instead of swallowing it here.
-                HookUtils.log("touch strip: unmapped keyCode=0 scan=" + scanCode);
-            }
             // Anything else on this node (BTN_MOUSE/BTN_RIGHT/BTN_MIDDLE =
             // 272/273/274, the pen's barrel/tip buttons) falls through to the
             // generic mapping below.
         }
-        char c = (keyCode == 131 || keyCode == 188 || scanCode == 240 || scanCode == 272) ? (char) 1 : (keyCode == 132 || keyCode == 189 || scanCode == 273) ? (char) 2 : ((keyCode >= 133 && keyCode <= 135) || keyCode == 190 || scanCode == 274) ? (char) 3 : (char) 0;
+        char c = (keyCode == 131 || keyCode == 188 || scanCode == 272) ? (char) 1 : (keyCode == 132 || keyCode == 189 || scanCode == 273) ? (char) 2 : ((keyCode >= 133 && keyCode <= 135) || keyCode == 190 || scanCode == 274) ? (char) 3 : (char) 0;
         if (c == 0) {
             return false;
         }
@@ -508,14 +575,7 @@ final class SystemStylusHooks {
         }
         if (c == 3 && keyEvent.getAction() == 1 && SystemClock.uptimeMillis() - lastLong > 900) {
             lastLong = SystemClock.uptimeMillis();
-            haptic(context);
-            button(context, "down");
-            main.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda19
-                @Override // java.lang.Runnable
-                public final void run() {
-                    SystemStylusHooks.button(context, "up");
-                }
-            }, 120L);
+            extraGestureAction(context, "long_press");
         }
         return true;
     }
@@ -677,133 +737,11 @@ final class SystemStylusHooks {
      * installed in an OEM process (screenshot lives behind
      * OplusLongshotUtils in com.oplus.exsystemservice). */
     private static void runCustomAction(Context context, int code) {
-        try {
-            switch (code) {
-                case 101:
-                    context.sendBroadcast(new Intent("aclaniakea.penbridge.TAKE_SCREENSHOT"));
-                    HookUtils.log("custom: screenshot broadcast sent");
-                    break;
-                case 102:
-                    expandNotifications();
-                    break;
-                case 103:
-                    injectKey(KeyEvent.KEYCODE_BACK);
-                    break;
-                case 104:
-                    injectKey(KeyEvent.KEYCODE_HOME);
-                    break;
-                case 105:
-                    injectKey(KeyEvent.KEYCODE_APP_SWITCH);
-                    break;
-                case 106:
-                    toggleTorch(context);
-                    break;
-                case 107:
-                    injectCombo(KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON,
-                            KeyEvent.KEYCODE_Z);
-                    break;
-                case 108:
-                    injectCombo(KeyEvent.META_CTRL_ON | KeyEvent.META_CTRL_LEFT_ON,
-                            KeyEvent.KEYCODE_Y);
-                    break;
-                case 109:
-                    injectKey(KeyEvent.KEYCODE_PAGE_UP);
-                    break;
-                case 110:
-                    injectKey(KeyEvent.KEYCODE_PAGE_DOWN);
-                    break;
-                case 111:
-                    // Prefer the built-in ColorOS handwriting note: the user
-                    // wants the stock Notes experience, not our bare pad
-                    // (2026-09-19).  QuickPaintActivity is OPPO_COMPONENT_SAFE
-                    // protected, which uid 1000 (system_server) bypasses.
-                    if (!launchColorOSQuickNote(context)) {
-                        HandwrittenNoteOverlay.toggle(context);
-                    }
-                    break;
-                case 112:
-                    LassoSelectOverlay.start(context, false);
-                    break;
-                case 113:
-                    LassoSelectOverlay.start(context, true);
-                    break;
-                default:
-                    HookUtils.log("custom action: unknown code " + code);
-                    break;
-            }
-        } catch (Throwable th) {
-            HookUtils.log("custom action " + code + ": " + th);
-        }
+        StylusActionDispatcher.dispatch(context, code);
     }
 
-    /** Launch the ColorOS Notes quick handwriting page.  Returns false when
-     * the app/activity is unavailable so the caller can fall back to the
-     * built-in overlay pad. */
-    private static boolean launchColorOSQuickNote(Context context) {
-        try {
-            Intent i = new Intent();
-            i.setClassName("com.coloros.note",
-                    "com.nearme.note.paint.QuickPaintActivity");
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-            context.startActivity(i);
-            HookUtils.log("custom: ColorOS QuickPaint launched");
-            return true;
-        } catch (Throwable th) {
-            HookUtils.log("custom: QuickPaint launch failed: " + th);
-            return false;
-        }
-    }
-
-    private static void injectKey(int keyCode) throws Exception {
-        long now = SystemClock.uptimeMillis();
-        KeyEvent down = new KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0, 0,
-                -1, 0, KeyEvent.FLAG_FROM_SYSTEM | KeyEvent.FLAG_VIRTUAL_HARD_KEY,
-                android.view.InputDevice.SOURCE_KEYBOARD);
-        Object im = Class.forName("android.hardware.input.InputManager")
-                .getMethod("getInstance").invoke(null);
-        Method inject = im.getClass().getMethod("injectInputEvent",
-                android.view.InputEvent.class, Integer.TYPE);
-        inject.invoke(im, down, 0);
-        inject.invoke(im, KeyEvent.changeAction(down, KeyEvent.ACTION_UP), 0);
-        HookUtils.log("custom: injected key " + keyCode);
-    }
-
-    /** Inject a modifier chord (e.g. Ctrl+Z): real META down, key down/up with
-     * the meta state set, META up.  Apps that read metaState (undo in the
-     * note doodle engine, page turns in readers) get a well-formed pair. */
-    private static void injectCombo(int meta, int keyCode) throws Exception {
-        long now = SystemClock.uptimeMillis();
-        KeyEvent modDown = new KeyEvent(now, now, KeyEvent.ACTION_DOWN,
-                KeyEvent.KEYCODE_CTRL_LEFT, 0, meta, -1, 0,
-                KeyEvent.FLAG_FROM_SYSTEM | KeyEvent.FLAG_VIRTUAL_HARD_KEY,
-                android.view.InputDevice.SOURCE_KEYBOARD);
-        KeyEvent keyDown = new KeyEvent(now, now, KeyEvent.ACTION_DOWN, keyCode, 0,
-                meta, -1, 0,
-                KeyEvent.FLAG_FROM_SYSTEM | KeyEvent.FLAG_VIRTUAL_HARD_KEY,
-                android.view.InputDevice.SOURCE_KEYBOARD);
-        KeyEvent modUp = new KeyEvent(now, now, KeyEvent.ACTION_UP,
-                KeyEvent.KEYCODE_CTRL_LEFT, 0, 0, -1, 0,
-                KeyEvent.FLAG_FROM_SYSTEM | KeyEvent.FLAG_VIRTUAL_HARD_KEY,
-                android.view.InputDevice.SOURCE_KEYBOARD);
-        Object im = Class.forName("android.hardware.input.InputManager")
-                .getMethod("getInstance").invoke(null);
-        Method inject = im.getClass().getMethod("injectInputEvent",
-                android.view.InputEvent.class, Integer.TYPE);
-        inject.invoke(im, modDown, 0);
-        inject.invoke(im, keyDown, 0);
-        inject.invoke(im, KeyEvent.changeAction(keyDown, KeyEvent.ACTION_UP), 0);
-        inject.invoke(im, modUp, 0);
-        HookUtils.log("custom: injected combo meta=" + meta + " key=" + keyCode);
-    }
-
-    /** Action layer for the two gestures the OEM UI does not expose:
-     * long-press (0x0c0611) and squeeze (0x0c0619).  The binding lives in
-     * ipe_pencil_wb_click_long_press / _squeeze:
-     *   >= 100  bridge action (runCustomAction)
-     *   1..5    stock action (same dispatch as the stock click path)
-     *   0       explicitly disabled
-     *   -1      unset -> OEM default = 随心圈 collect session */
     private static void extraGestureAction(Context context, String type) {
+        haptic(context);
         int wb = wbCustomCode(context, type);
         if (wb >= 100) {
             HookUtils.log("touch strip " + type + " custom=" + wb);
@@ -998,6 +936,7 @@ final class SystemStylusHooks {
             registerHapticControl(context);
             registerStateSync(context);
             registerBridgeSettingsWriter(context);
+            registerDebugActionRunner(context);
             registerMagneticAttachListener(context);
             LenovoConsumerGestureReader.start(context);
             Handler handler = pollHandler;
@@ -1854,6 +1793,47 @@ final class SystemStylusHooks {
         }
     }
 
+    /** Debug-only trigger so the bridge's custom actions can be exercised
+     * from adb without the pen (圈选 / 手写便签 otherwise need a physical
+     * gesture, which makes the overlay+save chain untestable from the host):
+     *   adb shell settings put global lenovo_pen_debug_actions 1
+     *   adb shell am broadcast \
+     *       -a com.aclaniakea.lenovopenbridge.RUN_ACTION --ei code 113
+     * Gated on that flag so a normal build never exposes it. */
+    private static void registerDebugActionRunner(Context context) {
+        try {
+            BroadcastReceiver runner = new BroadcastReceiver() {
+                @Override // android.content.BroadcastReceiver
+                public void onReceive(Context ctx, Intent intent) {
+                    try {
+                        int flag = android.provider.Settings.Global.getInt(
+                                ctx.getContentResolver(),
+                                "lenovo_pen_debug_actions", 0);
+                        if (flag != 1) {
+                            HookUtils.log("debug action refused (flag off)");
+                            return;
+                        }
+                        int code = intent.getIntExtra("code", -1);
+                        HookUtils.log("debug action " + code + " requested");
+                        runCustomAction(ctx, code);
+                    } catch (Throwable th) {
+                        HookUtils.log("debug action: " + th);
+                    }
+                }
+            };
+            IntentFilter filter = new IntentFilter(
+                    "com.aclaniakea.lenovopenbridge.RUN_ACTION");
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(runner, filter, 2);
+            } else {
+                context.registerReceiver(runner, filter);
+            }
+            HookUtils.log("debug action runner registered");
+        } catch (Throwable th) {
+            HookUtils.log("debug action runner: " + th);
+        }
+    }
+
     private static void registerStateSync(Context context) {
         if (stateReceiverReady) {
             return;
@@ -2112,17 +2092,29 @@ final class SystemStylusHooks {
             HookUtils.log("suppressed touch strip event during magnetic transition usage=0x" + Integer.toHexString(i));
         }
         switch (i) {
-            case 787969:
+            case 787969: // 0x0c0601 double tap
                 HookUtils.log("grabbed touch strip: double tap -> double action");
                 click(context, true);
                 break;
-            case 787986:
-                HookUtils.log("grabbed touch strip: swipe down -> single action");
+            case 787985: // 0x0c0611 long press
+                HookUtils.log("grabbed touch strip: long press");
+                extraGestureAction(context, "long_press");
+                break;
+            case 787986: // 0x0c0612 swipe down
+                HookUtils.log("grabbed touch strip: swipe down -> slide down action");
+                swipeAction(context, false);
+                break;
+            case 787987: // 0x0c0613 swipe up
+                HookUtils.log("grabbed touch strip: swipe up -> slide up action");
+                swipeAction(context, true);
+                break;
+            case 787988: // 0x0c0614 single click
+                HookUtils.log("grabbed touch strip: single click");
                 click(context, false);
                 break;
-            case 787987:
-                HookUtils.log("grabbed touch strip: swipe up -> long action");
-                longAction(context);
+            case 787993: // 0x0c0619 squeeze
+                HookUtils.log("grabbed touch strip: squeeze");
+                extraGestureAction(context, "squeeze");
                 break;
             default:
                 HookUtils.log("grabbed touch strip: unknown usage=0x" + Integer.toHexString(i));

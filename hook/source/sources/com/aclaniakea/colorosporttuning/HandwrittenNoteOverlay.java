@@ -86,6 +86,7 @@ final class HandwrittenNoteOverlay {
 
         TextView close = barItem(ctx, "关闭");
         TextView undo = barItem(ctx, "撤销");
+        TextView redo = barItem(ctx, "重做");
         TextView eraser = barItem(ctx, "橡皮");
         TextView clear = barItem(ctx, "清空");
         TextView save = barItem(ctx, "保存");
@@ -93,6 +94,7 @@ final class HandwrittenNoteOverlay {
         TextView sep = barItem(ctx, "|");
         bar.addView(sep);
         bar.addView(undo);
+        bar.addView(redo);
         bar.addView(eraser);
         bar.addView(clear);
         bar.addView(save);
@@ -132,6 +134,11 @@ final class HandwrittenNoteOverlay {
         undo.setOnClickListener(new View.OnClickListener() {
             @Override public void onClick(View v) {
                 draw.undo();
+            }
+        });
+        redo.setOnClickListener(new View.OnClickListener() {
+            @Override public void onClick(View v) {
+                draw.redo();
             }
         });
         eraser.setOnClickListener(new View.OnClickListener() {
@@ -185,6 +192,26 @@ final class HandwrittenNoteOverlay {
         for (int i = 0; i < dots.length; i++) {
             dots[i].setAlpha(i == sel ? 1f : 0.35f);
         }
+    }
+
+    public static synchronized boolean isVisible() {
+        return root != null;
+    }
+
+    public static void performUndo() {
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            @Override public void run() {
+                if (pad != null) pad.undo();
+            }
+        });
+    }
+
+    public static void performRedo() {
+        new Handler(Looper.getMainLooper()).post(new Runnable() {
+            @Override public void run() {
+                if (pad != null) pad.redo();
+            }
+        });
     }
 
     private static synchronized void hide() {
@@ -241,6 +268,7 @@ final class HandwrittenNoteOverlay {
         }
 
         private final List<Stroke> strokes = new ArrayList<Stroke>();
+        private final List<Stroke> redoStrokes = new ArrayList<Stroke>();
         private Stroke current;
         private boolean eraser;
         private int penColor = 0xFF1A1A1A;
@@ -262,13 +290,21 @@ final class HandwrittenNoteOverlay {
 
         void undo() {
             if (!strokes.isEmpty()) {
-                strokes.remove(strokes.size() - 1);
+                redoStrokes.add(strokes.remove(strokes.size() - 1));
+                invalidate();
+            }
+        }
+
+        void redo() {
+            if (!redoStrokes.isEmpty()) {
+                strokes.add(redoStrokes.remove(redoStrokes.size() - 1));
                 invalidate();
             }
         }
 
         void clear() {
             strokes.clear();
+            redoStrokes.clear();
             current = null;
             invalidate();
         }
@@ -285,6 +321,7 @@ final class HandwrittenNoteOverlay {
                 case MotionEvent.ACTION_DOWN:
                 case MotionEvent.ACTION_POINTER_DOWN:
                     if (eraser) return true;
+                    redoStrokes.clear();
                     current = newStroke();
                     current.path.moveTo(x, y);
                     applyWidth(current, event);

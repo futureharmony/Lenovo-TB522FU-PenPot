@@ -115,11 +115,13 @@ final class LenovoConsumerGestureReader implements Runnable {
                         // Control" — the old needle "lenovo tab pen pro consumer
                         // control" (no " 2") never matched. Match on the two
                         // stable parts instead.
-                        if (line != null && line.toLowerCase().contains("lenovo tab pen")
-                                && line.toLowerCase().contains("consumer control")) {
-                            String str = "/dev/input/event" + i;
-                            bufferedReader.close();
-                            return str;
+                        if (line != null) {
+                            String lower = line.toLowerCase();
+                            if (lower.contains("lenovo") && lower.contains("pen") && lower.contains("consumer control")) {
+                                String str = "/dev/input/event" + i;
+                                bufferedReader.close();
+                                return str;
+                            }
                         }
                         bufferedReader.close();
                     } finally {

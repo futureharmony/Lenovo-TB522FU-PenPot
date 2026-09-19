@@ -269,7 +269,7 @@ code-101，别破坏）：
 |---|---|---|
 | 107/108 | 撤销/重做 | system_server 注入 Ctrl+Z / Ctrl+Y（`injectCombo`：CTRL down → key down/up → CTRL up） |
 | 109/110 | 翻页上/下 | 注入 PAGE_UP / PAGE_DOWN |
-| 111 | 手写便签 | `HandwrittenNoteOverlay`：system_server 直接 addView 的 TYPE_APPLICATION_OVERLAY 全屏手写层（工具条：关闭/撤销/橡皮/清空/4 色/保存），保存走 MediaStore → Pictures/PenBridge |
+| 111 | 手写便签 | `HandwrittenNoteOverlay`：system_server 直接 addView 的 TYPE_APPLICATION_OVERLAY 全屏手写层（工具条：关闭/撤销/橡皮/清空/4 色/保存），保存走 `HookUtils.publishPng` → `PenShareProvider` → Pictures/PenBridge |
 | 112/113 | 圈选识别/翻译 | `LassoSelectOverlay`：透明覆盖层框选 → `android.window.ScreenCapture`（反射，DisplayCaptureArgs.Builder.setSourceCrop）裁剪 → 保存 PNG + 剪贴板（图片）；翻译再弹分享/`ACTION_TRANSLATE`。**OCR 引擎未接**（`tryRecognize` 留 null），DeepThinker 探测未完成 |
 
 **自由组合的两层含义**：
@@ -386,10 +386,59 @@ code-101，别破坏）：
   （AIDL `IOplusDisplayManager` 同签名）→ 用 `DisplayAddress$Physical.getPhysicalDisplayId()`
   取 id 再换 token，另加 id 0..3 暴力兜底。
 - 抓图前 `Thread.sleep(250)` 等浮层真正下屏，避免把选区框/蒙层拍进去。
-- 保存链：`HookUtils.savePngToGallery` = ①provider 流 → ②MediaStore 行 DATA 直写 →
-  ③`/storage/emulated/0/Pictures/PenBridge` 普通文件 + 媒体扫描，每级结果入日志。
+
+**v4.4.9 → v4.5.0 保存路径定案：FUSE 墙 + 委托应用进程代写（2026-09-19 16:2x，应用侧链路已自证）**：
+
+- **`/system/bin/{screencap,cp}` 与 `/storage/emulated/0` 全部被判死刑，但原因此前判错了。**
+  dmesg 的 avc 是决定性证据：
+  ```
+  avc: denied { read write } for comm="binder:23732_2"
+    path="/mnt/user/0/emulated/0/Pictures/PenBridge/.pending-*.png"
+    dev="fuse" scontext=u:r:system_server:s0
+    tcontext=u:object_r:fuse:s0 tclass=file permissive=0
+  ```
+  → MediaStore 行**建得出来**（`.pending-*` 文件由 MediaProvider uid 10182 落地），
+  但随后的「打开流」走 FUSE 视图，而 **system_server 域被 SELinux 禁止读写 fuse 文件**。
+  所以这不是"provider 不可用/权限没配"，而是**架构性不可达**：
+  system_server 侧 MediaStore 与 `/storage/emulated/0` 永久不可用，任何配置都救不回来。
+  （副产物：`Pictures/PenBridge` 下留了 11 个 0 字节 `.pending-*` 垃圾，已清理。）
+- 进程归属更正：圈选/便签浮层跑在 **system_server（uid 1000, `u:r:system_server:s0`）**，
+  不是 `com.oplus.ipemanager`（那个进程只跑笔的 GATT 侧）。
+  system_server 的补充组**含 1023(`media_rw`)**，所以 `/data/media/0/...` 裸目录在 **DAC** 上可写；
+  但该目录**模块自己的 app uid 读不到**，拿不到可分享的 Uri，因此不能作为主路径。
+- **v4.5.0 修法：写盘这件事交给模块自己的进程做。** 新增 `PenShareProvider`
+  （authority `com.aclaniakea.lenovopenbridge.share`，exported + grantUriPermissions）：
+  system_server 用 `ContentResolver.call()` 把 PNG 按 **192 KiB 分块**过 binder
+  （远低于 1 MiB 事务上限），应用进程（uid 10406，**有自己合法的 FUSE 挂载**）执行
+  MediaStore insert + `openOutputStream` + `IS_PENDING=0`，回传
+  `content://media/external/images/media/N`；失败则退回自身 cache 并由 `openFile()` 供 Uri；
+  两者都失败才退回裸目录 `/data/media/0/Pictures/PenBridge` + media scan。
+- **同时修掉一个把整条链路废掉的既有缺陷**：`LassoSelectOverlay.finish()` 原先在
+  `uri == null` 时**直接 return**，于是保存一失败，**OCR / 剪贴板 / 分享全都不会执行**。
+  现在保存失败也继续走后面的 OCR 与分享分支，只是提示语不同。
+- **另修**：`stagePng()` 原先直接 `bmp.compress()`，而 ScreenCapture 返回的是
+  `Config.HARDWARE` 位图，`compress()` 读不了 → 统一加 HARDWARE→ARGB_8888 转换
+  （`HookUtils.toPngBytes()` / `stagePng()` 都处理）。
+- **自证手段（不必占用用户时间）**：provider 的 `call()` 放开 shell(2000)，
+  于是可用 CLI 直接验证**生产代码路径**：
+  ```
+  adb shell content call --uri content://com.aclaniakea.lenovopenbridge.share --method selftest --arg x.png
+  → Bundle[{ok=true, uri=content://media/external/images/media/1398, where=mediastore}]
+  ```
+  并已核对：文件 66 B、魔数 `89 50 4E 47`、`relative_path=Pictures/PenBridge/`、
+  `is_pending=0`、`owner_package_name=com.aclaniakea.lenovopenbridge` ⇒ **应用侧写盘链路打通**。
+  （provider 另接受 `b64` 载荷别名，因为 `content call` CLI 无法传 `byte[]`。）
+- 工具链坑：`build_hook_source.py` 里 aapt2 link 的 `--version-code/--version-name`
+  **不生效**，真实版本号由 `AndroidManifest.xml` 决定；脚本内那两个值已一并对齐为 450000/4.5.0。
+- 命名坑：模块**包名**是 `com.aclaniakea.lenovopenbridge`（uid 10406），
+  `com.aclaniakea.colorosporttuning` 只是 Java **包名**，别拿它查 `dumpsys package`。
+- 重载手段：用户已授**永久** shell root → `su -c 'killall system_server'` 软重启有效
+  （`uptime` 不清零，仅重启框架；实测注入日志 `system_server stylus hooks installed` 正常）。
 
 **待办**：
+- [ ] **v4.5.0 圈选翻译实测**（system_server 已软重启装载新钩子）：期望弹出分享面板，
+      图片进剪贴板，文件落到相册 `Pictures/PenBridge`
+- [ ] 手写便签保存（同一个 `publishPng`）一并复测
 - [ ] **物理笔动作验证**（笔已重连，弹窗摘要联动正常）：实际触发各手势 → 撤销/重做/翻页/便签/圈选
 - [ ] 长按/捏握物理手势触发 → extraGestureAction 路由复测（bridge=107 已验证重启存续）
 - [ ] 捏握行摘要显示「通知栏」为历史遗留值（旧对话框写入 102），如需可重置
@@ -397,6 +446,49 @@ code-101，别破坏）：
 - [ ] DeepThinker / ROM OCR 服务探测 → 接入 `LassoSelectOverlay.tryRecognize`
 - [ ] 手写便签的压感宽度、防误触（palm rejection）体验调优
 - [ ] PencilSettingActivity 摘要联动需笔连接状态下复验（未连接时页面隐藏手势行）
+
+## P0.13 圈选翻译黑屏：App 走错区域端点（v4.5.3，2026-09-19 完成定位 + 实现）
+
+**现象**：不是截图黑 —— `pen_translate_*.png` 逐像素统计正常（252×181、`uniq=1050`、
+平均亮度 62.6）。`TranslatePhotoResultActivity` 起来了、图也 FUSE 打开了，但页面全黑。
+
+**根因**：`com.coloros.translate` 把服务端打到已经退役的域名上。
+```
+b2/a.k()  SystemProperties "persist.sys.oplus.region"（本机 = CN）
+        ↓ utils/x.b()  assets/country_region_mapping.json（{"cn":["CN","OC"],…}）
+        ↓ b2/a.l()   switch {cn, us, in, eu}  DEFAULT = "sg"
+→ https://aitool-cuiocr-sg.heytapmobi.com/aiendpoints/…   ← DNS 已 NXDOMAIN
+```
+`b2/a.l()` 兜底分支是 `"sg"`；本机上游没取到值 → 一路落到 sg。
+（对照实验：把 `persist.sys.oplus.region` 改成 ZZ 重启 App，结果**依然** sg，
+说明不是属性值的问题，是取值链本身没走通。）
+
+**修复**：新增 `TranslateRegionHooks`（作用域只含 `com.coloros.translate`）双保险：
+1. 钉住区域：hook `b2/a.l(String,boolean)` → `setResult("cn")`；
+   hook `DomainBuilder#getToolboxHostNameByRegion` 把入参改成 `"cn"`，让 App 自选 CN 模板；
+2. 兜底改写：hook `okhttp3.Request$Builder#url(...)`，最终 URL 里 `-sg.heytapmobi.com`
+   → `-cn.`（App 每版重混淆，这层保证即使 1 全部失效链路仍在）。
+目标全部懒加载 + 吞异常，符号改名不会拖垮该进程。**作用域 8 → 9 项**
+（`META-INF/xposed/scope.list`、`res/values/arrays.xml`、运行时 `vector-cli scope set`）。
+
+**别再走的弯路（已实证）**：
+- ❌ `/system/etc/hosts` 或 DNS 把 sg 域名指到 CN 服务器：证书是通配 `*.heytapmobi.com`，
+  TLS 能过（HTTP 404 而非握手失败），但**网关按 HTTP Host 头路由** —— 同一条 POST，
+  Host=SG 返 404、Host=CN 返 200。为此曾装过 `tb522fu_translate_hosts` 模块，
+  已卸载，`module/system/etc/hosts` 也已删除。
+- ❌ 改 `persist.sys.oplus.region`：本来就是 CN，改了不影响。
+- ⚠️ 验证必须**解锁进桌面**：该 App 只 partially direct-boot-aware，锁屏时 PMS 会过滤
+  它的组件，`am start -n` 报 "Activity class … does not exist"（连 `-n` 显式组件都解析不到），
+  adb 侧无法自解锁跑通。
+
+**验证方式**：`settings put global lenovo_pen_debug_actions 1` 后
+`am broadcast …--ei code 114`（免画框：直接截固定区域 + 交给翻译），
+看 `adb logcat | grep -i aitool-cuiocr-cn` 是否出现 CN 主机、App 是否拿到 200。
+
+**待办**：
+- [ ] 解锁后实测：code 114 免交互路径 + 真笔圈选（“设计 Davidson” 到 CN 端点并出结果）
+- [ ] CN 端点是否需要 HeyTap 账号登录（目前已知匿名 POST 可返 200，未确认全流程）
+
 
 ## P0.8 便签手写笔记闪退（native，2026-09-18 完成根因定位，**非本模块引起**）
 

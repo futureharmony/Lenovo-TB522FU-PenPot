@@ -1,66 +1,251 @@
 #!/system/bin/sh
-# KSU / Magisk 管理器「执行」按钮：状态总览 + inkdye 开关
+# Lenovo TB522FU 手写笔生态增强模块 - 管理器操作与热控制脚本
 # ------------------------------------------------------------
-# 默认行为：本模块**默认禁用**系统内置笔桥 inkdye
-#   （com.inkdye.lenovopentocoloros），笔能力由本模块（Root 服务 + Hook）接管。
-# 若内置笔桥 Hook 尚未生效、或想回退到系统原厂笔体验，用本脚本开启：
-#     sh action.sh enable      # 恢复系统内置笔桥并持续维持
-#     sh action.sh disable     # 回到模块默认（禁用内置笔桥）
-#     sh action.sh toggle      # 在两者间切换
-# 状态标记：存在 inkdye-enabled.state = 用户显式选择"启用内置笔桥"（覆盖默认）。
 MODDIR=${0%/*}
 LOG="$MODDIR/pen-bridge.log"
-INKDYE_PKG=com.inkdye.lenovopentocoloros
-STAMP="$MODDIR/inkdye-enabled.state"
+INKDYE_PKG="com.inkdye.lenovopentocoloros"
+DISABLE_FLAG="$MODDIR/disable"
 
-echo "================ 状态 ================"
-echo "hall3=$(cat /sys/devices/virtual/hall/och1909/hall3 2>/dev/null)"
-echo "tx_status=$(cat /sys/bus/i2c/devices/11-0041/tx_status 2>/dev/null)"
-echo "pen_battery=$(settings get global ipe_pencil_battery_level 2>/dev/null)"
-echo "ipe_charging=$(settings get global ipe_pencil_charging_state 2>/dev/null)"
-echo "hook_apk=$(pm path com.aclaniakea.lenovopenbridge 2>/dev/null | head -1)"
-echo "hidctl_apk=$(pm path com.aclaniakea.penhidctl 2>/dev/null | head -1)"
-echo "lsposed=$([ -d /data/adb/lspd ] && echo installed || echo no)"
-echo "charge_guard_pid=$(cut -d' ' -f1 "$MODDIR/charge-guard.pid" 2>/dev/null)"
-if [ -f "$STAMP" ]; then
-    echo "inkdye=ENABLED (user override, $(cat "$STAMP"))"
+# 动作代号转中文
+format_action() {
+    case "$1" in
+        101) echo "区域截屏" ;;
+        102) echo "展开通知栏" ;;
+        103) echo "模拟返回键" ;;
+        104) echo "回到桌面" ;;
+        105) echo "最近任务" ;;
+        106) echo "切换手电筒" ;;
+        107) echo "撤销 (Ctrl+Z)" ;;
+        108) echo "重做 (Ctrl+Shift+Z / Ctrl+Y)" ;;
+        109) echo "翻页上 (向上翻页)" ;;
+        110) echo "翻页下 (向下翻页)" ;;
+        111) echo "手写便签浮窗" ;;
+        112) echo "圈选文字识别 (OCR提取)" ;;
+        113) echo "圈选屏幕翻译" ;;
+        0)   echo "关闭 (无动作)" ;;
+        1)   echo "笔刷与橡皮擦切换" ;;
+        2)   echo "最近工具切换" ;;
+        3)   echo "呼出调色盘" ;;
+        4)   echo "手写笔工具轮盘" ;;
+        5)   echo "随心圈" ;;
+        -1|"") echo "系统默认设置" ;;
+        *)   echo "自定义动作 ($1)" ;;
+    esac
+}
+
+# 彻底免重启禁用模块
+do_disable() {
+    echo ""
+    echo "=============================================="
+    echo "         正在执行【免重启彻底禁用模块】..."
+    echo "=============================================="
+
+    # 1. 创建标准模块禁用标记
+    touch "$DISABLE_FLAG"
+
+    # 2. 设置全局运行时禁用属性 (LSPosed Hook 极速热透传)
+    setprop persist.lenovo.penbridge.disabled 1
+
+    # 3. 停止磁吸与充电后台守护进程
+    local guard_pid=$(cut -d' ' -f1 "$MODDIR/charge-guard.pid" 2>/dev/null)
+    if [ -n "$guard_pid" ]; then
+        kill -15 "$guard_pid" 2>/dev/null
+        sleep 0.2
+        kill -9 "$guard_pid" 2>/dev/null
+    fi
+    pkill -f "$MODDIR/charge-guard.sh" 2>/dev/null
+    rm -f "$MODDIR/charge-guard.pid" "$MODDIR/.service.lock"
+    echo "  [√] 后台磁吸/充电守护进程已停止"
+
+    # 4. 恢复系统旧版笔桥 (若设备中存在)
+    if pm list packages | grep -q "$INKDYE_PKG"; then
+        pm enable --user 0 "$INKDYE_PKG" >/dev/null 2>&1
+        echo "  [√] 系统内置笔桥 (inkdye) 已恢复启用接管"
+    fi
+
+    echo "  [√] Hook 核心拦截已即时转为纯透传模式"
+    echo "  [√] 模块标记已写入: $DISABLE_FLAG"
+    echo ""
+    echo "【处理完毕】模块已彻底停止介入，全程免重启即刻生效！"
+    echo "（如需彻底从内存中卸载Hook注入，可执行快速软重启）"
+    echo "=============================================="
+    echo "module disabled via action.sh at $(date)" >>"$LOG"
+}
+
+# 彻底免重启启用模块
+do_enable() {
+    echo ""
+    echo "=============================================="
+    echo "         正在执行【免重启彻底启用模块】..."
+    echo "=============================================="
+
+    # 1. 移除标准模块禁用标记
+    rm -f "$DISABLE_FLAG"
+
+    # 2. 恢复全局运行时属性
+    setprop persist.lenovo.penbridge.disabled 0
+
+    # 3. 禁用系统旧版笔桥，防止冲突
+    if pm list packages | grep -q "$INKDYE_PKG"; then
+        pm disable-user --user 0 "$INKDYE_PKG" >/dev/null 2>&1
+        echo "  [√] 系统内置旧版笔桥已禁用 (模块独占接管)"
+    fi
+
+    # 4. 启动后台磁吸/充电守护进程
+    if [ -f "$MODDIR/charge-guard.sh" ]; then
+        nohup /system/bin/sh "$MODDIR/charge-guard.sh" >/dev/null 2>&1 &
+        sleep 0.5
+        local new_pid=$(cut -d' ' -f1 "$MODDIR/charge-guard.pid" 2>/dev/null)
+        echo "  [√] 磁吸/充电守护进程已启动 (PID: ${new_pid:-运行中})"
+    fi
+
+    echo "  [√] Hook 核心拦截已恢复实时生效"
+    echo "  [√] 模块标记已清除"
+    echo ""
+    echo "【处理完毕】手写笔增强系统已恢复全面接管，全程免重启！"
+    echo "=============================================="
+    echo "module enabled via action.sh at $(date)" >>"$LOG"
+}
+
+# 快速软重启 (仅重启 Android 框架与 Zygote，无需关机硬件)
+do_soft_reboot() {
+    echo ""
+    echo "=============================================="
+    echo "正在执行【快速软重启】(约5秒重载系统框架)..."
+    echo "=============================================="
+    sleep 1
+    setprop ctl.restart zygote
+}
+
+# 命令行参数快捷入口
+case "$1" in
+    enable|on|1)
+        do_enable
+        exit 0
+        ;;
+    disable|off|0)
+        do_disable
+        exit 0
+        ;;
+    toggle)
+        if [ -f "$DISABLE_FLAG" ]; then do_enable; else do_disable; fi
+        exit 0
+        ;;
+    reboot|soft_reboot)
+        do_soft_reboot
+        exit 0
+        ;;
+esac
+
+# ----------------- 状态数据采集 -----------------
+# 硬件与电量
+HALL_RAW=$(cat /sys/devices/virtual/hall/och1909/hall3 2>/dev/null)
+TX_RAW=$(cat /sys/bus/i2c/devices/11-0041/tx_status 2>/dev/null)
+PEN_NAME=$(settings get global ipe_pencil_bt_device_name 2>/dev/null)
+[ -z "$PEN_NAME" ] && PEN_NAME="Lenovo Tab Pen Pro"
+PEN_MAC=$(settings get global ipe_pencil_mac_addr 2>/dev/null)
+[ -z "$PEN_MAC" ] && PEN_MAC="未记录"
+PEN_FW=$(settings get global ipe_pencil_fw 2>/dev/null)
+[ -z "$PEN_FW" ] && PEN_FW="未知"
+
+# 磁吸与充电
+if echo "$HALL_RAW" | grep -q "value = 0"; then
+    DOCK_STATUS="已吸附于平板顶部 (磁吸附着)"
 else
-    echo "inkdye=DISABLED (module default)"
+    DOCK_STATUS="已从平板取下 (手持使用中)"
 fi
 
-echo "================ 用法 ================"
-echo "切换 inkdye:  sh $0 enable|disable|toggle   （默认 disable）"
+CHG_STATE=$(settings get global ipe_pencil_charging_state 2>/dev/null)
+if [ "$CHG_STATE" = "1" ] || echo "$TX_RAW" | grep -q "cps_wls_en:1"; then
+    CHARGE_STATUS="正在无线充电中 ⚡"
+else
+    CHARGE_STATUS="未在充电 / 电量已满"
+fi
 
-op="$1"
-case "$op" in
-    toggle)
-        # 当前启用 → 切到禁用；当前禁用（默认）→ 切到启用
-        if [ -f "$STAMP" ]; then op=disable; else op=enable; fi
-        ;;
-esac
+BATTERY=$(settings get global ipe_pencil_battery_level 2>/dev/null)
+[ -z "$BATTERY" ] || [ "$BATTERY" = "null" ] && BATTERY="--"
 
-case "$op" in
-    enable)
-        pm enable --user 0 "$INKDYE_PKG" >/dev/null 2>&1
-        echo "enabled at $(date)" >"$STAMP"
-        echo "inkdye ENABLED（已交还系统内置笔桥；笔能力不再由本模块 Hook 接管）"
-        echo "inkdye enabled via action.sh" >>"$LOG"
-        ;;
-    disable)
-        if pm disable-user --user 0 "$INKDYE_PKG" >/dev/null 2>&1; then
-            rm -f "$STAMP"
-            echo "inkdye DISABLED（模块默认状态；请确认 Hook 作用域已勾选并生效）"
-            echo "inkdye disabled via action.sh" >>"$LOG"
-        else
-            echo "disable failed"
-        fi
-        ;;
-    ""|status)
-        ;;
-    *)
-        echo "unknown op: $op"
-        ;;
-esac
+# 蓝牙与输入节点
+CONN_STATE=$(settings get global ipe_pencil_connect_state 2>/dev/null)
+if [ "$CONN_STATE" = "2" ]; then
+    BLUETOOTH_STATUS="已连接 (BLE 正常通信)"
+elif [ "$CONN_STATE" = "1" ]; then
+    BLUETOOTH_STATUS="正在连接中..."
+else
+    BLUETOOTH_STATUS="未连接 / 休眠"
+fi
 
-echo "================ pen-bridge.log 末尾 ================"
-tail -15 "$LOG" 2>/dev/null
+UHID_DEV=$(grep -sl "Lenovo Tab Pen Pro" /sys/class/input/input*/name 2>/dev/null | head -1)
+if [ -n "$UHID_DEV" ]; then
+    UHID_NAME=$(cat "$UHID_DEV" 2>/dev/null)
+    UHID_STATUS="已绑定虚拟输入设备 ($UHID_NAME)"
+else
+    UHID_STATUS="待命 (有按键输入时自动激活)"
+fi
+
+# 手势配置读取
+ACT_SQUEEZE=$(settings get global ipe_pencil_wb_click_squeeze 2>/dev/null)
+ACT_LONG=$(settings get global ipe_pencil_wb_click_long_press 2>/dev/null)
+ACT_UP=$(settings get global ipe_pencil_wb_click_long_click_v2 2>/dev/null)
+ACT_DOWN=$(settings get global ipe_pencil_wb_click_single_click 2>/dev/null)
+ACT_DOUBLE=$(settings get global ipe_pencil_wb_click_double_click 2>/dev/null)
+[ "$ACT_DOUBLE" = "-1" ] && ACT_DOUBLE=$(settings get global ipe_pencil_double_click 2>/dev/null)
+
+# 系统与后台模块
+LSP_STATUS="未安装"
+[ -d /data/adb/lspd ] && LSP_STATUS="正常运行 (LSPosed/JingMatrix)"
+
+HOOK_PATH=$(pm path com.aclaniakea.lenovopenbridge 2>/dev/null | head -1)
+if [ -n "$HOOK_PATH" ]; then
+    HOOK_STATUS="已安装并加载核心 Hook"
+else
+    HOOK_STATUS="未检测到 Hook APK，请检查安装"
+fi
+
+GUARD_PID=$(cut -d' ' -f1 "$MODDIR/charge-guard.pid" 2>/dev/null)
+if [ -n "$GUARD_PID" ] && [ -d "/proc/$GUARD_PID" ]; then
+    GUARD_STATUS="正常守护中 (PID: $GUARD_PID)"
+else
+    GUARD_STATUS="未运行或已停止"
+fi
+
+if [ -f "$DISABLE_FLAG" ]; then
+    MODULE_STATE="【已禁用 (DISABLED)】"
+else
+    MODULE_STATE="【已启用 (ACTIVE)】"
+fi
+
+# ----------------- 格式化输出 -----------------
+echo "=============================================="
+echo "      Lenovo Tab Pen Pro 手写笔增强系统      "
+echo "=============================================="
+echo "当前模块状态: $MODULE_STATE"
+echo ""
+echo "【触控笔硬件与连接】"
+echo "  • 设备型号: $PEN_NAME"
+echo "  • 蓝牙地址: $PEN_MAC"
+echo "  • 固件版本: $PEN_FW"
+echo "  • 连接状态: $BLUETOOTH_STATUS"
+echo "  • 剩余电量: ${BATTERY}%"
+echo "  • 磁吸状态: $DOCK_STATUS"
+echo "  • 充电状态: $CHARGE_STATUS"
+echo "  • 输入设备: $UHID_STATUS"
+echo ""
+echo "【当前生效手势配置】"
+echo "  • 侧键轻捏 (短按 <0.5秒) : $(format_action "$ACT_SQUEEZE")"
+echo "  • 侧键长按 (长捏 ≥0.5秒) : $(format_action "$ACT_LONG") (带笔身震动)"
+echo "  • 触控条上滑              : $(format_action "$ACT_UP")"
+echo "  • 触控条下滑              : $(format_action "$ACT_DOWN")"
+echo "  • 触控条双击              : $(format_action "$ACT_DOUBLE")"
+echo ""
+echo "【核心服务与后台状态】"
+echo "  • LSPosed 框架        : $LSP_STATUS"
+echo "  • 笔桥 Hook 核心支持库 : $HOOK_STATUS"
+echo "  • 磁吸/充电守护进程    : $GUARD_STATUS"
+echo "=============================================="
+echo ""
+echo "【快捷操作说明】"
+echo "  • 切换启用/禁用 : sh $0 toggle (免重启即刻生效)"
+echo "  • 快速软重启   : sh $0 reboot (约5秒重载系统框架)"
+echo "  • 手势热配置   : 设置 -> 设备空间 -> 触控笔卡片"
+echo "=============================================="

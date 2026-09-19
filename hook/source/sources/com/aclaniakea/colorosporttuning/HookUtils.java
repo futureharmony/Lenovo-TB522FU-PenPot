@@ -18,6 +18,7 @@ import java.lang.reflect.Method;
 
 /* loaded from: classes.dex */
 final class HookUtils {
+    static final String MODULE_PACKAGE = "com.aclaniakea.lenovopenbridge";
     private static final int HID_HOST_PROFILE = 4;
     private static volatile BluetoothProfile hidHostProxy;
     private static volatile boolean hidHostProxyRequested;
@@ -79,6 +80,122 @@ final class HookUtils {
             log("skip " + str + "#" + str2 + ": " + th);
             return 0;
         }
+    }
+
+    /**
+     * ColorOS's own launch policy blocks {@code system_server} from cold-starting
+     * the bridge app, which is exactly what happens the first time the lasso
+     * publishes through {@code PenShareProvider} and the app is not running yet:
+     *
+     * <pre>
+     * W/OplusAppStartupManager: prevent start com.aclaniakea.lenovopenbridge,
+     *     cmp ComponentInfo{.../PenShareProvider} by contentprovider android
+     *     callingUid 1000, scenePriority = 0
+     * E/ActivityThread: Failed to find provider info for ...
+     * publishPng: app route threw ... java.lang.IllegalArgumentException:
+     *     Unknown authority com.aclaniakea.lenovopenbridge.share
+     * </pre>
+     *
+     * Every later attempt succeeds once anything else has started the app, which
+     * is why the failure looked random. There is no OEM knob for this short of
+     * becoming a system app, so the decision itself is patched: the
+     * manager's {@code isAllow*} / {@code shouldPrevent*} verdicts are forced to
+     * the permissive answer, but only for our own package. Every other app keeps
+     * the stock behaviour.
+     */
+    static int allowSelfAppStart(ClassLoader classLoader) {
+        int installed = 0;
+        try {
+            Class<?> cls = Class.forName(
+                    "com.android.server.am.OplusAppStartupManager", false, classLoader);
+            for (Method method : cls.getDeclaredMethods()) {
+                if (method.getReturnType() != boolean.class) {
+                    continue;
+                }
+                String name = method.getName();
+                boolean allowStyle = name.startsWith("isAllow");
+                boolean denyStyle = name.startsWith("shouldPrevent")
+                        || name.startsWith("isPrevent");
+                if (!allowStyle && !denyStyle) {
+                    continue;
+                }
+                method.setAccessible(true);
+                try {
+                    XposedBridge.hookMethod(method, new SelfStartGuard(name, allowStyle));
+                    installed++;
+                } catch (Throwable ignored) {
+                    // A method that cannot be hooked simply keeps stock policy.
+                }
+            }
+        } catch (Throwable th) {
+            log("allowSelfAppStart unavailable: " + th);
+            return 0;
+        }
+        log("allowSelfAppStart: " + installed + " policy verdict(s) guarded for " + MODULE_PACKAGE);
+        return installed;
+    }
+
+    /** Agent that overrides one policy verdict when the call is about us. */
+    private static final class SelfStartGuard extends XC_MethodHook {
+        private final boolean allowStyle;
+        private final String method;
+
+        SelfStartGuard(String method, boolean allowStyle) {
+            this.method = method;
+            this.allowStyle = allowStyle;
+        }
+
+        protected void beforeHookedMethod(XC_MethodHook.MethodHookParam param) {
+            try {
+                if (!targetsSelf(param.args)) {
+                    return;
+                }
+                param.setResult(Boolean.valueOf(this.allowStyle));
+                log("allowSelfAppStart: " + this.method + " forced to " + (this.allowStyle ? "allow" : "not-prevented"));
+            } catch (Throwable ignored) {
+                // Never interfere with AMS start decisions just to log a bypass.
+            }
+        }
+    }
+
+    /** True when any argument mentions our package: plain strings, the
+     * {@code ApplicationInfo}/{@code ResolveInfo}/{@code ProcessRecord} records
+     * these policies are handed, and their {@code info}-style members. */
+    private static boolean targetsSelf(Object[] args) {
+        if (args == null) {
+            return false;
+        }
+        for (Object arg : args) {
+            if (mentionsSelf(arg, 0)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private static boolean mentionsSelf(Object obj, int depth) {
+        if (obj == null || depth > 2) {
+            return false;
+        }
+        try {
+            if (String.valueOf(obj).contains(MODULE_PACKAGE)) {
+                return true;
+            }
+        } catch (Throwable th) {
+            return false;
+        }
+        String[] nested = {"info", "appInfo", "activityInfo", "providerInfo", "serviceInfo", "cpr", "mAmsRecord"};
+        for (int i = 0; i < nested.length; i++) {
+            try {
+                Field field = obj.getClass().getDeclaredField(nested[i]);
+                field.setAccessible(true);
+                if (mentionsSelf(field.get(obj), depth + 1)) {
+                    return true;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        return false;
     }
 
     static Context context(Object obj) {
@@ -605,104 +722,194 @@ final class HookUtils {
         }
     }
 
-    /** Persist a PNG into the gallery from inside system_server.  /system/bin/cp
-     * and /system/bin/screencap are BOTH unusable here: this ROM's SELinux
-     * policy denies system_server the exec of shell binaries (error=13,
-     * logged 2026-09-19).  So try, in order:
-     *  1) MediaStore insert + ContentResolver.openOutputStream -- the provider
-     *     opens the FD in ITS domain, so this is the only path guaranteed not
-     *     to hit the system_server storage denials;
-     *  2) MediaStore insert + plain FileOutputStream to the row's DATA path;
-     *  3) plain FileOutputStream to /storage/emulated/0/Pictures/PenBridge.
-     * Returns the content Uri, or null when only a plain file was written. */
-    static android.net.Uri savePngToGallery(android.content.Context ctx,
+    /** Publish a capture to the gallery from code running inside system_server,
+     * and return a content Uri the clipboard / share sheet can use.
+     *
+     * <p>Measured on this ROM (2026-09-19), system_server may NOT write the FUSE
+     * view at all:
+     * <pre>
+     *   avc: denied { read write } ... dev="fuse"
+     *     scontext=u:r:system_server:s0 tcontext=u:object_r:fuse:s0
+     * </pre>
+     * so both a MediaStore stream and a plain file under /storage/emulated/0 are
+     * dead ends -- the row gets created and then the open is denied, which is
+     * also what littered Pictures/PenBridge with 0-byte .pending-* files. The
+     * {@code SurfaceControl} token statics are gone from the framework too, and
+     * executing /system/bin/cp is denied as well.
+     *
+     * <p>So the write is delegated to the module APK's own process, which has a
+     * legitimate FUSE mount of its own: see {@link PenShareProvider}. Only the
+     * bytes cross binder. When that route is unavailable (module disabled, or the
+     * provider refuses) we still drop a plain file in the RAW media dir
+     * /data/media/0/Pictures/PenBridge -- system_server is in the media_rw group,
+     * so that directory is directly writable and the media scan then indexes it.
+     *
+     * @return the shareable content Uri, or null when only a plain file could be
+     *         written (the caller still has the image, just no share link). */
+    static android.net.Uri publishPng(android.content.Context ctx,
             android.graphics.Bitmap bmp, String name) {
-        android.net.Uri uri = null;
-        try {
-            android.content.ContentValues cv = new android.content.ContentValues();
-            cv.put(android.provider.MediaStore.Images.Media.DISPLAY_NAME, name);
-            cv.put(android.provider.MediaStore.Images.Media.MIME_TYPE, "image/png");
-            cv.put(android.provider.MediaStore.Images.Media.RELATIVE_PATH,
-                    "Pictures/PenBridge");
-            cv.put(android.provider.MediaStore.Images.Media.IS_PENDING, 1);
-            uri = ctx.getContentResolver().insert(
-                    android.provider.MediaStore.Images.Media.EXTERNAL_CONTENT_URI, cv);
-        } catch (Throwable th) {
-            log("savePng: insert failed: " + th);
-        }
-        if (uri != null) {
-            java.io.OutputStream os = null;
-            try {
-                os = ctx.getContentResolver().openOutputStream(uri);
-                if (os != null) {
-                    bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, os);
-                    os.close();
-                    os = null;
-                    publishPng(ctx, uri);
-                    log("savePng: streamed via provider -> " + name);
-                    return uri;
-                }
-            } catch (Throwable th) {
-                log("savePng: provider stream refused: " + th);
-            } finally {
-                try { if (os != null) os.close(); } catch (Throwable ignored) { }
-            }
-        }
-        java.io.File stage = new java.io.File("/data/system/" + name);
-        try {
-            java.io.FileOutputStream fos = new java.io.FileOutputStream(stage);
-            bmp.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, fos);
-            fos.close();
-        } catch (Throwable th) {
-            log("savePng: staging failed: " + th);
-            return null;
-        }
-        String path = null;
-        if (uri != null) {
-            try {
-                android.database.Cursor c = ctx.getContentResolver().query(uri,
-                        new String[]{android.provider.MediaStore.Images.Media.DATA},
-                        null, null, null);
-                if (c != null) {
-                    if (c.moveToFirst()) path = c.getString(0);
-                    c.close();
-                }
-            } catch (Throwable th) {
-                log("savePng: DATA query refused: " + th);
-            }
-        }
-        if (path != null && copyFile(stage.getAbsolutePath(), path)) {
-            publishPng(ctx, uri);
-            stage.delete();
-            log("savePng: wrote row backing file -> " + path);
-            return uri;
-        }
-        if (uri != null) {
-            try { ctx.getContentResolver().delete(uri, null, null); } catch (Throwable ignored) { }
-        }
-        java.io.File out = new java.io.File(
-                "/storage/emulated/0/Pictures/PenBridge", name);
-        if (copyFile(stage.getAbsolutePath(), out.getAbsolutePath())) {
-            try {
-                android.media.MediaScannerConnection.scanFile(ctx,
-                        new String[]{out.getAbsolutePath()},
-                        new String[]{"image/png"}, null);
-            } catch (Throwable ignored) { }
-            stage.delete();
-            log("savePng: wrote plain file -> " + out);
-            return null;
-        }
-        stage.delete();
-        log("savePng: every destination failed for " + name);
+        android.net.Uri viaApp = publishViaApp(ctx, bmp, name);
+        if (viaApp != null) return viaApp;
+        stageToRawMedia(ctx, bmp, name);
         return null;
     }
 
-    private static void publishPng(android.content.Context ctx,
-            android.net.Uri uri) {
+    /** Ship the PNG to {@link PenShareProvider} in <=192 KiB binder chunks and
+     * keep every transaction far below the 1 MiB limit. Returns the published
+     * content Uri, or null when the app-side route is unavailable. */
+    private static android.net.Uri publishViaApp(android.content.Context ctx,
+            android.graphics.Bitmap bmp, String name) {
+        byte[] png = toPngBytes(bmp);
+        if (png == null) return null;
+        // Three chances: when the bridge app has not been started since boot the
+        // first attempt has to cold-start its process, and ActivityManager hands
+        // the caller "Unknown authority" while that is still in flight instead of
+        // waiting. The second attempt normally lands on a published provider.
+        for (int attempt = 1; attempt <= 3; attempt++) {
+            android.net.Uri uri = publishViaAppOnce(ctx, png, name);
+            if (uri != null) return uri;
+            if (attempt != 3) {
+                try { Thread.sleep(700L); } catch (Throwable ignored) { }
+            }
+        }
+        return null;
+    }
+
+    /** One chunked pass over {@link PenShareProvider}. */
+    private static android.net.Uri publishViaAppOnce(android.content.Context ctx,
+            byte[] png, String name) {
+        final int chunk = 192 * 1024;
+        android.net.Uri base = android.net.Uri.parse(
+                "content://" + PenShareProvider.AUTHORITY);
+        android.content.ContentResolver cr = ctx.getContentResolver();
+        String id = null;
         try {
-            android.content.ContentValues cv = new android.content.ContentValues();
-            cv.put(android.provider.MediaStore.Images.Media.IS_PENDING, 0);
-            ctx.getContentResolver().update(uri, cv, null, null);
+            android.os.Bundle begin = cr.call(base, "begin", name, null);
+            id = begin == null ? null : begin.getString("id");
+            if (id == null) {
+                log("publishPng: app route refused 'begin' for " + name);
+                return null;
+            }
+            int offset = 0;
+            while (offset < png.length) {
+                int size = Math.min(chunk, png.length - offset);
+                android.os.Bundle part = new android.os.Bundle();
+                part.putString("id", id);
+                part.putByteArray("data", java.util.Arrays.copyOfRange(png, offset, offset + size));
+                android.os.Bundle ack = cr.call(base, "chunk", null, part);
+                if (ack == null || !ack.getBoolean("ok", false)) {
+                    log("publishPng: chunk rejected at offset " + offset);
+                    try { cr.call(base, "abort", id, null); } catch (Throwable ignored) { }
+                    return null;
+                }
+                offset += size;
+            }
+            android.os.Bundle fin = new android.os.Bundle();
+            fin.putString("id", id);
+            fin.putString("name", name);
+            android.os.Bundle done = cr.call(base, "commit", null, fin);
+            String published = done == null ? null : done.getString("uri");
+            String where = done == null ? null : done.getString("where");
+            log("publishPng: " + name + " " + png.length + "B in "
+                    + ((png.length + chunk - 1) / chunk) + " chunk(s) -> "
+                    + published + " (" + where + ")");
+            return published == null ? null : android.net.Uri.parse(published);
+        } catch (Throwable th) {
+            log("publishPng: app route threw for " + name + ": " + th);
+            if (id != null) {
+                try { cr.call(base, "abort", id, null); } catch (Throwable ignored) { }
+            }
+            return null;
+        }
+    }
+
+    /** PNG bytes for binder transport. ScreenCapture hands back a HARDWARE
+     * bitmap, which {@code compress()} cannot read, so take a software copy. */
+    private static byte[] toPngBytes(android.graphics.Bitmap bmp) {
+        try {
+            android.graphics.Bitmap src = bmp;
+            if (android.graphics.Bitmap.Config.HARDWARE.equals(src.getConfig())) {
+                src = src.copy(android.graphics.Bitmap.Config.ARGB_8888, false);
+            }
+            if (src == null) {
+                log("publishPng: hardware->software copy returned null");
+                return null;
+            }
+            java.io.ByteArrayOutputStream sink = new java.io.ByteArrayOutputStream();
+            src.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, sink);
+            return sink.toByteArray();
+        } catch (Throwable th) {
+            log("publishPng: png encode failed: " + th);
+            return null;
+        }
+    }
+
+    /** Last resort: a plain file in the RAW media dir the hook can write itself.
+     * No content Uri is produced, but the capture survives on disk and the media
+     * scan gets the gallery to index it. */
+    static boolean stageToRawMedia(android.content.Context ctx,
+            android.graphics.Bitmap bmp, String name) {
+        java.io.File stage = stagePng(ctx, bmp, name);
+        if (stage == null) return false;
+        for (String dir : new String[]{"/data/media/0/Pictures/PenBridge",
+                "/storage/emulated/0/Pictures/PenBridge"}) {
+            java.io.File out = new java.io.File(dir, name);
+            try { out.getParentFile().mkdirs(); } catch (Throwable ignored) { }
+            if (copyFile(stage.getAbsolutePath(), out.getAbsolutePath())) {
+                try { out.setReadable(true, false); } catch (Throwable ignored) { }
+                scanPng(ctx, out);
+                stage.delete();
+                log("savePng: wrote plain file -> " + out);
+                return true;
+            }
+        }
+        stage.delete();
+        log("savePng: every destination failed for " + name);
+        return false;
+    }
+
+    /** Kept for callers that only want a durable file (handwritten notes) and do
+     * not need a shareable Uri -- same chain as {@link #stageToRawMedia}. */
+    static android.net.Uri savePngToGallery(android.content.Context ctx,
+            android.graphics.Bitmap bmp, String name) {
+        return publishPng(ctx, bmp, name);
+    }
+
+    private static java.io.File stagePng(android.content.Context ctx,
+            android.graphics.Bitmap bmp, String name) {
+        java.io.File[] dirs;
+        try {
+            dirs = new java.io.File[]{ctx.getCacheDir(), new java.io.File("/data/system")};
+        } catch (Throwable th) {
+            dirs = new java.io.File[]{new java.io.File("/data/system")};
+        }
+        for (java.io.File dir : dirs) {
+            if (dir == null) continue;
+            try {
+                if (!dir.isDirectory()) dir.mkdirs();
+                // ScreenCapture hands back a HARDWARE bitmap and compress()
+                // cannot read one, so stage from a software copy.
+                android.graphics.Bitmap src = bmp;
+                if (android.graphics.Bitmap.Config.HARDWARE.equals(src.getConfig())) {
+                    src = src.copy(android.graphics.Bitmap.Config.ARGB_8888, false);
+                }
+                if (src == null) continue;
+                java.io.File f = new java.io.File(dir, name);
+                java.io.FileOutputStream fos = new java.io.FileOutputStream(f);
+                src.compress(android.graphics.Bitmap.CompressFormat.PNG, 100, fos);
+                fos.close();
+                return f;
+            } catch (Throwable th) {
+                log("savePng: staging in " + dir + " failed: " + th);
+            }
+        }
+        return null;
+    }
+
+    private static void scanPng(android.content.Context ctx, java.io.File f) {
+        try {
+            android.media.MediaScannerConnection.scanFile(ctx,
+                    new String[]{f.getAbsolutePath()}, new String[]{"image/png"}, null);
         } catch (Throwable ignored) { }
     }
 

@@ -74,6 +74,38 @@ final class LassoSelectOverlay {
         });
     }
 
+    /**
+     * Head-less variant used by the debug runner (action code 114): capture a
+     * region, publish it and hand it straight to photo-translate without ever
+     * drawing the overlay.  Needed because adb cannot draw on the overlay while
+     * the keyguard is up, and it keeps the whole publish+handoff chain
+     * testable from a plain adb shell.
+     */
+    static void translateRegion(final Context ctx, final Rect crop) {
+        new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    Bitmap bmp = captureRegion(ctx, crop);
+                    if (bmp == null) {
+                        toast(ctx, "区域截图失败（ScreenCapture 不可用）");
+                        return;
+                    }
+                    Uri uri = savePng(ctx, bmp, "pen_translate");
+                    if (uri == null) {
+                        toast(ctx, "圈选区域已保存，但分享通道不可用");
+                        return;
+                    }
+                    if (!openPhotoTranslate(ctx, uri, bmp)) {
+                        toast(ctx, "翻译通道启动失败");
+                    }
+                } catch (Throwable th) {
+                    HookUtils.log("lasso region translate: " + th);
+                    toast(ctx, "失败: " + th);
+                }
+            }
+        }, "penbridge-region").start();
+    }
+
     private static void show(Context ctx, boolean translate) {
         FrameLayout container = new FrameLayout(ctx);
         LassoView lasso = new LassoView(ctx, translate);
@@ -114,14 +146,6 @@ final class LassoSelectOverlay {
                         return;
                     }
                     Uri uri = savePng(ctx, region, translate ? "pen_translate" : "pen_ocr");
-                    if (uri == null) {
-                        // Plain-file fallback already placed the PNG in
-                        // Pictures/PenBridge; only the shareable content Uri
-                        // is missing.
-                        toast(ctx, "圈选区域已保存到 Pictures/PenBridge"
-                                + (translate ? "（分享通道不可用）" : ""));
-                        return;
-                    }
                     String text = tryRecognize(ctx, region);
                     if (text != null && !text.isEmpty()) {
                         android.content.ClipboardManager cm =
@@ -138,21 +162,53 @@ final class LassoSelectOverlay {
                     // No OCR engine wired yet: image goes to the clipboard and
                     // (for translate) the share sheet so the user can pick any
                     // translate app.  This keeps the pipeline usable today.
+                    if (uri == null) {
+                        // publishPng() still dropped the PNG in the raw media dir
+                        // (system_server cannot write the FUSE view, so no
+                        // gallery row exists to share); say so rather than
+                        // pretending the whole flow failed.
+                        toast(ctx, "圈选区域已保存到 Pictures/PenBridge（分享通道不可用）");
+                        return;
+                    }
                     android.content.ClipboardManager cm =
                             (android.content.ClipboardManager) ctx.getSystemService(
                                     Context.CLIPBOARD_SERVICE);
                     ClipData clip = ClipData.newUri(ctx.getContentResolver(),
                             "PenBridge 圈选", uri);
                     cm.setPrimaryClip(clip);
+                    if (translate && openPhotoTranslate(ctx, uri, region)) {
+                        // Handed straight to the OEM photo-translate pipeline:
+                        // OCR + translation result page, no share sheet.
+                        return;
+                    }
                     if (translate) {
                         Intent share = new Intent(Intent.ACTION_SEND);
                         share.setType("image/png");
                         share.putExtra(Intent.EXTRA_STREAM, uri);
-                        share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
-                                | Intent.FLAG_ACTIVITY_NEW_TASK);
-                        ctx.startActivity(Intent.createChooser(share, "圈选翻译"));
+                        share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        // createChooser() wraps the intent and drops its flags,
+                        // and this runs on system_server's context: without
+                        // NEW_TASK on the *chooser* itself startActivity() throws
+                        // "Calling startActivity() from outside of an Activity
+                        // context requires the FLAG_ACTIVITY_NEW_TASK flag".
+                        Intent chooser = Intent.createChooser(share, "圈选翻译");
+                        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                                | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        ctx.startActivity(chooser);
                     } else {
-                        toast(ctx, "圈选区域已保存并复制到剪贴板（OCR 引擎未接入）");
+                        if (openOcrScanner(ctx, uri, region)) {
+                            toast(ctx, "圈选区域已发送至文字提取");
+                            return;
+                        }
+                        Intent share = new Intent(Intent.ACTION_SEND);
+                        share.setType("image/png");
+                        share.putExtra(Intent.EXTRA_STREAM, uri);
+                        share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        Intent chooser = Intent.createChooser(share, "圈选提取文字");
+                        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                                | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        ctx.startActivity(chooser);
+                        toast(ctx, "圈选区域已保存并复制到剪贴板");
                     }
                 } catch (Throwable th) {
                     HookUtils.log("lasso finish: " + th);
@@ -204,11 +260,12 @@ final class LassoSelectOverlay {
                 "android.window.ScreenCapture$DisplayCaptureArgs$Builder");
         Object builder = builderCls.getConstructor(android.os.IBinder.class)
                 .newInstance(token);
-        try {
-            builderCls.getMethod("setSourceCrop", Rect.class).invoke(builder, crop);
-        } catch (Throwable nosrc) {
-            HookUtils.log("lasso: setSourceCrop missing, capturing full screen");
-        }
+        // Do NOT invoke builder.setSourceCrop(crop): SurfaceFlinger on this display
+        // scales the source crop up to the full buffer (3840x2560). If setSourceCrop
+        // is set, softwareShrink then crops crop out of the already-cropped scaled
+        // image, causing the captured area to shrink dramatically. Capturing the full
+        // display buffer and cropping locally in softwareShrink guarantees exact 1:1
+        // pixel mapping with the user's circle coordinates.
         Object args = builderCls.getMethod("build").invoke(builder);
         Class<?> capCls = Class.forName("android.window.ScreenCapture");
         Class<?> argsCls = Class.forName(
@@ -228,23 +285,26 @@ final class LassoSelectOverlay {
         return bitmapFromCapture(buf, crop);
     }
 
-    /** setSourceCrop is honoured by the native capture, but guard against a
-     * ROM that ignores it: the returned bitmap is then display-sized and has
-     * to be cropped here.  Also force a SOFTWARE copy -- a HARDWARE bitmap
-     * cannot be compressed into a PNG. */
+    /** Crop the full-display capture to the lasso bounds.  Also force a SOFTWARE copy --
+     * a HARDWARE bitmap cannot be compressed into a PNG. */
     private static Bitmap softwareShrink(Bitmap b, Rect crop) {
-        Bitmap out = b;
-        if (b.getWidth() != crop.width() && b.getWidth() >= crop.right
-                && b.getHeight() >= crop.bottom) {
-            int w = Math.min(crop.width(), b.getWidth() - crop.left);
-            int h = Math.min(crop.height(), b.getHeight() - crop.top);
-            out = Bitmap.createBitmap(b, crop.left, crop.top, w, h);
-            HookUtils.log("lasso: crop applied locally "
-                    + b.getWidth() + "x" + b.getHeight() + " -> " + w + "x" + h);
+        Bitmap src = b;
+        if (src.getConfig() == Bitmap.Config.HARDWARE) {
+            src = src.copy(Bitmap.Config.ARGB_8888, false);
         }
-        if (out.getConfig() == Bitmap.Config.HARDWARE) {
-            out = out.copy(Bitmap.Config.ARGB_8888, false);
+        if (src.getWidth() == crop.width() && src.getHeight() == crop.height()) {
+            return src;
         }
+        int left = Math.max(0, Math.min(crop.left, src.getWidth() - 1));
+        int top = Math.max(0, Math.min(crop.top, src.getHeight() - 1));
+        int right = Math.max(left + 1, Math.min(crop.right, src.getWidth()));
+        int bottom = Math.max(top + 1, Math.min(crop.bottom, src.getHeight()));
+        int w = right - left;
+        int h = bottom - top;
+        Bitmap out = Bitmap.createBitmap(src, left, top, w, h);
+        HookUtils.log("lasso: crop applied locally "
+                + src.getWidth() + "x" + src.getHeight() + " -> " + w + "x" + h
+                + " at (" + left + "," + top + ")");
         return out;
     }
 
@@ -256,14 +316,9 @@ final class LassoSelectOverlay {
                 cs instanceof android.graphics.ColorSpace
                         ? (android.graphics.ColorSpace) cs : null);
         if (hw == null) throw new IllegalStateException("wrapHardwareBuffer null");
-        int w = Math.min(crop.width(), hw.getWidth());
-        int h = Math.min(crop.height(), hw.getHeight());
         Bitmap soft = hw.copy(Bitmap.Config.ARGB_8888, false);
-        Bitmap out = Bitmap.createBitmap(soft,
-                Math.min(crop.left, hw.getWidth() - 1),
-                Math.min(crop.top, hw.getHeight() - 1), w, h);
         hb.close();
-        return out;
+        return softwareShrink(soft, crop);
     }
 
     /** Token sources, most reliable first; logs which ones fail so the next
@@ -351,6 +406,25 @@ final class LassoSelectOverlay {
         return null;
     }
 
+    /** Downscale a capture so it survives the 1 MiB binder limit when handed to
+     * another process as a Bitmap extra.  Returns the source when it already
+     * fits. */
+    private static Bitmap shrinkForBinder(Bitmap src) {
+        if (src == null) return null;
+        try {
+            final long budget = 700 * 1024;              // bytes, ARGB_8888
+            long bytes = (long) src.getWidth() * src.getHeight() * 4;
+            if (bytes <= budget) return src;
+            float scale = (float) Math.sqrt((double) budget / (double) bytes);
+            int w = Math.max(1, (int) (src.getWidth() * scale));
+            int h = Math.max(1, (int) (src.getHeight() * scale));
+            return Bitmap.createScaledBitmap(src, w, h, true);
+        } catch (Throwable th) {
+            HookUtils.log("lasso: preview downscale failed: " + th);
+            return null;
+        }
+    }
+
     /** Persist the capture (see HookUtils.savePngToGallery for the destination
      * chain).  Returns the content Uri, or null when only a plain file in
      * Pictures/PenBridge could be produced. */
@@ -359,6 +433,110 @@ final class LassoSelectOverlay {
                 + new SimpleDateFormat("yyyyMMdd_HHmmss", Locale.US).format(new Date())
                 + ".png";
         return HookUtils.savePngToGallery(ctx, bmp, name);
+    }
+
+    /**
+     * Hand the capture to ColorOS's own photo-translate activity instead of
+     * showing a share sheet.  Read off this ROM's com.coloros.translate
+     * (2026-09-19): {@code TranslatePhotoResultActivity.j3} parses the intent as
+     * <pre>
+     *   translate_original_photo  Uri      (getParcelableExtra)
+     *   translate_thumbnail_photo Uri      (optional)
+     *   translate_rotation_angle  int      (optional)
+     *   auto_rectify              boolean  (optional)
+     *   preview_bitmap            Bitmap   (via ClipData, optional)
+     * </pre>
+     * and then runs its own OCR + translation, so the user lands directly on the
+     * result page.  The activity asks for {@code com.oplus.permission.safe
+     * .SETTINGS}, which is why this must be started from system_server (uid
+     * 1000 passes component-permission checks) rather than from the module app.
+     *
+     * <p>{@code preview_bitmap} is the channel the OEM's own caller uses: before
+     * looking at the Uris, {@code j3} unwraps {@code getIntent().getClipData() ->
+     * item.getIntent().get("preview_bitmap")}.  Sending only the Uris made the
+     * activity come up with nothing to show and no OCR request at all (black
+     * page, 2026-09-19), so the bitmap goes in too.
+     *
+     * @return true when the result page was launched.
+     */
+    private static boolean openPhotoTranslate(Context ctx, Uri uri, Bitmap region) {
+        try {
+            Intent i = new Intent("coloros.intent.action.TRANSLATION_PHOTO_RESULT_PAGE");
+            i.setClassName("com.coloros.translate",
+                    "com.coloros.translate.photo.TranslatePhotoResultActivity");
+            i.putExtra("translate_original_photo", uri);
+            i.putExtra("translate_thumbnail_photo", uri);
+            i.putExtra("translate_rotation_angle", 0);
+            i.putExtra("auto_rectify", false);
+            Bitmap preview = shrinkForBinder(region);
+            Intent holder = new Intent();
+            if (preview != null) {
+                holder.putExtra("preview_bitmap", preview);
+            }
+            // Put uri into ClipData.Item so FLAG_GRANT_READ_URI_PERMISSION
+            // propagates across process boundaries to com.coloros.translate,
+            // while preserving preview_bitmap in the inner Intent for j3().
+            ClipData.Item item = new ClipData.Item(null, holder, uri);
+            ClipData clip = new ClipData("PenBridge 圈选", new String[]{"image/png"}, item);
+            i.setClipData(clip);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try {
+                ctx.grantUriPermission("com.coloros.translate", uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Throwable th) {
+                HookUtils.log("lasso: grantUriPermission: " + th);
+            }
+            try {
+                // Ensure storage permission is granted to com.coloros.translate if running in system_server
+                android.content.pm.PackageManager pm = ctx.getPackageManager();
+                android.os.UserHandle user = android.os.Process.myUserHandle();
+                java.lang.reflect.Method grant = pm.getClass().getMethod(
+                        "grantRuntimePermission", String.class, String.class, android.os.UserHandle.class);
+                grant.invoke(pm, "com.coloros.translate", "android.permission.READ_MEDIA_IMAGES", user);
+                grant.invoke(pm, "com.coloros.translate", "android.permission.READ_EXTERNAL_STORAGE", user);
+            } catch (Throwable ignored) { }
+            ctx.startActivity(i);
+            HookUtils.log("lasso: handed capture to ColorOS photo-translate " + uri
+                    + (preview == null ? " (no preview bitmap)"
+                       : " preview=" + preview.getWidth() + "x" + preview.getHeight()));
+            return true;
+        } catch (Throwable th) {
+            HookUtils.log("lasso: photo-translate handoff failed: " + th);
+            return false;
+        }
+    }
+
+    private static boolean openOcrScanner(Context ctx, Uri uri, Bitmap region) {
+        try {
+            Intent intent = new Intent(Intent.ACTION_SEND);
+            intent.setType("image/png");
+            intent.setClassName("com.coloros.ocrscanner",
+                    "com.oplus.scanner.ui.main.ShareActivity");
+            intent.putExtra(Intent.EXTRA_STREAM, uri);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK
+                    | Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            try {
+                ctx.grantUriPermission("com.coloros.ocrscanner", uri,
+                        Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            } catch (Throwable th) {
+                HookUtils.log("lasso: grantUriPermission ocrscanner: " + th);
+            }
+            try {
+                android.content.pm.PackageManager pm = ctx.getPackageManager();
+                android.os.UserHandle user = android.os.Process.myUserHandle();
+                java.lang.reflect.Method grant = pm.getClass().getMethod(
+                        "grantRuntimePermission", String.class, String.class, android.os.UserHandle.class);
+                grant.invoke(pm, "com.coloros.ocrscanner", "android.permission.READ_MEDIA_IMAGES", user);
+                grant.invoke(pm, "com.coloros.ocrscanner", "android.permission.READ_EXTERNAL_STORAGE", user);
+            } catch (Throwable ignored) { }
+            ctx.startActivity(intent);
+            HookUtils.log("lasso: handed capture to ColorOS OCR scanner " + uri);
+            return true;
+        } catch (Throwable th) {
+            HookUtils.log("lasso: ocrscanner handoff failed: " + th);
+            return false;
+        }
     }
 
     private static void openTranslate(Context ctx, String text) throws Exception {
@@ -372,8 +550,9 @@ final class LassoSelectOverlay {
         Intent share = new Intent(Intent.ACTION_SEND);
         share.setType("text/plain");
         share.putExtra(Intent.EXTRA_TEXT, text);
-        share.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-        ctx.startActivity(Intent.createChooser(share, "圈选翻译"));
+        Intent chooser = Intent.createChooser(share, "圈选翻译");
+        chooser.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        ctx.startActivity(chooser);
     }
 
     private static String summarize(String text) {
