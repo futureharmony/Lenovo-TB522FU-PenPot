@@ -258,7 +258,7 @@
 **状态**：选中 / 互斥 / 重击保持 / 恢复原厂勾回 / 落键 101 与 -1 全部实机通过。
 **遗留**：物理下滑 → 截图动作的端到端（消费端已实现，待用户笔势实测确认）。
 
-## P0.12 书写扩展功能包 + 手势×功能自由组合（v4.3.0–v4.3.4，2026-09-19；UI 链路已实机闭环，物理笔动作待测）
+## P0.12 书写扩展功能包 + 手势×功能自由组合（v4.3.0–v4.3.9，2026-09-19；UI 链路已实机闭环，物理笔动作待测）
 
 **需求**（用户 2026-09-19）：新增「撤销重做 / 手写浮窗便签 / 圈选翻译 / 圈选 OCR / 翻页」，
 并让 **按键（手势槽）和功能项自由组合**。
@@ -274,10 +274,13 @@ code-101，别破坏）：
 
 **自由组合的两层含义**：
 1. 原 3 个 OEM 手势页（下滑/双击/上滑）继续单选绑定 13 个功能中的任意一个（已有能力）。
-2. **新开长按/捏握两个槽**：笔硬件发 0x0c0611/0x0c0619，OEM UI 不暴露。`IpeManagerHooks`
-   在 PencilPanelActivity 的 Dialog 里追加「长按」「捏握」行（tag=`lenovo_panel_extra`
-   防重复注入），点击弹自建 AlertDialog 全选项单选（原厂 0..5 + 101..113），写入
-   `ipe_pencil_wb_click_long_press` / `_squeeze`。消费端 `SystemStylusHooks.extraGestureAction`：
+2. **新开长按/捏握两个槽**（v4.3.5–v4.3.9 重构，用户要求：样式与原厂一致、不用自定义窗口）：
+   弹窗面板「长按」「捏握」为独立行（样式复制上滑卡片：背景/内边距/字号/chevron，
+   tag=`lenovo_panel_extra`，值 TextView tag=`lenovo_extra_value_<type>`）；点击
+   **直接启动系统原生 `PencilGestureSettingActivity`（`click_type=long_press/squeeze`）**，
+   页面内自动注入「书写扩展/系统快捷」双分类，单选样式与原厂一致——不再用自建 AlertDialog。
+   OEM 内部其实支持这两个槽位（页面标题 OEM 自设，如「轻捏笔身」）。
+   写入 `ipe_pencil_wb_click_long_press` / `_squeeze`。消费端 `SystemStylusHooks.extraGestureAction`：
    `>=100` 走 runCustomAction；`1..4` 复用 click() 的承重路由（4→healthservice，1..3→note/screenshot）；
    `0`=关闭；`-1`/`5`=随心圈 collect。
 
@@ -309,10 +312,31 @@ code-101，别破坏）：
 - 同一文件多个 Edit **并行调用会互相覆盖**（丢更新），必须顺序编辑 —— 本次又踩一次（3 个 Edit 并行，
   2 个静默丢失），已全部改为逐个提交。
 - `HandwrittenNoteOverlay.toggle` 复用同一手势做开关（开着时再触发即关闭），防止笔被"锁"在便签层。
+- **弹窗面板行卡片在 RecyclerView 内，禁止对其父容器 addView**（v4.3.5 闪退根因：
+  `ViewHolder.shouldIgnore()` NPE）。v4.3.6+ 方案：把上滑卡片改为 VERTICAL LinearLayout，
+  原内容包成第一个 sub-row，长按/捏握作为同款 sub-row 追加（sub-row 带卡片背景+间隙 margin，
+  视觉上仍是独立行）。幂等：`findViewWithTag("lenovo_panel_extra")` 命中时只刷新值标签。
+- `readGesturePageType` 白名单必须含 `long_press`/`squeeze`（v4.3.8 修），否则长按/捏握页注入静默失败；
+  另有 fallback：从 activity intent 的 `click_type` 读（`gesturePageTypes` map）。
+
+**v4.3.5–v4.3.9 实机验证 + 修复（2026-09-19 下午）**：
+- 用户报障：弹窗点上滑触控条打开的是「原始样式的安卓切换」（自建 AlertDialog），且长按/捏握行文字
+  与上滑行重叠。根因：v4.3.4 的行注入把行 addView 进了 RecyclerView → 闪退 + 位置错乱。
+- v4.3.5：RecyclerView addView → `ViewHolder.shouldIgnore()` NPE 闪退（点击笔设置即崩）。
+- v4.3.6/7：改为卡片纵向堆叠方案（上滑卡片 VERTICAL 化），弹窗渲染正常、无重叠、无闪退；
+  长按/捏握点击改为启动原生 `PencilGestureSettingActivity`（弃用自建 AlertDialog）。
+- v4.3.8：长按页注入静默失败 → `readGesturePageType` 白名单加 `long_press`/`squeeze`
+  + intent fallback。实机：长按页出现书写扩展/系统快捷双分类，选「撤销」→
+  `ipe_pencil_wb_click_long_press=107` 经 system_server 落库，**重启后保留**。
+- v4.3.9：弹窗摘要不刷新 → 幂等早退分支改为刷新 `lenovo_extra_value_<type>` 标签的 TextView。
+  实机：长按→撤销、捏握→通知栏 联动正确。
+- 13:33 的 3 次 FATAL 是 `com.oplus.gesture` 系统应用开机时序问题（凭据加密存储未解锁），
+  与本模块无关。
 
 **待办**：
-- [ ] **物理笔动作验证**（笔重启后未重连，等待重连后测试）：实际触发各手势 → 撤销/重做/翻页/便签/圈选
-- [ ] 长按/捏握面板行 + 对话框绑定落键（重启存续路径）端到端复测
+- [ ] **物理笔动作验证**（笔已重连，弹窗摘要联动正常）：实际触发各手势 → 撤销/重做/翻页/便签/圈选
+- [ ] 长按/捏握物理手势触发 → extraGestureAction 路由复测（bridge=107 已验证重启存续）
+- [ ] 捏握行摘要显示「通知栏」为历史遗留值（旧对话框写入 102），如需可重置
 - [ ] Ctrl+Z 在便签 doodle 引擎是否生效待测（不生效则改 hook note 应用内部 undo）
 - [ ] DeepThinker / ROM OCR 服务探测 → 接入 `LassoSelectOverlay.tryRecognize`
 - [ ] 手写便签的压感宽度、防误触（palm rejection）体验调优

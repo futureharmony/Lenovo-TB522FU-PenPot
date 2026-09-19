@@ -1776,6 +1776,17 @@ final class IpeManagerHooks {
                         // onResume (which re-checks the stock radio rows).
                         final android.app.Activity activity =
                                 (android.app.Activity) hook.thisObject;
+                        String t0;
+                        synchronized (gesturePageTypes) {
+                            t0 = gesturePageTypes.get(hook.thisObject);
+                        }
+                        // The OEM supplies titles only for its own three slots;
+                        // give the extra slots a native-looking title.
+                        if ("long_press".equals(t0)) {
+                            activity.setTitle("长按手势");
+                        } else if ("squeeze".equals(t0)) {
+                            activity.setTitle("捏握手势");
+                        }
                         new Handler(Looper.getMainLooper()).post(new Runnable() {
                             @Override public void run() {
                                 configurePenGestureActivity(activity);
@@ -1855,7 +1866,7 @@ final class IpeManagerHooks {
                             if (!(ctxObj instanceof android.content.Context)) return;
                             android.content.Context ctx = (android.content.Context) ctxObj;
                             for (String t : new String[]{"single_click", "double_click",
-                                    "long_click_v2"}) {
+                                    "long_click_v2", "long_press", "squeeze"}) {
                                 // See the reset row: -1 == unset on this ROM.
                                 persistGestureKey(ctx, gestureWbKey(t), -1);
                             }
@@ -2003,68 +2014,218 @@ final class IpeManagerHooks {
                 }
             }
             if (allowExtraRows && !rows.isEmpty()) {
-                addExtraPanelRows(ctx, rows.get(0));
+                int lastIdx = 0;
+                for (int i = 1; i < rows.size(); i++) {
+                    if (centerY(rows.get(i)) > centerY(rows.get(lastIdx))) lastIdx = i;
+                }
+                addExtraPanelRows(ctx, rows.get(lastIdx));
             }
         } catch (Throwable th) {
             HookUtils.log("panel assignments walk: " + th);
         }
     }
 
-    /** Add 长按 / 捏握 rows to the panel card (the OEM UI only exposes three
+    /** Add 长按 / 捏握 slots to the panel card (the OEM UI only exposes three
      * gesture slots; the pen also emits 0x0c0611 long-press and 0x0c0619
-     * squeeze).  The rows are styled by copying the first OEM row, and each
-     * opens our own single-choice dialog over the FULL option set (stock 0..5
-     * plus every bridge code), so gestures and functions combine freely. */
-    private static void addExtraPanelRows(Context ctx, android.view.ViewGroup refRow) {
+     * squeeze).  Constraints discovered on-device:
+     *  - The panel rows are adapter-backed RecyclerView children.  addView on
+     *    the RecyclerView crashes the process (ViewHolder.shouldIgnore NPE).
+     *  - Adding rows INSIDE a row card overlaps its content (v4.3.4 garble).
+     * So: convert the LAST gesture row card (上滑触控条) into a vertical
+     * stack -- its original content becomes the first sub-row, then our two
+     * sub-rows follow, each styled exactly like the stock card (same
+     * background / padding / height, separated by the stock card gap). */
+    private static void addExtraPanelRows(Context ctx, android.view.ViewGroup refInner) {
         try {
-            if (refRow.findViewWithTag("lenovo_panel_extra") != null) return;
-            android.view.ViewGroup list = (refRow.getParent()
-                    instanceof android.view.ViewGroup)
-                    ? (android.view.ViewGroup) refRow.getParent() : null;
-            if (list == null) return;
+            // Locate the row card: climb from the title's inner layout up to
+            // the ancestor that has SIBLING children containing gesture
+            // titles (i.e. the card sits among the other row cards).
+            android.view.ViewGroup card = refInner;
+            while (true) {
+                android.view.ViewParent p = card.getParent();
+                if (!(p instanceof android.view.ViewGroup)) return;
+                android.view.ViewGroup parent = (android.view.ViewGroup) p;
+                boolean siblingHasTitle = false;
+                for (int i = 0; i < parent.getChildCount(); i++) {
+                    android.view.View c = parent.getChildAt(i);
+                    if (c != card && subtreeHasGestureTitle(c)) {
+                        siblingHasTitle = true;
+                        break;
+                    }
+                }
+                if (siblingHasTitle) break;   // card is the row card
+                card = parent;
+            }
+            android.view.View extra = card.findViewWithTag("lenovo_panel_extra");
+            if (extra != null) {
+                // Already injected: refresh the summary labels from the bridge
+                // keys, the gesture page may have changed the binding since.
+                for (String t : new String[]{"long_press", "squeeze"}) {
+                    android.view.View vt = card.findViewWithTag(
+                            "lenovo_extra_value_" + t);
+                    if (vt instanceof android.widget.TextView) {
+                        ((android.widget.TextView) vt).setText(
+                                extraGestureLabel(ctx, t));
+                    }
+                }
+                return;
+            }
+            if (!(card instanceof android.widget.LinearLayout)) return;
+            android.widget.LinearLayout rowCard = (android.widget.LinearLayout) card;
+            if (rowCard.getOrientation() != android.widget.LinearLayout.HORIZONTAL) return;
+
+            // Style snapshot BEFORE mutating the card.
+            android.graphics.drawable.Drawable cardBg = rowCard.getBackground();
+            int padL = rowCard.getPaddingLeft(), padT = rowCard.getPaddingTop();
+            int padR = rowCard.getPaddingRight(), padB = rowCard.getPaddingBottom();
+            int cardHeight = rowCard.getHeight();
+            int gap = estimateRowGap(rowCard);
+
+            // Style sources: stock title / assignment / chevron inside the card.
             android.widget.TextView srcTitle = null, srcAssign = null;
-            for (int i = 0; i < refRow.getChildCount(); i++) {
-                android.view.View c = refRow.getChildAt(i);
-                if (!(c instanceof android.widget.TextView)) continue;
-                if (titleToGestureType(String.valueOf(((android.widget.TextView) c).getText()))
-                        != null) {
-                    srcTitle = (android.widget.TextView) c;
-                } else {
-                    srcAssign = (android.widget.TextView) c;
+            android.widget.ImageView srcChevron = null;
+            java.util.ArrayDeque<android.view.View> stack = new java.util.ArrayDeque<>();
+            stack.push(rowCard);
+            while (!stack.isEmpty()) {
+                android.view.View v = stack.pop();
+                if (v instanceof android.view.ViewGroup) {
+                    android.view.ViewGroup g = (android.view.ViewGroup) v;
+                    for (int i = 0; i < g.getChildCount(); i++) stack.push(g.getChildAt(i));
+                }
+                if (v instanceof android.widget.TextView) {
+                    android.widget.TextView tv = (android.widget.TextView) v;
+                    if ("assignment".equals(idName(tv))) {
+                        if (srcAssign == null) srcAssign = tv;
+                    } else if (srcTitle == null && titleToGestureType(
+                            String.valueOf(tv.getText())) != null) {
+                        srcTitle = tv;
+                    }
+                } else if (srcChevron == null && v instanceof android.widget.ImageView
+                        && "coui_preference_widget_jump".equals(idName(v))) {
+                    srcChevron = (android.widget.ImageView) v;
                 }
             }
             if (srcTitle == null) return;
-            int index = list.indexOfChild(refRow);
+
+            // 1) Wrap the original card content as the first vertical sub-row.
+            java.util.List<android.view.View> kids = new java.util.ArrayList<>();
+            for (int i = 0; i < rowCard.getChildCount(); i++) kids.add(rowCard.getChildAt(i));
+            android.widget.LinearLayout origRow = newSubRow(ctx, cardBg,
+                    padL, padT, padR, padB, cardHeight);
+            rowCard.setOrientation(android.widget.LinearLayout.VERTICAL);
+            rowCard.setBackground(null);
+            rowCard.setPadding(0, 0, 0, 0);
+            for (android.view.View v : kids) {
+                rowCard.removeView(v);
+                origRow.addView(v);
+            }
+            rowCard.addView(origRow, 0);
+
+            // 2) Append 长按 / 捏握 sub-rows, same card look, with the stock
+            //    inter-card gap as their top margin.
             for (final String gestureType : new String[]{"long_press", "squeeze"}) {
-                android.widget.LinearLayout row = new android.widget.LinearLayout(ctx);
-                row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
-                row.setTag("lenovo_panel_extra");
-                row.setLayoutParams(refRow.getLayoutParams());
-                if (refRow.getBackground() != null) row.setBackground(refRow.getBackground());
-                row.setPadding(refRow.getPaddingLeft(), refRow.getPaddingTop(),
-                        refRow.getPaddingRight(), refRow.getPaddingBottom());
+                android.widget.LinearLayout row = newSubRow(ctx, cardBg,
+                        padL, padT, padR, padB, cardHeight);
+                android.widget.LinearLayout.LayoutParams rlp =
+                        new android.widget.LinearLayout.LayoutParams(
+                                android.view.ViewGroup.LayoutParams.MATCH_PARENT,
+                                android.view.ViewGroup.LayoutParams.WRAP_CONTENT);
+                rlp.topMargin = gap;
+                row.setLayoutParams(rlp);
 
                 android.widget.TextView title = new android.widget.TextView(ctx);
-                title.setText("long_press".equals(gestureType) ? "长按" : "捏握");
                 copyTextStyle(title, srcTitle);
+                title.setText("long_press".equals(gestureType) ? "长按" : "捏握");
+                row.addView(title, new android.widget.LinearLayout.LayoutParams(0,
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
                 android.widget.TextView value = new android.widget.TextView(ctx);
                 copyTextStyle(value, srcAssign != null ? srcAssign : srcTitle);
                 value.setText(extraGestureLabel(ctx, gestureType));
+                value.setTag("lenovo_extra_value_" + gestureType);
+                value.setGravity(android.view.Gravity.END
+                        | android.view.Gravity.CENTER_VERTICAL);
+                row.addView(value, new android.widget.LinearLayout.LayoutParams(
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                        android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
 
-                row.addView(title);
-                row.addView(value);
+                if (srcChevron != null && srcChevron.getDrawable() != null) {
+                    android.widget.ImageView chevron = new android.widget.ImageView(ctx);
+                    chevron.setImageDrawable(srcChevron.getDrawable());
+                    chevron.setPadding(srcChevron.getPaddingLeft(),
+                            srcChevron.getPaddingTop(), srcChevron.getPaddingRight(),
+                            srcChevron.getPaddingBottom());
+                    row.addView(chevron, new android.widget.LinearLayout.LayoutParams(
+                            srcChevron.getWidth() > 0 ? srcChevron.getWidth()
+                                    : android.view.ViewGroup.LayoutParams.WRAP_CONTENT,
+                            android.view.ViewGroup.LayoutParams.WRAP_CONTENT));
+                }
+
+                final android.widget.TextView valueRef = value;
                 row.setOnClickListener(new android.view.View.OnClickListener() {
                     @Override public void onClick(android.view.View v) {
-                        showExtraGestureDialog(ctx, gestureType, value);
+                        showExtraGestureDialog(ctx, gestureType, valueRef);
                     }
                 });
-                list.addView(row, ++index < list.getChildCount() ? index
-                        : list.getChildCount());
+                rowCard.addView(row);
             }
-            HookUtils.log("panel extra rows: long_press/squeeze added");
+            HookUtils.log("panel extra rows: long_press/squeeze stacked under 上滑 card");
         } catch (Throwable th) {
             HookUtils.log("panel extra rows: " + th);
         }
+    }
+
+    private static android.widget.LinearLayout newSubRow(Context ctx,
+            android.graphics.drawable.Drawable bg, int pl, int pt, int pr, int pb,
+            int minHeight) {
+        android.widget.LinearLayout row = new android.widget.LinearLayout(ctx);
+        row.setOrientation(android.widget.LinearLayout.HORIZONTAL);
+        row.setGravity(android.view.Gravity.CENTER_VERTICAL);
+        if (bg != null) row.setBackground(bg);
+        row.setPadding(pl, pt, pr, pb);
+        if (minHeight > 0) row.setMinimumHeight(minHeight);
+        return row;
+    }
+
+    /** Gap between neighbouring row cards in the shared list (fallback: the
+     * card's own top margin, else 8px). */
+    private static int estimateRowGap(android.view.ViewGroup card) {
+        try {
+            android.view.ViewParent p = card.getParent();
+            if (p instanceof android.view.ViewGroup) {
+                android.view.ViewGroup list = (android.view.ViewGroup) p;
+                int prevBottom = -1, best = -1;
+                for (int i = 0; i < list.getChildCount(); i++) {
+                    android.view.View c = list.getChildAt(i);
+                    if (prevBottom >= 0) {
+                        int gap = c.getTop() - prevBottom;
+                        if (gap > 0 && (best < 0 || gap < best)) best = gap;
+                    }
+                    prevBottom = c.getBottom();
+                }
+                if (best > 0) return best;
+            }
+            android.view.ViewGroup.LayoutParams lp = card.getLayoutParams();
+            if (lp instanceof android.view.ViewGroup.MarginLayoutParams) {
+                return ((android.view.ViewGroup.MarginLayoutParams) lp).topMargin;
+            }
+        } catch (Throwable ignore) { }
+        return 8;
+    }
+
+    /** True if any descendant TextView of v maps to a stock gesture title. */
+    private static boolean subtreeHasGestureTitle(android.view.View v) {
+        if (v instanceof android.widget.TextView) {
+            return titleToGestureType(
+                    String.valueOf(((android.widget.TextView) v).getText())) != null;
+        }
+        if (v instanceof android.view.ViewGroup) {
+            android.view.ViewGroup g = (android.view.ViewGroup) v;
+            for (int i = 0; i < g.getChildCount(); i++) {
+                if (subtreeHasGestureTitle(g.getChildAt(i))) return true;
+            }
+        }
+        return false;
     }
 
     private static void copyTextStyle(android.widget.TextView dst,
@@ -2072,11 +2233,11 @@ final class IpeManagerHooks {
         dst.setTextSize(android.util.TypedValue.COMPLEX_UNIT_PX, src.getTextSize());
         dst.setTextColor(src.getCurrentTextColor());
         dst.setTypeface(src.getTypeface());
-        dst.setGravity(src.getGravity());
         dst.setPadding(src.getPaddingLeft(), src.getPaddingTop(),
                 src.getPaddingRight(), src.getPaddingBottom());
-        android.view.ViewGroup.LayoutParams lp = src.getLayoutParams();
-        if (lp != null) dst.setLayoutParams(lp);
+        // NOTE: deliberately NOT copying LayoutParams -- the source views live
+        // inside the OEM's RelativeLayout row internals and a wrong-parent LP
+        // either throws or misplaces the view.
     }
 
     /** Human label for the current long/squeeze binding. */
@@ -2091,50 +2252,30 @@ final class IpeManagerHooks {
                 : v == 3 ? "显示颜色盘" : "手写笔轮盘";
     }
 
-    /** Free-binding dialog for the long/squeeze slots: every stock action
-     * (0..5) and every bridge action (101..113) is selectable. */
+    /** Binding entry for the long/squeeze slots.  Per user requirement (style
+     * parity, no custom windows) this does NOT show our own AlertDialog any
+     * more: it launches the STOCK PencilGestureSettingActivity with
+     * click_type=long_press/squeeze.  That page already hosts our injected
+     * 书写扩展/系统快捷 categories, and the stock fragment renders the stock
+     * options natively; selections land in the same bridge keys via the
+     * onPreferenceChange hook.  The trailing value TextView is refreshed by
+     * fixPanelAssignments when the panel resumes. */
     private static void showExtraGestureDialog(Context ctx, final String type,
             final android.widget.TextView valueView) {
         try {
-            final String[] stockNames = {"关闭", "当前工具与橡皮擦切换", "最近工具切换",
-                    "显示颜色盘", "手写笔轮盘", "随心圈"};
-            String[] items = new String[stockNames.length + GESTURE_CUSTOM_CODES.length];
-            for (int i = 0; i < stockNames.length; i++) items[i] = stockNames[i];
-            for (int i = 0; i < GESTURE_CUSTOM_CODES.length; i++) {
-                items[stockNames.length + i] = GESTURE_CUSTOM_LABELS[i];
+            android.content.Intent i = new android.content.Intent();
+            i.setClassName("com.oplus.ipemanager", GESTURE_ACTIVITY_CLASS);
+            i.putExtra("click_type", type);
+            android.app.Activity act = activityOf(ctx);
+            if (act != null) {
+                act.startActivity(i);
+            } else {
+                i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                ctx.startActivity(i);
             }
-            final int cur = Settings.Global.getInt(ctx.getContentResolver(),
-                    gestureWbKey(type), -1);
-            int checked = -1;
-            if (cur >= 100) {
-                checked = stockNames.length + (cur - 101);
-            } else if (cur >= 0 && cur <= 5) {
-                checked = cur;
-            } else if (cur == -1) {
-                checked = 5;   // unset long/squeeze defaults to 随心圈 collect
-            }
-            android.app.AlertDialog dlg = new android.app.AlertDialog.Builder(ctx)
-                    .setTitle("long_press".equals(type) ? "长按手势功能" : "捏握手势功能")
-                    .setSingleChoiceItems(items, checked,
-                            new android.content.DialogInterface.OnClickListener() {
-                                @Override public void onClick(android.content.DialogInterface d,
-                                        int which) {
-                                    int value = which < 6 ? which
-                                            : 101 + (which - 6);
-                                    persistGestureKey(ctx, gestureWbKey(type), value);
-                                    if (valueView != null) {
-                                        valueView.setText(which < 6 ? stockNames[which]
-                                                : GESTURE_CUSTOM_LABELS[which - 6]);
-                                    }
-                                    HookUtils.log("panel extra " + type + " -> " + value);
-                                    d.dismiss();
-                                }
-                            })
-                    .setNegativeButton("取消", null)
-                    .create();
-            dlg.show();
+            HookUtils.log("panel extra " + type + " -> native gesture page");
         } catch (Throwable th) {
-            HookUtils.log("panel extra dialog: " + th);
+            HookUtils.log("panel extra launch: " + th);
         }
     }
 
@@ -2216,7 +2357,9 @@ final class IpeManagerHooks {
                     fl.setAccessible(true);
                     Object v = fl.get(fragment);
                     if (v instanceof String && ("single_click".equals(v)
-                            || "double_click".equals(v) || "long_click_v2".equals(v))) {
+                            || "double_click".equals(v) || "long_click_v2".equals(v)
+                            // Extra slots launched by us from the popup panel.
+                            || "long_press".equals(v) || "squeeze".equals(v))) {
                         return (String) v;
                     }
                 }
@@ -2229,8 +2372,18 @@ final class IpeManagerHooks {
     private static void configurePenGestureCustomRows(final android.app.Activity activity,
             final Object fragment) {
         try {
-            final String type = readGesturePageType(fragment);
-            if (type == null) return;
+            String type0 = readGesturePageType(fragment);
+            if (type0 == null) {
+                // Fallback: the activity intent carries click_type for the
+                // extra slots (long_press/squeeze) we launch ourselves; the
+                // OEM fragment field may be absent or non-standard there.
+                synchronized (gesturePageTypes) {
+                    type0 = gesturePageTypes.get(activity);
+                }
+                HookUtils.log("gesture page type fallback from intent: " + type0);
+            }
+            if (type0 == null) return;
+            final String type = type0;
             final Context context = activity;
             Object screen = fragment.getClass()
                     .getMethod("getPreferenceScreen").invoke(fragment);
