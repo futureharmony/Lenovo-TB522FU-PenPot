@@ -104,7 +104,7 @@ final class LassoSelectOverlay {
         new Thread(new Runnable() {
             @Override public void run() {
                 try {
-                    Bitmap region = captureRegion(crop);
+                    Bitmap region = captureRegion(ctx, crop);
                     if (region == null) {
                         toast(ctx, "区域截图失败（ScreenCapture 不可用）");
                         return;
@@ -172,9 +172,52 @@ final class LassoSelectOverlay {
 
     /** Crop the display.  Reflection chain because ScreenCapture /
      * DisplayCaptureArgs are @hide system APIs not in the public jar. */
-    private static Bitmap captureRegion(Rect crop) throws Exception {
-        Object token = displayToken();
-        if (token == null) throw new IllegalStateException("no display token");
+    private static Bitmap captureRegion(Context ctx, Rect crop) throws Exception {
+        // Token chain: on this ROM (Android 16) SurfaceControl's static token
+        // getters return null even inside system_server (user report
+        // 2026-09-19 "no display token"), so try the @hide alternatives
+        // before giving up.  Every failure is logged for the next probe.
+        Object token = displayToken(ctx);
+        if (token != null) {
+            try {
+                return captureWithArgs(token, crop);
+            } catch (Throwable th) {
+                HookUtils.log("lasso capture token path failed: " + th);
+            }
+        } else {
+            HookUtils.log("lasso: all display token sources failed");
+        }
+        // Last resort: captureDisplayEx(displayId, args) resolves the token
+        // inside SurfaceFlinger, so the caller never needs one.  Builder
+        // formally takes a token; pass null and hope the ctor tolerates it
+        // (a no-arg ctor would be preferred but does not exist in AOSP).
+        try {
+            Class<?> argsCls = Class.forName("android.window.DisplayCaptureArgs");
+            Class<?> builderCls = Class.forName("android.window.DisplayCaptureArgs$Builder");
+            Object builder;
+            try {
+                builder = builderCls.getConstructor(android.os.IBinder.class)
+                        .newInstance(new Object[]{null});
+            } catch (Throwable nullTok) {
+                builder = builderCls.getDeclaredConstructor().newInstance();
+            }
+            try {
+                builderCls.getMethod("setSourceCrop", Rect.class).invoke(builder, crop);
+            } catch (Throwable nosrc) {
+                HookUtils.log("lasso: setSourceCrop missing, full-screen capture");
+            }
+            Object args = builderCls.getMethod("build").invoke(builder);
+            Class<?> capCls = Class.forName("android.window.ScreenCapture");
+            Object buf = capCls.getMethod("captureDisplayEx", Integer.TYPE, argsCls)
+                    .invoke(null, android.view.Display.DEFAULT_DISPLAY, args);
+            return bitmapFromCapture(buf, crop);
+        } catch (Throwable th) {
+            throw new IllegalStateException(
+                    "display capture unavailable (token=" + token + "): " + th);
+        }
+    }
+
+    private static Bitmap captureWithArgs(Object token, Rect crop) throws Exception {
         Class<?> argsCls = Class.forName("android.window.DisplayCaptureArgs");
         Class<?> builderCls = Class.forName("android.window.DisplayCaptureArgs$Builder");
         Object builder = builderCls.getConstructor(android.os.IBinder.class)
@@ -191,6 +234,10 @@ final class LassoSelectOverlay {
         Object args = builderCls.getMethod("build").invoke(builder);
         Class<?> capCls = Class.forName("android.window.ScreenCapture");
         Object buf = capCls.getMethod("captureDisplay", argsCls).invoke(null, args);
+        return bitmapFromCapture(buf, crop);
+    }
+
+    private static Bitmap bitmapFromCapture(Object buf, Rect crop) throws Exception {
         HardwareBuffer hb = (HardwareBuffer) buf.getClass()
                 .getMethod("getHardwareBuffer").invoke(buf);
         Object cs = buf.getClass().getMethod("getColorSpace").invoke(buf);
@@ -208,19 +255,53 @@ final class LassoSelectOverlay {
         return out;
     }
 
-    private static Object displayToken() throws Exception {
-        Class<?> sc = Class.forName("android.view.SurfaceControl");
+    /** Token sources, most reliable first; logs which ones fail so the next
+     * iteration can drop dead entries. */
+    private static Object displayToken(Context ctx) {
+        // 1) The classic SurfaceControl statics.
         try {
+            Class<?> sc = Class.forName("android.view.SurfaceControl");
             Object t = sc.getMethod("getInternalDisplayToken").invoke(null);
             if (t != null) return t;
-        } catch (Throwable ignored) { }
+            HookUtils.log("lasso token: getInternalDisplayToken=null");
+        } catch (Throwable th) {
+            HookUtils.log("lasso token: getInternalDisplayToken: " + th);
+        }
         try {
+            Class<?> sc = Class.forName("android.view.SurfaceControl");
             long[] ids = (long[]) sc.getMethod("getPhysicalDisplayIds").invoke(null);
             if (ids != null && ids.length > 0) {
-                return sc.getMethod("getPhysicalDisplayToken", Long.TYPE)
+                Object t = sc.getMethod("getPhysicalDisplayToken", Long.TYPE)
                         .invoke(null, ids[0]);
+                if (t != null) return t;
+                HookUtils.log("lasso token: getPhysicalDisplayToken=null");
             }
-        } catch (Throwable ignored) { }
+        } catch (Throwable th) {
+            HookUtils.log("lasso token: getPhysicalDisplayToken: " + th);
+        }
+        // 2) @hide Display#getAddress() -- the token of the default Display.
+        try {
+            Object wm = ctx.getSystemService(Context.WINDOW_SERVICE);
+            Object disp = wm.getClass().getMethod("getDefaultDisplay").invoke(wm);
+            Object t = disp.getClass().getMethod("getAddress").invoke(disp);
+            if (t != null) return t;
+            HookUtils.log("lasso token: Display.getAddress=null");
+        } catch (Throwable th) {
+            HookUtils.log("lasso token: Display.getAddress: " + th);
+        }
+        // 3) @hide DisplayControl (system_server-only helper used by SystemUI).
+        try {
+            Class<?> dc = Class.forName("android.view.DisplayControl");
+            long[] ids = (long[]) dc.getMethod("getPhysicalDisplayIds").invoke(null);
+            if (ids != null && ids.length > 0) {
+                Object t = dc.getMethod("getPhysicalDisplayToken", Long.TYPE)
+                        .invoke(null, ids[0]);
+                if (t != null) return t;
+                HookUtils.log("lasso token: DisplayControl token=null");
+            }
+        } catch (Throwable th) {
+            HookUtils.log("lasso token: DisplayControl: " + th);
+        }
         return null;
     }
 

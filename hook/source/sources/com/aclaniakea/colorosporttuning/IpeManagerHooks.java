@@ -1776,9 +1776,17 @@ final class IpeManagerHooks {
                         // onResume (which re-checks the stock radio rows).
                         final android.app.Activity activity =
                                 (android.app.Activity) hook.thisObject;
-                        String t0;
+                        // Refresh from the CURRENT intent on every resume: a
+                        // reused activity instance (onNewIntent, no onCreate)
+                        // must not keep the previous slot's type, or the page
+                        // injects bridge rows bound to the wrong gesture.
+                        String t0 = null;
+                        try {
+                            android.content.Intent cur = activity.getIntent();
+                            if (cur != null) t0 = cur.getStringExtra("click_type");
+                        } catch (Throwable ignored) { }
                         synchronized (gesturePageTypes) {
-                            t0 = gesturePageTypes.get(hook.thisObject);
+                            gesturePageTypes.put(hook.thisObject, t0);
                         }
                         // The OEM supplies titles only for its own three slots;
                         // give the extra slots a native-looking title.
@@ -2074,10 +2082,43 @@ final class IpeManagerHooks {
             android.widget.LinearLayout rowCard = (android.widget.LinearLayout) card;
             if (rowCard.getOrientation() != android.widget.LinearLayout.HORIZONTAL) return;
 
-            // Style snapshot BEFORE mutating the card.
-            android.graphics.drawable.Drawable cardBg = rowCard.getBackground();
-            int padL = rowCard.getPaddingLeft(), padT = rowCard.getPaddingTop();
-            int padR = rowCard.getPaddingRight(), padB = rowCard.getPaddingBottom();
+            // Style snapshot BEFORE mutating the card.  The light-gray rounded
+            // layer is NOT always on the row card itself: some builds draw it
+            // on the item wrapper above (2026-09-19: injected rows came out
+            // transparent).  Climb to the first ancestor that owns a
+            // background drawable and copy bg + padding from it, stopping at
+            // the list container so the window background is never picked up.
+            android.view.ViewGroup bgOwner = rowCard;
+            if (bgOwner.getBackground() == null) {
+                android.view.ViewGroup cur = rowCard;
+                while (true) {
+                    android.view.ViewParent p = cur.getParent();
+                    if (!(p instanceof android.view.ViewGroup)) break;
+                    android.view.ViewGroup up = (android.view.ViewGroup) p;
+                    if (up.getClass().getName().contains("RecyclerView")) break;
+                    cur = up;
+                    if (up.getBackground() != null) { bgOwner = up; break; }
+                }
+            }
+            android.graphics.drawable.Drawable cardBg = bgOwner.getBackground();
+            if (cardBg == null) {
+                // Nothing owns a background (likely an ItemDecoration paints
+                // the gray): synthesize a plausible COUI list card instead of
+                // leaving the injected rows transparent.
+                android.graphics.drawable.GradientDrawable synth =
+                        new android.graphics.drawable.GradientDrawable();
+                synth.setColor(0xFFF5F6F7);
+                synth.setCornerRadius(24f);
+                cardBg = synth;
+                HookUtils.log("panel extra rows: no bg owner found, synthesized gray");
+            }
+            int padL = bgOwner.getPaddingLeft(), padT = bgOwner.getPaddingTop();
+            int padR = bgOwner.getPaddingRight(), padB = bgOwner.getPaddingBottom();
+            if (bgOwner != rowCard) {
+                HookUtils.log("panel extra rows: bg owner="
+                        + bgOwner.getClass().getName()
+                        + " bg=" + cardBg.getClass().getName());
+            }
             int cardHeight = rowCard.getHeight();
             int gap = estimateRowGap(rowCard);
 
@@ -2120,6 +2161,21 @@ final class IpeManagerHooks {
                 origRow.addView(v);
             }
             rowCard.addView(origRow, 0);
+
+            // The OEM click listener may live on the card (now the vertical
+            // rowCard) or on one of the original children; after the restack
+            // the user's tap on the stock row must STILL open the stock page
+            // for that row's own slot (2026-09-19: tapping 上滑 opened the
+            // 捏握 page).  A child listener stops the click from bubbling to
+            // the card, making the dispatch deterministic.
+            final android.widget.LinearLayout origRowRef = origRow;
+            origRow.setOnClickListener(new android.view.View.OnClickListener() {
+                @Override public void onClick(android.view.View v) {
+                    String t = gestureTypeOfRow(origRowRef);
+                    showExtraGestureDialog(ctx, t != null ? t : "long_click_v2",
+                            null);
+                }
+            });
 
             // 2) Append 长按 / 捏握 sub-rows, same card look, with the stock
             //    inter-card gap as their top margin.
@@ -2173,6 +2229,30 @@ final class IpeManagerHooks {
         } catch (Throwable th) {
             HookUtils.log("panel extra rows: " + th);
         }
+    }
+
+    /** Resolve the stock slot of a panel row card at CLICK time from its
+     * visible title (下滑触控条/双击触控条/上滑触控条).  The OEM adapter can
+     * rebind recycled item views to another slot, so the currently rendered
+     * title is the source of truth, not whatever the card held at inject
+     * time. */
+    private static String gestureTypeOfRow(android.view.ViewGroup row) {
+        java.util.ArrayDeque<android.view.View> stack = new java.util.ArrayDeque<>();
+        stack.push(row);
+        while (!stack.isEmpty()) {
+            android.view.View v = stack.pop();
+            if (v instanceof android.widget.TextView) {
+                String t = titleToGestureType(String.valueOf(
+                        ((android.widget.TextView) v).getText()));
+                if (t != null) return t;
+            } else if (v instanceof android.view.ViewGroup) {
+                android.view.ViewGroup g = (android.view.ViewGroup) v;
+                for (int i = 0; i < g.getChildCount(); i++) {
+                    stack.push(g.getChildAt(i));
+                }
+            }
+        }
+        return null;
     }
 
     private static android.widget.LinearLayout newSubRow(Context ctx,

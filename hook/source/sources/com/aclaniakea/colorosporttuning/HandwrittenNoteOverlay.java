@@ -62,6 +62,12 @@ final class HandwrittenNoteOverlay {
     private static void show(Context ctx) {
         root = new FrameLayout(ctx);
         root.setBackgroundColor(0xF2FFFFFF);
+        // The window uses FLAG_LAYOUT_IN_SCREEN + Gravity.FILL, so without a
+        // top inset the toolbar is drawn at y=0 BEHIND the status bar (z-order
+        // puts the status bar above TYPE_APPLICATION_OVERLAY) -- 关闭/撤销
+        // were untappable (user report 2026-09-19).  Pad the content below
+        // the status bar instead of resizing the window.
+        root.setPadding(0, statusBarHeight(ctx), 0, 0);
         LinearLayout column = new LinearLayout(ctx);
         column.setOrientation(LinearLayout.VERTICAL);
         root.addView(column, new FrameLayout.LayoutParams(
@@ -155,6 +161,15 @@ final class HandwrittenNoteOverlay {
         lp.gravity = Gravity.FILL;
         wm.addView(root, lp);
         HookUtils.log("note pad shown");
+    }
+
+    private static int statusBarHeight(Context ctx) {
+        try {
+            int id = ctx.getResources().getIdentifier(
+                    "status_bar_height", "dimen", "android");
+            if (id > 0) return ctx.getResources().getDimensionPixelSize(id);
+        } catch (Throwable ignored) { }
+        return 72;
     }
 
     private static TextView barItem(Context ctx, String text) {

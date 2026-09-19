@@ -79,7 +79,7 @@ def _ks_pass() -> str:
 KS_PASS = _ks_pass()
 
 OUT_DIR = Path(os.environ.get("ACL_OUT", str(REPO / "releases")))
-OUT_APK = OUT_DIR / "PenBridge-Hook-tb522fu-v4.3.9.apk"
+OUT_APK = OUT_DIR / "PenBridge-Hook-tb522fu-v4.4.0.apk"
 
 
 def run(cmd: list[str]) -> None:

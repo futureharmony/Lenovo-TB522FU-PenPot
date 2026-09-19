@@ -333,6 +333,23 @@ code-101，别破坏）：
 - 13:33 的 3 次 FATAL 是 `com.oplus.gesture` 系统应用开机时序问题（凭据加密存储未解锁），
   与本模块无关。
 
+**v4.4.0 实测四连修（2026-09-19 14:0x 用户报障）**：
+1. 长按/捏握/上滑堆叠行缺浅灰卡片层 → `addExtraPanelRows` 样式快照改为向上爬到第一个
+   持有背景的祖先（止步 RecyclerView）；全链无背景则合成 `GradientDrawable(0xFFF5F6F7, r=24)`
+   兜底，日志记录 bgOwner。
+2. 点上滑打开的是捏握页（logcat 实证 14:01:09 `panel extra squeeze`）→ 双保险：
+   a) `origRow` 加自有监听，点击时按**可见标题**实时解析槽位（`gestureTypeOfRow`，
+   防适配器复用错位），子视图消费点击阻断冒泡；b) onResume 每次从当前 intent 刷新
+   `gesturePageTypes`（防 activity 复用残留旧槽位）。
+3. 圈选翻译/识别报 "no display token"（Android 16 上 SurfaceControl token 静态方法全返 null，
+   logcat 5 次复现）→ token 链升级：SurfaceControl → @hide `Display.getAddress` →
+   @hide `DisplayControl`；仍失败则 `ScreenCapture.captureDisplayEx(displayId, args)`
+   （token 在 SurfaceFlinger 侧解析），每级失败原因入日志。
+4. 手写便签工具栏被状态栏盖住（`FLAG_LAYOUT_IN_SCREEN`+FILL 全屏，y=0 在状态栏下，
+   关闭/撤销点不到）→ root 顶部按 `status_bar_height` 加 padding。
+- 安装 v4.4.0 后 `killall system_server` 软重启生效（`am crash android` 无效，pid 不变）。
+- **待用户解锁实测**：灰层样式、上滑点击、圈选翻译落图、便签关闭按钮。
+
 **待办**：
 - [ ] **物理笔动作验证**（笔已重连，弹窗摘要联动正常）：实际触发各手势 → 撤销/重做/翻页/便签/圈选
 - [ ] 长按/捏握物理手势触发 → extraGestureAction 路由复测（bridge=107 已验证重启存续）
