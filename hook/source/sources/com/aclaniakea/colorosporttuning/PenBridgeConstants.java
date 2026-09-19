@@ -5,6 +5,12 @@ final class PenBridgeConstants {
     static final String BATTERY = "com.oplus.ipemanager.action.BATTERY_NOTIFY";
     static final String BONDED = "com.oplus.ipemanager.action.PENCIL_BONDED_WHEN_BOOT";
     static final String BUTTON = "com.oplus.ipemanager.action.STYLUS_BUTTON_STATE_CHANGED";
+    /* Full-screen paint canvas undo/redo. system_server -> com.coloros.note;
+       see CanvasPaintHooks for why the key-injection path cannot serve the
+       canvas and why these two never race with it. No _LEGACY twin: sender and
+       receiver ship in the same APK, so there is no mixed-version window. */
+    static final String CANVAS_UNDO = "com.futureharmony.lenovopenbridge.action.CANVAS_UNDO";
+    static final String CANVAS_REDO = "com.futureharmony.lenovopenbridge.action.CANVAS_REDO";
     static final String COLOROS_HANDOFF = "com.futureharmony.lenovopenbridge.action.COLOROS_PEN_STATE";
     static final String COLOROS_HANDOFF_LEGACY = "com.aclaniakea.lenovopenbridge.action.COLOROS_PEN_STATE";
     static final String DISCONNECT = "com.oplus.ipemanager.action.DISCONNECT_PENCIL";

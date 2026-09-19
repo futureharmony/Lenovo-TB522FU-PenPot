@@ -27,11 +27,13 @@ vector-cli 用法、踩坑记录、救援分层）。
 
 ## 安装/回退
 
-- **安装**：`scripts/push_to_device.sh` 推送产物 → 装 Hook APK（root `pm install`）
-  → `vector-cli modules enable` + `scope set`（**1 + 7 项**；system_server 必须用伪包名
+- **安装（推荐一条命令）**：`scripts/deploy_vector.sh` —— 装 Hook APK（root `pm install`，ColorOS 拦 `adb install`）
+  → `vector-cli modules enable` + 按 `scope.list` 重设作用域（**1 + 7 项**；system_server 必须用伪包名
   `system`，写 `android` 会让 hook 永不进 system_server，详见
-  [`docs/install-vector-route.md`](docs/install-vector-route.md) 第 3 节）
-  → `ksud module install` → 重启。
+  [`docs/install-vector-route.md`](docs/install-vector-route.md) 第 3 节）→ `ksud module install` → 重启。
+  脚本装前校验 APK 声明、装后**回读断言** `system/0` 存在；手工分步见同文档第 2 节。
+- **构建（统一入口）**：`python3 build.py`（APK + 模块 zip + md5 + 设备在线时做一次作用域自检），
+  `--push` 顺带推送，`--no-device` 只构建。
 - **inkdye 默认禁用**：模块开机把系统内置笔桥 `com.inkdye.lenovopentocoloros`
   （实际装在 `/system/priv-app/LenovoPenBridge/`）`disable-user`，笔能力由本模块
   （Root 服务 + Hook）接管。想回退到系统内置笔桥：在 KSU/Magisk 管理器「执行」
@@ -82,6 +84,46 @@ tb522fu_pen_bridge`；或 Recovery 里删模块目录。详见
    故 `case "android"` 无误）。改为 `system` 后 system_server 恢复加载，触觉/笔键/磁吸/
    输入门控全部生效。`scope.list` + `arrays.xml` 已同步；`handleLoadPackage` 早退路径
    补 `skip <pkg> (gate=…)` 诊断日志，便于日后定位。
+9. **部署链加固：作用域单一真源 + 幂等自检（2026-09-19，v4.5.5）**：改名（第 8 条的包名迁移）
+   在 Vector 里等于**新建一个模块身份**，作用域回落到空 → 重设时又写成 `android`，
+   全部自定义键（101–113）静默失效（同 P1.5 的坑第二次踩）。根因不在 hook 代码，
+   而在**没有任何一处脚本对设备端 scope 负责**。现改为：
+   - `scripts/pen_release.py`：产物「最新版」按**版本**排序（旧的 `sorted(glob)[-1]` 是字典序，
+     `v4.5.10` 会输给 `v4.5.4`）；作用域从 `hook/source/resources/META-INF/xposed/scope.list`
+     派生，`deploy_vector.sh` / `push_to_device.sh` 不再各写一份（原两者分别硬编码
+     `v4.1.13`、`v4.1.3`，**都是旧包名的 APK**，直接推过去装 = 装了个永远不会被 enable 的包）。
+   - `build.py` 第 4 步：读设备运行时 scope 与 `scope.list` 比对，缺 `system/0` 用 `scope add`
+     补齐、多余项 `scope rm` 清掉，再复读校验；无设备自动跳过。
+   - `deploy_vector.sh`：adb 路径自动解析、APK 版本地板（拒 pre-rename）、安装前校验
+     APK 内声明 scope 含 `system`、`scope set` 后**回读断言**，失败即 fail-fast。
+   - Hook APK 版本收敛到 `build_hook_source.py` 的单个常量 `APK_VERSION`。
+10. **日志查看控制台 + 日志限流（2026-09-19，模块 v0.1.1）**：管理器模块卡片的「操作」按钮
+   （跑 `module/action.sh`）在原有状态摘要之后，**追加最近日志片段**：
+   `pen-bridge.log` 120 行 / `charge-guard.log` 60 行 / `note_engine_guard.log` 60 行 /
+   Hook 日志（logcat tag `LenovoPenBridge`）200 行，末尾给出本次截断说明。
+   直接用管理器原生控制台，**没有引入 WebUI**（该管理器每张卡片只有一个控制台入口，
+   `hasActionScript=` / `hasWebUi=` 是仅有的两个开关）。
+   写入侧同时上双上限（新 `module/bin/penlog.sh`）：**条数上限**（`pen-bridge.log` 400 行、
+   `charge-guard.log` 200 行、`note_engine_guard.log` 200 行）**+ 字节上限** 128 KB，
+   超限**保留最近 N 行**而不是整file清空。
+   ⚠️ `service.sh` 用 `exec >>"$LOGFILE"` 持有 fd，所以裁剪必须**同 inode 就地回写**，
+   不能 `mv`（否则写入会落到已 unlink 的旧 inode）。另：本 ROM 的 logcat **不支持
+   `-t N` 与 `-s TAG` 同用**（静默返回空），Hook 日志用 `-s TAG | tail -n N` 截断。
+   快捷入口：`sh action.sh log`（只看日志段）、`sh action.sh clearlogs`（就地裁到 5 行）。
+11. **画布内 107/108 直达撤销/重做（2026-09-20，v4.6.0）**：全屏涂绘画布对按键**完全惰性** ——
+   `NewPaintActivity`(16 个成员) / `NewPaintFragment`(480 个，`KEY_*` 全是 Intent extra 常量) /
+   `CoverPaintView`(188 个) / `doodleengine.PaintView`(370 个) 声明了 **0 个按键回调**，
+   `PaintView extends FrameLayout` 也不覆写任何 key 方法，所以注入的 `Ctrl+Z` 送到焦点窗口后
+   直接被丢弃；标题栏 ↺ 按钮走的是 `NewPaintFragment.initTitleBar$lambda$63 → PaintView.undo()`。
+   新增 `hook/.../CanvasPaintHooks.java`：system_server 侧在注入按键**之前**额外向
+   `com.coloros.note` 发 `CANVAS_UNDO` / `CANVAS_REDO` 定向广播，便签进程内的接收器把它转成
+   `NewPaintEditPresenter.undo()/redo()`（PUBLIC、零参数、与 ↺ 按钮同一条链路）。
+   **两条路不会同时生效**：命令只在「画布片段 `isAdded() && isResumed()`」时被消费，而
+   `NewPaintFragment` 只被 `com.nearme.note.paint.*` 引用（`MainActivity` / `NoteDetailFragment` /
+   `NoteDetailPaintManager` 完全不引用），该条件因此等价于「全屏画布正在前台」—— 而那正是
+   按键惰性的场合。WebView 编辑器等键盘界面不受影响（无画布 → 命令被忽略 → 仍走按键注入）。
+   **部署状态**：v4.6.0 已于 2026-09-20 部署到 TB522FU（含 Vector scope 回读断言与开机验证），
+   接收侧通道用 root 广播实测通过（1 次广播 = 1 次撤销）；发送侧（实际捏握）待笔实测。详见 `TODO.md` P0.14。
 
 ## TB522FU 新增功能：充电守护（charge-guard.sh v2）
 - **磁吸通知**：沿用 monitor_hall_capsule（已映射到 `och1909/hall3`）。胶囊电量优先取新鲜样本，

@@ -9,10 +9,15 @@ import sys
 import zipfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "scripts"))
+
+from pen_release import latest_hook_apk  # noqa: E402
+
 
 INCLUDE = (
     "README.md",
     "action.sh",
+    "bin/penlog.sh",
     "charge-guard.sh",
     "customize.sh",
     "module.prop",
@@ -28,13 +33,15 @@ INCLUDE = (
 )
 
 def find_latest_hook_apk(repo: Path) -> Path:
-    candidates = sorted(repo.glob("releases/PenBridge-Hook-tb522fu-v*.apk"))
-    if candidates:
-        return candidates[-1]
-    fallback = repo / "releases" / "PenBridge-Hook-tb522fu-v4.5.4.apk"
-    if fallback.is_file():
-        return fallback
-    raise FileNotFoundError("no PenBridge-Hook APK found in releases/")
+    """Newest Hook APK by VERSION order.
+
+    Was `sorted(glob(...))[-1]`, a lexicographic max: it ranks v4.5.4 above
+    v4.5.10, and it will happily embed a pre-rename (com.aclaniakea.*) APK into
+    the module zip, leaving the device with a "deployed" module that is never
+    injected. Kept as a thin wrapper so the ordering rule lives in exactly one
+    place (scripts/pen_release.py).
+    """
+    return latest_hook_apk(repo / "releases")
 
 
 def build(module_dir: Path, output: Path) -> None:

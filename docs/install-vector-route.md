@@ -19,27 +19,42 @@
 
 | 文件 | 说明 |
 |---|---|
-| `releases/tb522fu-pen-bridge-v0.1.0.zip` | KernelSU 模块（含 Hook 副本、PenHidCtl priv-app、charge-guard、panic） |
-| `releases/PenBridge-Hook-tb522fu-v4.1.4.apk` | Xposed 模块本体（com.futureharmony.lenovopenbridge）；v4.1.4 起为**延迟安装**版并镜像日志到 logcat |
-| `releases/PenHidCtl-tb522fu-1.1.0.apk` | HID 控制器（以 priv-app 形式随模块装载） |
+| `releases/tb522fu-pen-bridge-v<版本>.zip` | KernelSU 模块（含 Hook 副本、PenHidCtl priv-app、charge-guard、panic、日志限流 `bin/penlog.sh`）。版本号取 `module/module.prop` 的 `version=`，zip 名由 `build.py` 拼出 |
+| `releases/PenBridge-Hook-tb522fu-v*.apk` | Xposed 模块本体（`com.futureharmony.lenovopenbridge`）；**取最新版别手写版本号** |
+| `releases/PenHidCtl-tb522fu-*.apk` | HID 控制器（以 priv-app 形式随模块装载） |
+
+> 产物版本一律用 `python3 scripts/pen_release.py hook-apk|module-zip|scope|adb` 解析。
+> 手写版本号踩过两次：`deploy_vector.sh` 曾默认 `v4.1.13`、`push_to_device.sh` 曾硬编码 `v4.1.3`
+> —— 两者都是**改名前**的旧包名 APK，推过去装 = 装了个永远不会被 `enable` 的包（见第 6 节 #13）。
 
 ## 2. 部署（全部可脚本化）
 
+**推荐**：一条命令搞定（含装前校验 + 装后回读断言）：
+```sh
+scripts/deploy_vector.sh                 # [SERIAL] [--no-module] [--no-scope] [--no-reboot]
+```
+
+手工分步：
 ```sh
 # 1) 装/更新 Hook APK —— 注意：adb install 会被 ColorOS 拦（Failure [-99]），必须走 root pm
-adb push releases/PenBridge-Hook-tb522fu-v4.1.4.apk /data/local/tmp/PenBridge-Hook.apk
+APK=$(python3 scripts/pen_release.py hook-apk)
+adb push "$APK" /data/local/tmp/PenBridge-Hook.apk
 adb shell su -c 'pm install -r -d /data/local/tmp/PenBridge-Hook.apk'
 
 # 2) 用 vector-cli 启用模块 + 配置作用域（1 + 7 项，全部 user 0）
 #    ⚠️ system_server 用伪包名 `system`，不要写成 `android`（见第 3 节）
+#    ⚠️ 作用域**从 scope.list 派生**，不要手敲——`scope set` 是整表覆盖，漏一项就静默删一项
 CLI=/data/adb/modules/zygisk_vector/cli
+SCOPE=$(python3 scripts/pen_release.py scope)
 adb shell su -c "$CLI modules enable com.futureharmony.lenovopenbridge"
-adb shell su -c "$CLI scope set com.futureharmony.lenovopenbridge \
-  system/0 com.coloros.note/0 com.oplus.exsystemservice/0 \
-  com.heytap.mydevices/0 com.oplus.ipemanager/0 com.oplus.wirelesssettings/0 com.oplus.screenshot/0 com.coloros.translate/0"
+adb shell su -c "$CLI scope set com.futureharmony.lenovopenbridge $SCOPE"
+
+# 2b) 回读断言：缺 system/0 就说明白忙（脚本 version 会自动做，手敲请务必自查）
+adb shell su -c "$CLI scope ls com.futureharmony.lenovopenbridge"   # 应含 system 0
 
 # 3) 刷 Root 模块
-adb push releases/tb522fu-pen-bridge-v0.1.0.zip /data/local/tmp/pen-bridge.zip
+ZIP=$(python3 scripts/pen_release.py module-zip)
+adb push "$ZIP" /data/local/tmp/pen-bridge.zip
 adb shell su -c 'ksud module install /data/local/tmp/pen-bridge.zip'
 
 # 4) 重启
@@ -50,17 +65,22 @@ adb shell su -c reboot
 
 ```sh
 cli status                 # 框架 + 模块数
-cli modules ls             # 列出模块及 enabled/disabled
+cli modules ls             # 列出模块及 enabled/disabled（⚠️ enabled ≠ 已被注入）
 cli modules enable|disable <pkg>
 cli scope ls <pkg>         # 查看作用域
-cli scope set <pkg> a/0 b/0 ...   # 覆盖作用域
+cli scope set <pkg> a/0 b/0 ...   # 覆盖作用域（整表覆盖！）
+cli scope add <pkg> a/0 b/0 ...   # 只追加（**修 scope 用这个，别用 set**）
+cli scope rm  <pkg> a/0 ...       # 只删指定项
+cli --json scope ls <pkg>  # 结构化输出，脚本解析用（避免解析表格）
 cli log cat                # 导出框架日志（含 VectorLegacyBridge 加载记录）
 cli db backup|restore|reset
 ```
 
 ## 3. 作用域（1 + 7 项）
 
-来自 `hook/source/resources/res/values/arrays.xml`（以及 `META-INF/xposed/scope.list`），
+**唯一真源**：`hook/source/resources/META-INF/xposed/scope.list`
+（构建时打进 APK，`res/values/arrays.xml` 为同一份的镜像）。
+运行时表由它派生：`python3 scripts/pen_release.py scope`。
 作用域决定注入哪些进程：
 
 ```
@@ -70,8 +90,8 @@ com.heytap.mydevices          # 「我的设备」卡片
 com.coloros.note              # 笔记工具
 com.oplus.screenshot          # 截图/圈选
 com.oplus.exsystemservice     # 广播/Binder 目标
-com.oplus.healthservice       # 广播/Binder 目标
 com.oplus.wirelesssettings    # 无线设置（充电相关 UI）
+com.coloros.translate         # 圈选翻译（区域端点修正，见 TODO.md P0.13）
 ```
 
 缺哪一项，对应功能静默失效（不报错）。
@@ -80,9 +100,13 @@ com.oplus.wirelesssettings    # 无线设置（充电相关 UI）
 > 框架回调用 `packageName="android"` 回调模块（代码里 `case "android"` 是对的），
 > 但**作用域匹配用的是伪包名 `system`**。写成 `android` 时：模块能进所有应用进程，
 > 唯独**永远不进 system_server**——触觉/笔键/磁吸/输入门控全部静默失效，且日志里
-> 只有应用的 hook 行、没有 `system_server stylus hooks installed`，极易误判为"框架没工作"。
+> 只有应用的 hook 日志、没有 `system_server stylus hooks installed`，极易误判为"框架没工作"。
 > 排查口诀：`grep 'stylus hooks installed'` 为 0 ⟺ system_server 没注入 ⟺ 作用域名写错。
 > 参考：另一个 hook 系统服务的模块 `io.github.artifical0.fcmfix.coloros` 用的也是 `system`。
+>
+> 🔁 **这个坑会因「改包名」复发**（2026-09-19 实机命中第二次）：改名 = Vector 里多一个全新模块身份，
+> 作用域从空开始。所以别依赖"上次已经改对了"——`build.py` 第 4 步与 `deploy_vector.sh` 现在每次都会
+> 回读校验，缺就补、多就删。**改包名后必须重跑部署脚本，不能只 install APK。**
 
 ## 4. 验证清单
 
@@ -145,7 +169,7 @@ adb shell su -c 'ksud module uninstall tb522fu_pen_bridge'
 > 若 hook 导致卡死，须用 `vector-cli modules disable com.futureharmony.lenovopenbridge`
 > 或安全模式处理。**排查卡死时两者要分开停用**。
 
-## 6. 实战踩坑记录（2026-09-18）
+## 6. 实战踩坑记录（2026-09-18 / 09-19）
 
 | # | 现象 | 根因 | 处置 |
 |---|---|---|---|
@@ -161,17 +185,27 @@ adb shell su -c 'ksud module uninstall tb522fu_pen_bridge'
 | 10 | inkdye **"日志说禁了其实没禁"**：日志有 `inkdye disabled by default`，但 `dumpsys` 仍 `enabled=0`、`pm list packages -d` 里没有 | 落地动作写在 `exec >>"$LOGFILE"` **之前**的 service.sh 早期段，此时 **PackageManager 尚未就绪**，`pm disable-user` 静默失败（logcat 有 `Missing permission state for package …`） | 移到 `exec` 之后的后台 `apply_inkdye_state()`：**重试（40×3s）+ 用 `pm list packages -d --user 0` 复核状态**后再打印成功 |
 | 11 | **笔身触控条手势完全不通**（上滑/下滑/双击无反应），日志 0 条 `touch strip` | v4.1.5 的两处判断**都**错。① **设备名**：真正把键事件送进 `PhoneWindowManager` 的节点是 **`Lenovo Tab Pen Pro 2 Mouse`**（`/dev/input/event8`，uhid `0005:17EF:622E.0001`）；兄弟节点 `…Consumer Control`（`event9`）只上报 `EV_MSC/MSC_SCAN + EV_KEY KEY_UNKNOWN`，**从不进按键队列**，不能拿来匹配。② **分派字段**：`getScanCode()` 恒为 **240**（=内核原始 keycode），手势信息在 **`getKeyCode()`**（`131/132/133`）。`dumpsys input` 对 Mouse 节点打印**空** `KeyLayoutFile` 是个假象——它的 `131/132/133` 恰恰来自 `Vendor_17ef_Product_622e.kl` 的 `key usage` 行（`key usage <hid-usage> <key>` 语法 Android **确实支持**，`Generic.kl` 里用了 25 处） | v4.1.8：闸门 `isPen(device) && name.contains("lenovo tab pen")`，分派改 `switch (getKeyCode())`（`stripGestureToNativeKey()`）：`131→767 / 132→768 / 133→769`。**实机验证通过**：4 个手势分别打出 `code=131/132/133 scan=240` → 注入 767/768/769，且注入事件可见（`dev=Virtual code=768 act=0/1`） |
 | 12 | 代码已按 #11 修好、却**依旧 0 条 `touch strip` 日志**，且**所有 app 侧 hook 一切正常**（极易误判成代码 bug） | 用 `vector-cli scope set` 重设作用域时它**整表覆盖**，而 `scripts/deploy_vector.sh` 里的 SCOPE 首项写的是 `android/0`、**漏了 `system/0`**（与 #6 的结论相反）→ 模块**完全不再注入 system_server**。判据：`vector-cli log cat` 里**找不到** system_server 的 `Loading legacy module` 行；`adb logcat -s LenovoPenBridge` 无 `handleLoadPackage pkg=android`、无 `interceptKeyBeforeQueueing hooks`。**日志缓冲区不是元凶**（`/proc/uptime` 仅 ~100s 时 main/system 缓冲仍保有开机首秒的行） | 脚本 SCOPE 首项改回 `system/0`（与本节第 3 节、`scope.list`、`arrays.xml` 对齐）并加注释；重启后 `system_server stylus hooks installed (startOtherServices=1 run=1)` 立即恢复。⚠️ 教训：**部署脚本与文档必须同源**，否则 `scope set` 的静默覆盖会把已修好的能力删掉 |
+| 13 | **改包名后全部自定义键失效**（长按/捏握/书写扩展/系统快捷，功能码 101–113 全灭），设置页里的 `ipe_pencil_wb_click_*` 键值**仍在**；广播探针 `RUN_ACTION cod=999` 连 `debug action refused` 都没有 | **改包名 = Vector 里换了一个全新模块身份**，作用域从空开始，重设时又写成 `android` → 与 #12 同一个坑第二次踩（#6 的结论被改名清零）。`vector-cli modules ls` 显示 `enabled` **不代表已被注入** | ① 现场：`scope add <pkg> system/0` + 重启（别用整表 `set`）；② **根治**：作用域改为从 `scope.list` 单一真源派生，`build.py` 第 4 步 + `deploy_vector.sh` 每次**回读校验** `system/0`，缺则用 `scope add` 补齐、多则 `scope rm`；`push_to_device.sh`/`deploy_vector.sh` 不再硬编码 APK 版本（曾分别是 `v4.1.3`/`v4.1.13`，**都是旧包名**）。详见 TODO.md P1.5 复发一节 |
+| 14 | 推送脚本首次真跑就挂：`scripts/push_to_device.sh: line 39: SERIAL_ARG[@]: unbound variable`，**单台设备不传序列号时 100% 复现**（此前只有手写 `adb` 调用，这条路径从没被跑过所以没暴露） | macOS 自带 **bash 3.2**（`/bin/bash` 与 `env bash` 都是），在 `set -u` 下展开**空数组** `${A[@]}` 会直接 abort。`deploy_vector.sh` 的 `A=("$ADB")` 恒有元素故幸免，`push_to_device.sh` 的 `SERIAL_ARG=()` 是空数组 → 必挂 | 全部改写成 `${SERIAL_ARG[@]+"${SERIAL_ARG[@]}"}` 并在定义处加注释禁止"简化"回去。⚠️ 同类隐患搜法：`grep -nE '\$\{[A-Za-z_]+\[@\]\}' scripts/*.sh`，凡赋值可能为空的数组都要用这个形式 |
 
 ## 7. 构建环境
 
 ```sh
-# hook APK
-python3 hook/tools/build_hook_source.py     # 默认读 keys/tb522fu.jks + keys/tb522fu.pass
-# PenHidCtl
-python3 penhidctl/tools/build_penhid.py
-# 模块 zip
-python3 module/tools/build_root.py module releases/tb522fu-pen-bridge-v0.1.0.zip
+# 统一入口（推荐）：编译 APK → 打包模块 zip → 生成 md5 → 设备在线时做作用域自检
+python3 build.py [--push] [--skip-hook] [--no-device] [--no-scope-fix] [--require-device]
+# --push 只是转调 scripts/push_to_device.sh（推送路径/校验和的单一真源），推到
+# /sdcard/Download/tb522fu-pen-bridge/ 并附带每个产物的 .md5.txt sidecar。
+
+# 分步
+python3 hook/tools/build_hook_source.py     # Hook APK（版本单点常量 APK_VERSION，可用 ACL_VERSION 覆盖）
+python3 penhidctl/tools/build_penhid.py     # PenHidCtl priv-app
+python3 module/tools/build_root.py module releases/tb522fu-pen-bridge-v<版本>.zip   # 内嵌最新 APK
+# 版本号来自 module/module.prop 的 version=，build.py 会自动拼出 zip 名（不要手写死版本）
 ```
+
+相关环境变量（都有默认值）：`ANDROID_SDK`（默认 `/tmp/android-sdk`）、`XPOSED_STUBS`
+（默认 `/tmp/acdb/stubs`）、`ACL_KS`/`ACL_KS_PASS`、`ACL_OUT`、`ACL_VERSION`。⚠️ `/tmp` 会被系统清理，
+工具链（`/tmp/android-sdk`、`/tmp/acdb/stubs`）重建一次才可用。
 
 - 工具链：`/tmp/android-sdk`（build-tools android-15 + platform-35）。
 - 签名：`keys/tb522fu.jks`（gitignored），口令 `keys/tb522fu.pass`。**别再丢**——

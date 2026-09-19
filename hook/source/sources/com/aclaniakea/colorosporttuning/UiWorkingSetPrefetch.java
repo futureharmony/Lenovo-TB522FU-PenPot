@@ -51,6 +51,9 @@ public final class UiWorkingSetPrefetch implements IXposedHookLoadPackage {
             case "com.coloros.note":
                 EglContractShim.ensureLoaded();
                 NoteToolkitHooks.install(loadPackageParam);
+                // The full-screen paint canvas has no key path at all, so 107/108
+                // reach it through a command broadcast instead of Ctrl+Z/Y.
+                CanvasPaintHooks.install(loadPackageParam);
                 break;
             case "com.oplus.screenshot":
                 NoteToolkitHooks.install(loadPackageParam);

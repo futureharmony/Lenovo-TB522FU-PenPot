@@ -205,6 +205,13 @@ public final class StylusActionDispatcher {
             HandwrittenNoteOverlay.performUndo();
             return;
         }
+        // 107 has two consumers and they can never both answer. The full-screen
+        // paint canvas replies to no key event at all (NewPaintActivity,
+        // NewPaintFragment, CoverPaintView and doodleengine.PaintView declare
+        // zero key members), so it is asked directly; every other surface has no
+        // live canvas on screen, ignores the command and keeps the injected key.
+        // See CanvasPaintHooks for the measurements behind that claim.
+        requestCanvasUndo(context, false);
         sendKeyCombination(KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_Z);
     }
 
@@ -213,6 +220,7 @@ public final class StylusActionDispatcher {
             HandwrittenNoteOverlay.performRedo();
             return;
         }
+        requestCanvasUndo(context, true);
         // Send Ctrl+Shift+Z for canvas/drawing apps
         sendKeyCombination(KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_SHIFT_LEFT, KeyEvent.KEYCODE_Z);
         try {
@@ -221,6 +229,40 @@ public final class StylusActionDispatcher {
         }
         // Send Ctrl+Y for office/text apps
         sendKeyCombination(KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_Y);
+    }
+
+    /**
+     * Ask the note process to run the paint canvas's own undo/redo worker
+     * ({@code NewPaintEditPresenter.undo()} - the same call the title-bar button
+     * makes). Fire-and-forget: the note process decides whether a canvas is
+     * actually on screen, so nothing here has to know the foreground activity.
+     *
+     * <p>Delivery is narrowed two ways: {@code setPackage} restricts it to the
+     * note app, and {@code FLAG_RECEIVER_FOREGROUND} keeps the latency inside a
+     * gesture's tolerance. Like {@code SystemStylusHooks.sendAll}, this goes
+     * through {@code sendBroadcastAsUser(..., UserHandle.ALL, ...)} when the
+     * process is permitted to, because a plain {@code sendBroadcast} from
+     * {@code system_server} only reaches the sending user.
+     */
+    private static void requestCanvasUndo(Context context, boolean redo) {
+        if (context == null) {
+            return;
+        }
+        Intent intent = new Intent(redo ? PenBridgeConstants.CANVAS_REDO
+                : PenBridgeConstants.CANVAS_UNDO)
+                .setPackage("com.coloros.note")
+                .addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+        try {
+            try {
+                Class<?> userHandle = Class.forName("android.os.UserHandle");
+                Context.class.getMethod("sendBroadcastAsUser", Intent.class, userHandle, String.class)
+                        .invoke(context, intent, userHandle.getField("ALL").get(null), null);
+            } catch (Throwable unused) {
+                context.sendBroadcast(intent);
+            }
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": canvas " + (redo ? "redo" : "undo") + " request failed: " + th);
+        }
     }
 
     public static void sendKeyCombination(int... keyCodes) {

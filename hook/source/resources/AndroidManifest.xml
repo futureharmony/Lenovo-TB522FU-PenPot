@@ -1,7 +1,14 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  NOTE: do NOT declare android:versionCode / android:versionName here.
+  They are supplied by build_hook_source.py (aapt2 link with the version-code /
+  version-name flags, derived from the single APK_VERSION constant). A value
+  hardcoded in this manifest SILENTLY WINS over those flags: on 2026-09-19 the
+  build produced PenBridge-Hook-tb522fu-v4.5.5.apk whose manifest still said
+  versionCode 450004 / versionName 4.5.4. Two sources of truth, exactly the
+  failure mode that broke the deploy scripts earlier the same day.
+-->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="450004"
-    android:versionName="4.5.4"
     android:compileSdkVersion="36"
     android:compileSdkVersionCodename="16"
     package="com.futureharmony.lenovopenbridge"

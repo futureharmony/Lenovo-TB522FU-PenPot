@@ -23,7 +23,18 @@ MD5_FIXED_16_7_2="db61d1ffdd8c25062920d0a25c697af3"   # 已修 16.7.2（目标�
 MD5_FALLBACK_16_6_14="1b0481baf9badda6734d94ef836ebac1" # 16.6.14（不渲染，但可用）
 MD5_CRASH_16_7_2="42fb5fd53e04368ca42d255579075d96"    # 16.7.2 原版（崩溃）
 
-log() { echo "$(date '+%m-%d %H:%M:%S') [$NOTE_PKG] $*" >> "$LOG"; }
+# 日志上限：/data/local/tmp 同样没有任何轮转，条数上限 200（实现见 bin/penlog.sh）。
+PENLOG_MAX_LINES=200
+if [ -f "$MODDIR/bin/penlog.sh" ]; then
+    . "$MODDIR/bin/penlog.sh"
+fi
+if ! type penlog_trim >/dev/null 2>&1; then
+    penlog_trim() { :; }
+fi
+
+# 保留本脚本原有的 "MM-DD HH:MM:SS [pkg]" 前缀（一直用的格式，不改），
+# 追加后统一做一次限流自检。
+log() { echo "$(date '+%m-%d %H:%M:%S') [$NOTE_PKG] $*" >> "$LOG"; penlog_trim "$LOG"; }
 
 [ -w "$LOG" ] || : > "$LOG"
 log "=== guard start ==="

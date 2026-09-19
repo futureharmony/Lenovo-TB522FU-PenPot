@@ -154,10 +154,27 @@ rm -f "$MODDIR/inkdye-disabled.state" 2>/dev/null
 
 # 本服务把整个输出重定向进日志，模块目录在 /data/adb 下又没有任何外部轮转，
 # 此前是无限追加。开机先滚一次，保留上一轮现场；运行中由下面的
-# trim_log_if_large 兜底。exec >> 用的是 O_APPEND，所以就地截断是安全的：
-# 下一次写入仍从文件末尾（即 0）开始，不会产生空洞文件。
+# trim_log_if_large 兜底 —— 实际裁剪逻辑统一在 bin/penlog.sh（条数 + 字节双上限）。
+# ⚠️ exec >> 用的是 O_APPEND，所以裁剪必须【同 inode 就地回写】，绝不能 mv
+#    （详见 bin/penlog.sh 顶部说明：mv 会把日志写进已 unlink 的旧 inode）。
 LOG_MAX_BYTES=524288
+LOG_MAX_LINES=400
+if [ -f "$MODDIR/bin/penlog.sh" ]; then
+    . "$MODDIR/bin/penlog.sh"
+fi
+# 降级兜底：老版本安装（zip 里还没有 bin/penlog.sh）时至少不要把日志写爆，
+# 退回"超字节上限才整file清空"的旧行为。
+if ! type penlog_trim >/dev/null 2>&1; then
+    penlog_trim() {
+        _sz=$(wc -c <"$1" 2>/dev/null)
+        case "$_sz" in ''|*[!0-9]*) return 0 ;; esac
+        [ "$_sz" -lt "${3:-524288}" ] && return 0
+        : >"$1" 2>/dev/null
+    }
+fi
 if [ -f "$LOGFILE" ]; then
+    # 上一轮日志先裁一遍再留档：长开机（>1 天）时 .1 也不会变成巨型文件。
+    penlog_trim "$LOGFILE" "$LOG_MAX_LINES" "$LOG_MAX_BYTES"
     mv -f "$LOGFILE" "$LOGFILE.1" 2>/dev/null
 fi
 # 上一次服务实例可能被 kill 在胶囊重试循环中间，留下 worker 标记文件；
@@ -165,11 +182,9 @@ fi
 rm -f "$CAPSULE_WORKER_FILE" 2>/dev/null
 
 trim_log_if_large() {
-    size=$(wc -c <"$LOGFILE" 2>/dev/null)
-    case "$size" in ''|*[!0-9]*) return 0 ;; esac
-    [ "$size" -lt "$LOG_MAX_BYTES" ] && return 0
-    : >"$LOGFILE" 2>/dev/null
-    echo "[$(date '+%F %T')] log truncated at ${size}B (cap ${LOG_MAX_BYTES}B)"
+    # 条数（400 行）+ 字节（512 KB）双上限，超限保留最近行而不是整file清空：
+    # 控制台只显示尾部片段，清空等于把现场丢干净，下次报障无据可查。
+    penlog_trim "$LOGFILE" "$LOG_MAX_LINES" "$LOG_MAX_BYTES"
 }
 
 exec >>"$LOGFILE" 2>&1

@@ -1,0 +1,107 @@
+name: Build & Release KernelSU Module
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build and Release Module
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
+      - name: Setup Android SDK Build-Tools & Platform
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses >/dev/null 2>&1 || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Setup Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Resolve Module Version from Tag
+        run: |
+          REF_NAME="${{ github.ref_name }}"
+          if [[ "${{ github.ref }}" == refs/tags/v* ]]; then
+            CLEAN_VER="${REF_NAME#v}"
+            echo "Building tagged release: $REF_NAME -> module version: $CLEAN_VER"
+            echo "MODULE_VERSION=$CLEAN_VER" >> "$GITHUB_ENV"
+          fi
+
+      - name: Build KernelSU Module ZIP
+        env:
+          ANDROID_SDK: ${{ env.ANDROID_HOME }}
+        run: |
+          if [ -n "$MODULE_VERSION" ]; then
+            python3 build.py --no-device --set-version "$MODULE_VERSION"
+          else
+            python3 build.py --no-device
+          fi
+
+      - name: Locate Artifacts & Prepare Release Notes
+        id: prepare
+        run: |
+          # 查找构建生成的最新 zip 及对应 md5
+          LATEST_ZIP=$(ls -t releases/tb522fu-pen-bridge-v*.zip | head -1)
+          LATEST_MD5="${LATEST_ZIP}.md5.txt"
+          
+          if [ ! -f "$LATEST_ZIP" ]; then
+            echo "::error::Module zip not found!"
+            exit 1
+          fi
+          
+          echo "Found module zip: $LATEST_ZIP"
+          echo "MODULE_ZIP=$LATEST_ZIP" >> "$GITHUB_ENV"
+          [ -f "$LATEST_MD5" ] && echo "MODULE_MD5=$LATEST_MD5" >> "$GITHUB_ENV"
+
+          # 提取 tag 及其对应的 commit 信息作为 release 描述
+          REF_NAME="${{ github.ref_name }}"
+          TAG_CONTENTS=$(git tag -l --format='%(contents)' "$REF_NAME" 2>/dev/null || true)
+          if [ -n "$TAG_CONTENTS" ]; then
+            echo "$TAG_CONTENTS" > release_notes.md
+          else
+            git log -1 --format='%B' > release_notes.md
+          fi
+          
+          echo "--- Release Notes Preview ---"
+          cat release_notes.md
+          echo "-----------------------------"
+
+      - name: Upload Module Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: pen-bridge-kernelsu-module
+          path: |
+            ${{ env.MODULE_ZIP }}
+            ${{ env.MODULE_MD5 }}
+
+      - name: Publish to GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: ${{ github.ref_name }}
+          body_path: release_notes.md
+          files: |
+            ${{ env.MODULE_ZIP }}
+            ${{ env.MODULE_MD5 }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

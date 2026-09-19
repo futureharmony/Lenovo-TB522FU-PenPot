@@ -56,7 +56,17 @@ for d in /sys/bus/i2c/devices/*-0041; do
     [ -r "$d/tx_status" ] && { TX_NODE="$d/tx_status"; break; }
 done
 
-log() { echo "[$(date '+%F %T')] $*" >>"$LOG"; }
+# 日志上限：本脚本只写 charge-guard.log 一个文件，直接覆盖全局默认值
+# （吸附/充电事件是稀疏事件，200 行足够覆盖好几天；实现见 bin/penlog.sh）。
+PENLOG_MAX_LINES=200
+if [ -f "$MODDIR/bin/penlog.sh" ]; then
+    . "$MODDIR/bin/penlog.sh"
+fi
+if type penlog_append >/dev/null 2>&1; then
+    log() { penlog_append "$LOG" "$*"; }
+else
+    log() { echo "[$(date '+%F %T')] $*" >>"$LOG"; }
+fi
 
 tx_get() {
     [ -n "$TX_NODE" ] || { echo -1; return; }

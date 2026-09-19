@@ -36,10 +36,26 @@ PEN_SO = ROOT / "source" / "resources" / "lib" / "arm64-v8a" / "libpeninput.so"
 # fallback). See hook/source/jni/README.
 SHIM_SO = ROOT / "source" / "resources" / "lib" / "arm64-v8a" / "libeglshim.so"
 
-SDK = Path(os.environ.get("ANDROID_SDK", "/tmp/android-sdk"))
-BT = SDK / "build-tools" / "android-15"
-if not BT.is_dir():
-    BT = SDK / "build-tools" / "android-14"
+SDK = Path(os.environ.get("ANDROID_SDK") or os.environ.get("ANDROID_HOME") or "/tmp/android-sdk")
+
+
+def _find_build_tools(sdk: Path) -> Path:
+    env_bt = os.environ.get("ANDROID_BUILD_TOOLS")
+    if env_bt and Path(env_bt).is_dir():
+        return Path(env_bt)
+    for cand_name in ("android-15", "android-14"):
+        cand = sdk / "build-tools" / cand_name
+        if cand.is_dir():
+            return cand
+    bt_dir = sdk / "build-tools"
+    if bt_dir.is_dir():
+        dirs = [d for d in bt_dir.iterdir() if d.is_dir()]
+        if dirs:
+            return sorted(dirs)[-1]
+    return sdk / "build-tools" / "android-15"
+
+
+BT = _find_build_tools(SDK)
 AAPT2 = BT / "aapt2"
 D8 = BT / "d8"
 R8_JAR = Path(os.environ.get("ACL_R8_JAR", "/run/media/ACLaniakea/IXUNICS/pad/tools/dex/r8.jar"))
@@ -52,11 +68,22 @@ def _android_jar(sdk: Path) -> Path:
                  sdk / "platforms" / "android-35" / "android-35" / "android.jar"):
         if cand.is_file():
             return cand
+    platforms = sdk / "platforms"
+    if platforms.is_dir():
+        cands = sorted(platforms.glob("android-*/android.jar"))
+        if cands:
+            return cands[-1]
     return sdk / "platforms" / "android-35" / "android.jar"
 
 
 ANDROID_JAR = _android_jar(SDK)
-STUBS = Path(os.environ.get("XPOSED_STUBS", "/tmp/acdb/stubs"))
+_custom_stubs = os.environ.get("XPOSED_STUBS")
+if _custom_stubs and Path(_custom_stubs).is_dir():
+    STUBS = Path(_custom_stubs)
+elif Path("/tmp/acdb/stubs").is_dir():
+    STUBS = Path("/tmp/acdb/stubs")
+else:
+    STUBS = ROOT / "source" / "stubs"
 
 # Repo-local defaults: the signing material lives in <repo>/keys (gitignored).
 # The store password is read from <repo>/keys/tb522fu.pass so rebuilds do not
@@ -79,7 +106,17 @@ def _ks_pass() -> str:
 KS_PASS = _ks_pass()
 
 OUT_DIR = Path(os.environ.get("ACL_OUT", str(REPO / "releases")))
-OUT_APK = OUT_DIR / "PenBridge-Hook-tb522fu-v4.5.4.apk"
+
+# Single bump point. The APK file name, the aapt2 version-name and version-code
+# all derive from this, so a release can never be half-renamed. Override with
+# ACL_VERSION for a one-off build.
+#   4.6.0 -> "PenBridge-Hook-tb522fu-v4.6.0.apk", version-name 4.6.0, code 460000
+# 4.6.0: 107/108 reach the full-screen paint canvas (which answers no key event)
+#        through the CanvasPaintHooks command bridge.
+APK_VERSION = os.environ.get("ACL_VERSION", "4.6.0")
+_MAJOR, _MINOR, _PATCH = (int(p) for p in APK_VERSION.split("."))
+VERSION_CODE = f"{_MAJOR}{_MINOR}{_PATCH:04d}"
+OUT_APK = OUT_DIR / f"PenBridge-Hook-tb522fu-v{APK_VERSION}.apk"
 
 
 def run(cmd: list[str]) -> None:
@@ -100,6 +137,26 @@ def write_aligned_stored(dst: zipfile.ZipFile, name: str, data: bytes) -> None:
     dst.writestr(info, data)
 
 
+def verify_version(apk: Path) -> None:
+    """Assert the freshly signed APK actually carries APK_VERSION.
+
+    A versionCode/versionName left in AndroidManifest.xml silently overrides the
+    aapt2 flags, so a "bumped" build can ship with the previous version baked in
+    (happened 2026-09-19: v4.5.5 file, versionName 4.5.4 inside). Never trust the
+    file name.
+    """
+    proc = subprocess.run([str(AAPT2), "dump", "badging", str(apk)],
+                          capture_output=True, text=True)
+    first = (proc.stdout or "").splitlines()[0] if proc.stdout else ""
+    if f"versionCode='{VERSION_CODE}'" not in first or f"versionName='{APK_VERSION}'" not in first:
+        raise SystemExit(
+            f"built APK reports the wrong version:\n  {first}\n"
+            f"  expected versionCode={VERSION_CODE} versionName={APK_VERSION}\n"
+            f"  -> AndroidManifest.xml must not declare android:versionCode/versionName"
+        )
+    print(f"version OK: versionName={APK_VERSION} versionCode={VERSION_CODE}")
+
+
 def main() -> None:
     if not all(p.exists() for p in (AAPT2, D8, ZIPALIGN, APKSIGNER, ANDROID_JAR, KEYSTORE)):
         raise SystemExit(f"missing toolchain; checked {AAPT2}, {ANDROID_JAR}, {KEYSTORE}")
@@ -111,7 +168,7 @@ def main() -> None:
              "--auto-add-overlay", "--manifest", MANIFEST, "-R", tmp / "res.zip",
              "--java", tmp / "gen", "--min-sdk-version", "31",
              "--target-sdk-version", "35",
-             "--version-code", "450004", "--version-name", "4.5.4"])
+             "--version-code", VERSION_CODE, "--version-name", APK_VERSION])
         (tmp / "classes").mkdir(parents=True, exist_ok=True)
         (tmp / "stub-classes").mkdir(parents=True, exist_ok=True)
         (tmp / "dex").mkdir(parents=True, exist_ok=True)
@@ -169,6 +226,7 @@ def main() -> None:
         run([APKSIGNER, "sign", "--ks", KEYSTORE, "--ks-key-alias", ALIAS, "--v4-signing-enabled", "false",
              "--ks-pass", f"pass:{KS_PASS}", "--key-pass", f"pass:{KS_PASS}",
              "--out", OUT_APK, aligned])
+    verify_version(OUT_APK)
     print(OUT_APK)
 
 

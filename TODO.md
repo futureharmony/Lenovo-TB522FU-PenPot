@@ -151,6 +151,34 @@
 - [ ] 确认 inkdye 被默认禁用后基础书写（NVTCapacitivePen HID）与触觉反馈不受影响（Hook 未生效期间触觉可能空窗，必要时 `action.sh enable` 临时回退）
 - [ ] 接入真实手写笔做功能验收（吸附弹窗 / 按键 / 触觉 / 充满闭环）
 
+## P1.6 日志查看控制台 + 日志限流（2026-09-19，模块 v0.1.1）
+
+- [x] 需求：模块要"点开就能看日志"，但不能无限制写日志；管理器**原生控制台**即可（明确不要 WebView）。
+- [x] 事实核对（设备实测，详见 `.workbuddy/memory/2026-09-19.md`）：
+  - root 管理器是 **ReSukiSU `com.resukisu.resukisu` v4.2.0-rc1**（KernelSU 系），**不是 Magisk**
+    （`/data/adb/magisk` 不存在，`ksud 4.2.0-rc1 uapi:2`）。
+  - 管理器**每个模块卡片只有一个原生控制台入口**：APK 里只有 `hasActionScript=`（→「操作」按钮，跑 action.sh）
+    和 `hasWebUi=`（→「WebUI」按钮）两个开关，`module.prop` 也没有第二个按钮的配置项。
+    ⇒ 不用 WebView 的前提下，"新增按钮且不复用原按钮"只有**加伴生模块**一条路；
+    用户最终选择**复用现有 `action.sh`**，所以不新增卡片、不新增产物。
+  - WebUI 的 JS API 没有剪贴板接口；`cmd clipboard` 在本 ROM 不存在
+    （`No shell command implementation.`），`dumpsys clipboard` 也是空 ⇒ 一键复制不做（用户已确认可放弃）。
+  - `ksud module action <id>` 存在 ⇒ 控制台输出能在 adb 侧一比一复现，便于验证。
+- [x] **写入侧限流**（新增 `module/bin/penlog.sh`）：条数（默认 400 行）+ 字节（128 KB）双上限；
+  超限时保留**最近 N 行**并写一行裁剪记录。`charge-guard.sh` 覆盖为 200 行、
+  `guard_note_engine.sh`（`/data/local/tmp/note_engine_guard.log`）200 行。
+- [x] **硬约束（务必遵守）**：`service.sh` 用 `exec >>"$LOGFILE"` 持有 fd ⇒ 裁剪必须**同 inode 就地回写**，
+  **绝不能 `mv` 后重建同名文件**（写会继续落进已 unlink 的旧 inode，表现为"日志停在裁剪那一刻"）。
+  原 `trim_log_if_large` 是超 512 KB **整file清空**（现场全丢），现改为保留最近 400 行。
+  本地已验证：裁剪后 inode 不变、后续写入继续落盘。
+- [x] **读取侧限流**（`action.sh`）：pen-bridge.log 120 行 / charge-guard.log 60 行 /
+  note_engine_guard.log 60 行 / Hook 日志（logcat tag `LenovoPenBridge`）200 行；
+  新增 `sh action.sh log`（只输出日志段，快速入口）与 `sh action.sh clearlogs`（就地裁到 5 行）。
+- [x] 踩坑：**本 ROM 的 logcat 不支持 `-t N` 与 `-s TAG` 同用** —— 两种顺序、root 下都是**空输出**，
+  而单独用 `-t N`、单独用 `-s TAG` 都正常。Hook 日志因此改为
+  `logcat -d -v time -s TAG | tail -n N`。
+- [ ] 实机验收：点模块卡片「操作」按钮，确认日志段渲染正常且行数在预期范围内。
+
 ## P1.5 hook 不进 system_server 修复（2026-09-18 实机定位）
 - [x] 现象：应用进程有 hook 日志（`WirelessSettings hooks installed` 等），但触觉/笔键/磁吸/输入门控全无效；`grep 'stylus hooks installed'` 恒为 0
 - [x] 定位手段：KernelSU logcat 存档 `/data/adb/ksu/log/logcat.log`（跨开机保留，普通 `logcat -d` 已轮转）+ Vector `verbose_*.log` 的 `VectorConfigCache`/`VectorLegacyBridge` 行 + 对 `handleLoadPackage` 插桩
@@ -158,6 +186,48 @@
 - [x] 修复：`scope.list` + `arrays.xml` 的 `android` → `system`；运行时 `vector-cli scope set ... system/0`；移除多余 `android/0`
 - [x] 验证：重启后 `system_server stylus hooks installed` 出现，随后 uevent 桥/触觉/输入门控/状态同步全部生效；boot_completed 25s
 - [x] 增强：`handleLoadPackage` 早退路径补 `skip <pkg> (gate=…)` 诊断日志（此前静默，是误判"框架没工作"的主因）
+
+### P1.5 复发（2026-09-19）：改包名 = 换模块身份 → scope 又写成 `android`，全部自定义键失效
+- [x] 现象：commit `f9fa079`（包名 `com.aclaniakea.lenovopenbridge` → `com.futureharmony.lenovopenbridge`）之后
+      **长按 / 捏握 / 书写扩展 / 系统快捷全部无反应**（功能码 101–113 一个不响应）；
+      而设置页里 `ipe_pencil_wb_click_long_press=101` / `_squeeze=102` / `_long_click_v2=108` / `_single_click=109` **都还在**
+      → 写入侧正常，缺的是**消费端**
+- [x] 判据（区分"动作执行失败"与"消费端不存在"）：广播探针 `am broadcast -a …RUN_ACTION --ei code 999`（无害空功能码）
+      之后 logcat 连 `debug action refused` 都没有 → 系统侧接收器压根不存在
+- [x] A/B 对照（**同机不同次开机**，一次改名前 / 一次改名后）：
+  | 检查项 | 改名前开机 21:28（旧包名） | 现在 22:03 开机（新包名） |
+  |---|---|---|
+  | `handleLoadPackage pkg=android`（系统侧回调） | ✅ 1 次（pid 2291） | ❌ 0 次 |
+  | `system_server stylus hooks installed` | ✅ 1 次 | ❌ 0 次 |
+  | `PhoneWindowManager interceptKeyBeforeQueueing hooks=1` | ✅ | ❌ |
+  | Vector modules log 中 system_server 的 `Loading legacy module` | ✅ 有 pid 2291 | ❌ 无 |
+  | 应用侧 hook（ipemanager / 我的设备 / 便签 / 无线 / 截图 / 翻译） | ✅ | ✅ **全好（最易误判成代码 bug）** |
+- [x] 根因：**改包名 = Vector 里换了一个全新模块身份**（新 mid=820），作用域为空；装机后重设时写成了 `android`。
+      作用域**匹配**必须用伪包名 `system`（框架**回调**仍以 `packageName="android"` 回调，所以代码 `case "android"` 是对的）
+      —— 与 09-18 那次（见上一节）**同一个坑**：改名把已修好的状态清零了
+- [x] 「enabled ≠ 被注入」：`vector-cli modules ls` 显示 `com.futureharmony.lenovopenbridge … enabled`，
+      与是否被注入 system_server **无关**。唯一硬判据仍是 `grep 'system_server stylus hooks installed'`
+- [x] 排查路径（可复用，写进 `docs/install-vector-route.md` 第 6 节）：
+  - `/data/adb/lspd/log/modules_*.log`（本次）+ `log.old/modules_*.log`（上次开机）→ 搜 `Loading legacy module` 与 system_server pid
+  - `/data/adb/ksu/log/logcat.log`（跨开机存档）→ grep `handleLoadPackage pkg=android`、`system_server stylus hooks installed`
+  - ⚠️ `adb logcat -d -b all` 此时**已轮转**，早期开机日志只能靠上面两处；`cli log cat` 也只保留注入后的行
+- [x] 修复：`scope add com.futureharmony.lenovopenbridge system/0`（**外科式**，不动其它项）+ 重启
+- [x] 附带发现：设备侧残留 `android/0`（历史遗留）。`scope set` 是**整表覆盖**，靠人手点/手敲必然复发
+- [x] **根治（工具链，本次完成）** —— 单一真源 + 幂等自检，见 `scripts/pen_release.py`：
+  - 新增 `scripts/pen_release.py`：产物的「最新」按 **版本** 排序（原先三处 `sorted(glob)[-1]` 是**字典序**，
+    `v4.5.10` 会排在 `v4.5.4` 之前）；作用域从 `hook/source/resources/META-INF/xposed/scope.list`
+    （APK 的声明源）派生，运行时表不再手敲；解析 adb 路径
+  - `build.py` 新增**第 4 步作用域自检**：读运行时 scope 与 `scope.list` 比对 →
+    缺 `system/0` 用 `scope add` 补齐 / 多余项用 `scope rm` 清掉 → **复读校验**；无设备自动跳过
+    （`--no-device` / `--no-scope-fix` / `--require-device`）。另加断言：**module zip 内嵌的 Hook APK == 最新 APK**
+  - `scripts/deploy_vector.sh`：adb 路径解析（原默认 `/opt/homebrew/bin/adb` **本机不存在**）；
+    APK 版本地板 v4.5.0（拒绝 pre-rename 包）；安装前校验 APK 内声明的 scope 含 `system`；
+    `scope set` 后**回读断言** `system/0` 存在，否则 fail-fast（不再"退出码 0 就当成功"）
+  - `scripts/push_to_device.sh`：产物按版本解析（原硬编码 `PenBridge-Hook-tb522fu-v4.1.3.apk` —— **旧包名**，
+    推过去装 = 装了个没人 `enable` 的包，正是本次故障的成因）
+  - `module/tools/build_root.py`：内嵌 APK 同样按版本取（原来也是字典序）
+  - Hook 版本 bump **v4.5.5**：`build_hook_source.py` 改为单点常量 `APK_VERSION`
+    （文件名 / `versionName` / `versionCode` 全部派生），不再三处手改
 
 ## P1.4 卡死根因修复（2026-09-18 实机定位）
 - [x] 现象：hook + 模块同开 → 卡开机动画，system_server 停在 PMS 扫描，`boot_completed` 永不为真
@@ -832,3 +902,172 @@ stack map 期望的内容」⇒ 指向 **执行中的代码与 oat/stack map 不
 **结论**：**已把失败模式钉死在 ART 的 `MarkCompact → Thread::VisitRoots → WalkStack → VisitFrame`
 里**（不是 binder、不是 HAL、不是我们的 Java 代码），但 **(a) ROM ART/boot-image 不同源** 与
 **(b) hook deopt 补丁** 两种成因**尚未区分**，需按上面 1→2 步做 A/B。**不作任何未经实验的结论。**
+
+---
+
+## P0.14 画布内 107/108 直达撤销/重做（v4.6.0，2026-09-20 已部署实机；接收侧通道实测通过，**待笔实测发送侧**）
+
+**问题（用户报告）**：捏握设为「取消/撤销」在便签**全屏涂绘画布**里实测无反应。
+
+### 定位（只读 + 反汇编，2026-09-19/20）
+
+**第一步：107 与 Ctrl+Z 不是两条路。** `StylusActionDispatcher.undo()` 全文只有两个分支：
+
+```java
+if (HandwrittenNoteOverlay.isVisible()) { HandwrittenNoteOverlay.performUndo(); return; }  // 模块自绘浮层，不走键盘
+sendKeyCombination(KeyEvent.KEYCODE_CTRL_LEFT, KeyEvent.KEYCODE_Z);                         // ← 否则就是注入 Ctrl+Z
+```
+
+⇒ 动作码 107 的**实现**就是「注入 Ctrl+Z」，所以「画布里 107 没用」与「画布里 Ctrl+Z 没用」是
+**同一件事的两种说法**，一次失败、不是两次。`redo()` 同理（`Ctrl+Shift+Z` + 25ms 后 `Ctrl+Y`）。
+L3 实机注入（`input keycombination 113 54`）与模块内注入走同一条
+`InputManager.injectInputEvent`，可互为忠实替身；框架侧 `KEYLOG_PhoneWindowManagerExtImpl`
+证实注入带正确的 `META_CTRL_ON|META_CTRL_LEFT_ON`，**注入侧无问题**。
+
+**第二步：画布为什么接不住 —— 该界面一个按键回调都没有。** 反汇编 `classes2.dex` 逐层点数：
+
+| 类 | 成员数 | 按键相关成员 |
+|---|---|---|
+| `com.nearme.note.paint.NewPaintActivity` | 16 | **0** |
+| `com.nearme.note.paint.NewPaintFragment` | 480 | **0**（`KEY_*` 全是 Intent extra 常量名） |
+| `com.oplus.richtext.editor.view.CoverPaintView` | 188 | **0** |
+| `com.oplusos.vfxsdk.doodleengine.PaintView` | 370 | **0** |
+
+`PaintView extends FrameLayout`（`CoverPaintView extends PaintView`），两者都不覆写
+`dispatchKeyEvent`/`onKeyDown`/`onKeyUp`/`onKeyPreIme` ⇒ 注入的键送到焦点窗口后**被丢弃**。
+对比：便签 WebView 编辑器有键入口（`WVJBWebView.onKeyPreIme` → `WVNoteViewEditFragment` →
+`undoEvent()`），这就是「同一个应用，不同界面结论相反」的原因。**不是路由错，是压根没有接收方。**
+
+**第三步：找到真正的 worker。** 标题栏 ↺ 按钮的处理器就是答案：
+
+```
+NewPaintFragment.initTitleBar$lambda$63(NewPaintFragment, View)   ← 撤销按钮 OnClickListener
+  → MultiClickFilter.isEnabled(...)                              ← 防连点
+  → com.oplusos.vfxsdk.doodleengine.PaintView.undo:()V           ← 真正的撤销
+```
+
+而 `NewPaintFragment.enablePaintUndoManager(Z)` 把同一个 `paintView` 包了一层干净的公开门面：
+
+```
+com.nearme.note.paint.NewPaintEditPresenter   (PUBLIC FINAL, implements oplus...container.api.d)
+  private final CoverPaintView paintView;
+  public void    undo()  { paintView.undo(); }   // ()V，access 0x0001 PUBLIC
+  public void    redo()  { paintView.redo(); }   // ()V，access 0x0001 PUBLIC
+  public boolean canUndo();                       // ()Z
+  public boolean canRedo();                       // ()Z
+```
+
+### 实现（v4.6.0）
+
+1. **新类** `hook/source/sources/com/aclaniakea/colorosporttuning/CanvasPaintHooks.java`
+   （`final`、包内可见，与 `NoteToolkitHooks` 同级；ADR-001 平铺包布局）。
+   - 注入点：`NewPaintFragment.onStart` 登记偏好「哪个画布在屏」、`onStop` / `onDestroyView` 反注册
+     （`NewPaintFragment` **没有覆写 `onResume`**，所以用 onStart/onStop；两者都是该类**自己声明**的方法，
+     `HookUtils.hookAll` 能直接命中）。
+   - 登记用 `WeakReference`（照抄 `NoteToolkitHooks.active` 的写法），泄漏的画布不会吊住 Activity。
+   - 命令接收：动态注册 `CANVAS_UNDO` / `CANVAS_REDO` 两个 action 的 receiver；
+     `FLAG_RECEIVER_NOT_EXPORTED` **不可用**（发送方在 system_server，uid 不同），
+     故用 `RECEIVER_EXPORTED` + 发送侧 `setPackage("com.coloros.note")` + 模块私有 action 名收敛可达面。
+   - 反射容错：先取声明字段 `newPaintPresenter`；R8 改名时退化为「按声明类型找唯一字段」，再不行就记日志放弃。
+   - 接收体跑在 `ContractProbe.executeGuarded` 下（失败 3 次熔断 → 静默 no-op，绝不把异常抛进便签主线程）；
+     另有 250ms 同向去重窗口（对照 `NoteToolkitHooks.dispatch` 的 150ms 去重）。
+2. **常量** `PenBridgeConstants.CANVAS_UNDO` / `CANVAS_REDO`
+   （`com.futureharmony.lenovopenbridge.action.CANVAS_*`；**不设 `_LEGACY` 双胞胎**：发送方与接收方同属一个 APK，
+   不存在混版本窗口）。
+3. **接线** `UiWorkingSetPrefetch` 的 `case "com.coloros.note"` 增加 `CanvasPaintHooks.install(...)`。
+4. **路由** `StylusActionDispatcher.undo()/redo()`：在注入按键**之前**加一句
+   `requestCanvasUndo(context, ...)`。发送用 `sendBroadcastAsUser(..., UserHandle.ALL, ...)` + 回退到
+   `sendBroadcast`（同 `SystemStylusHooks.sendAll` 的理由：system_server 直接 sendBroadcast 只覆盖发送用户），
+   并加 `FLAG_RECEIVER_FOREGROUND` 把延迟压进手势可接受区间。
+
+### 为什么两条路不会互相打架（关键安全论证）
+
+命令只有满足「某个已登记的画布片段 `isAdded() && isResumed()`」才会被消费。该判据精确等价于
+「全屏画布正在前台」，因为 `NewPaintFragment` 的全部外部引用者都在 `com.nearme.note.paint.*`
+（`NewPaintActivity` / `QuickPaintActivity` 用 `instance-of` + `check-cast` 挂载，
+其余是画布自己的辅助类与 lambda）；`MainActivity`、`NoteDetailFragment`、
+`NoteDetailPaintManager`、`coverdoodle.CoverDoodlePresenter`（双栏封面涂绘走这条）**完全不引用它**。
+
+| 场景 | 命令 | 注入按键 | 净效果 |
+|---|---|---|---|
+| 全屏画布 | ✅ 生效（直达 worker） | 惰性（无接收方） | **1 次撤销** |
+| WebView 编辑器 | ❌ 无画布 → 记日志忽略 | ✅ 生效 | **1 次撤销** |
+| 其它应用 | ❌ 广播不达 / 无画布 | ✅ 生效 | **1 次撤销** |
+
+⇒ 两侧都不需要知道前台是谁，也不存在「同一手势撤两次」。
+
+### 已知边界
+
+- 只解决 **107 / 108**。109/110（翻页）在画布里仍是「滑动 + PAGE_UP/DOWN」，画布同样不吃键 —— 未处理。
+- 画布内的**取消语义**依赖画布自身 undo 栈；栈空时 `PaintView.undo()` 自己 no-op（应用会打
+  `mUndoList is empty, cannot to previous step`），模块不额外拦截。
+
+### 部署与验证结果（2026-09-20 00:14–00:16 实机执行）
+
+**已部署** ✅ —— `scripts/deploy_vector.sh --no-reboot` → 手动 reboot：
+
+| 项 | 结果 |
+|---|---|
+| 设备侧 APK versionName | `4.6.0` / versionCode `460000`（原 v4.5.5） |
+| 设备侧 `base.apk` md5 | `1499ea0b3142e892c3800316e262917d`（与本地产物**逐字节一致**） |
+| Vector 模块状态 | `enabled`（uid 10408） |
+| 运行时 scope | `system` + 7 app，与 `scope.list` 完全一致，脚本回读断言 `system/0 present ✓` |
+| 开机 | `sys.boot_completed=1`，t+25s，**未卡开机**；无 `.bootfail` 文件 |
+| system_server 注入 | `handleLoadPackage pkg=android` → `install deferred by 2500ms` → `stylus hooks installed (startOtherServices=1 run=1)` ✓ |
+| 便签进程注入 | `CanvasPaintHooks: canvas undo/redo bridge installed` + `undo/redo receiver registered` ✓ |
+
+**接收侧通道已端到端验证** ✅（用 root 广播替代笔，绕开「必须动手写」的限制）：
+
+```
+adb shell su -c 'am broadcast -a com.futureharmony.lenovopenbridge.action.CANVAS_UNDO -p com.coloros.note'
+```
+
+当时画布（`NewPaintActivity`）确在前台、画布上已有两笔。**一次广播 → 恰好一次处理**：
+
+```
+main proc  : CanvasPaintHooks: canvas undo invoked=true canUndo=true canRedo=true
+sub  proc  : CanvasPaintHooks: no resumed canvas on screen, undo left to the key path
+```
+
+⇒ 三件事一次坐实：① 广播链路（action 名 / `RECEIVER_EXPORTED` / `setPackage` 定向）真的通；
+② `newPaintPresenter` 反射取字段 + `undo()` 反射调用**成功**（`invoked=true`）；
+③ 「双进程注册」不会双撤 —— 子进程 `com.coloros.note:tbl_privileged_process0` 也注册了 receiver，
+但它的画布登记表为空，命中 `no resumed canvas` 分支后静默返回（见下「已知边界」）。
+
+### 剩余验证步骤（需实机手写笔，人工/助手均未执行）
+
+1. 便签 → 涂鸦笔记 → **全屏画布** → 画两笔 → **捏握**（设为撤销）→ 期望最后一笔消失。
+   这条才真正覆盖**发送侧**（`StylusActionDispatcher.undo()` → `requestCanvasUndo()`）。
+2. 同一条笔记改在 **WebView 正文编辑器**里捏握 → 仍应生效（回归项：不能因本次改动变差）。
+3. 日志观察点（`sh action.sh log` 或 `logcat -s LenovoPenBridge`）：与上面两条一致。
+4. 回退：装回 v4.5.5 即可（本改动不写任何持久状态，无迁移问题）。
+
+### 已知边界（实测确认，非缺陷）
+
+- **receiver 在便签的每个进程各注册一份**（主进程 + `com.coloros.note:tbl_privileged_process0`）。
+  一次广播会投递到两个进程，但只有真正持有前台画布的主进程会动作，子进程走 `no resumed canvas` 静默返回，
+  **净效果仍是 1 次撤销**（上面实测：1 次广播 → 主进程 1 次 `invoked` + 子进程 1 次 no-op）。
+  若要消掉这条无谓投递，可在注册前判断进程名，只留主进程 —— 但当前行为正确，未改。
+- 只解决 **107 / 108**。109/110（翻页）在画布里仍是「滑动 + PAGE_UP/DOWN」，画布同样不吃键 —— 未处理。
+- 画布内的**取消语义**依赖画布自身 undo 栈；栈空时 `PaintView.undo()` 自己 no-op（应用会打
+  `mUndoList is empty, cannot to previous step`），模块不额外拦截。
+
+
+### ⚠️ 构建不可字节复现（实测，2026-09-20）
+
+同一个源码连跑两次 `python3 build.py`，产出的 APK **md5 不同**。已验证差异是**良性的**：
+
+| 检查项 | 结果 |
+|---|---|
+| `classes.dex` | **逐字节相同**（两次 md5 均为 `567313c5338ebd75bf98709b81ee6aa6`，319580 B） |
+| zip 条目列表 + 各条目大小 | 完全一致 |
+| 逐条目内容 md5 | **全部一致**（含 `META-INF` 里所有文件） |
+| 差异位置 | 仅 APK Signing Block（v2/v3 签名） |
+
+⇒ `apksigner` 的签名块不可复现（签名随机化），**条目内容才是真值**。后果：
+
+- **不要把 md5 当作产物身份**。本文件此前记的 `c70331e7…` 在重跑构建后变成 `1499ea0b…`，
+  两次功能完全等价。要认身份请比对 `classes.dex` 的 md5。
+- `releases/*.md5.txt` 由 `build.py` 每次重写，只能用于**同一份文件**的传输校验
+  （`push_to_device.sh` 的用途），不能用来判断「本地这份是不是那次发布的那份」。
+

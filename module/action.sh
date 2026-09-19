@@ -6,6 +6,23 @@ LOG="$MODDIR/pen-bridge.log"
 INKDYE_PKG="com.inkdye.lenovopentocoloros"
 DISABLE_FLAG="$MODDIR/disable"
 
+# 日志上限 helper（条数 + 字节双上限，同 inode 就地裁剪，见 bin/penlog.sh）。
+# 老版本安装里可能还没有 bin/penlog.sh，所以必须有降级兜底 —— 否则一次
+# "command not found" 就会让 action.sh 在半路静默中断，控制台只剩半页。
+PENLOG_MAX_LINES=400
+if [ -f "$MODDIR/bin/penlog.sh" ]; then
+    . "$MODDIR/bin/penlog.sh"
+fi
+if ! type penlog_append >/dev/null 2>&1; then
+    penlog_append() { printf '[%s] %s\n' "$(date '+%F %T')" "$*" >>"$1"; }
+fi
+if ! type penlog_trim >/dev/null 2>&1; then
+    penlog_trim() { :; }
+fi
+if ! type penlog_caps >/dev/null 2>&1; then
+    penlog_caps() { echo "${PENLOG_MAX_LINES:-400} 行"; }
+fi
+
 # 动作代号转中文
 format_action() {
     case "$1" in
@@ -69,7 +86,7 @@ do_disable() {
     echo "【处理完毕】模块已彻底停止介入，全程免重启即刻生效！"
     echo "（如需彻底从内存中卸载Hook注入，可执行快速软重启）"
     echo "=============================================="
-    echo "module disabled via action.sh at $(date)" >>"$LOG"
+    penlog_append "$LOG" "module disabled via action.sh"
 }
 
 # 彻底免重启启用模块
@@ -104,7 +121,7 @@ do_enable() {
     echo ""
     echo "【处理完毕】手写笔增强系统已恢复全面接管，全程免重启！"
     echo "=============================================="
-    echo "module enabled via action.sh at $(date)" >>"$LOG"
+    penlog_append "$LOG" "module enabled via action.sh"
 }
 
 # 快速软重启 (仅重启 Android 框架与 Zygote，无需关机硬件)
@@ -115,6 +132,70 @@ do_soft_reboot() {
     echo "=============================================="
     sleep 1
     setprop ctl.restart zygote
+}
+
+# ----------------- 最近日志（原生控制台输出） --------------------------------
+# 管理器控制台没有滚动、没有搜索、也没有剪贴板接口，所以这里只输出【尾部片段】。
+# 上限是"两侧一起守"的：
+#   写入侧 —— bin/penlog.sh 保证文件不会无限增长（条数 + 字节双上限）；
+#   读取侧 —— 这里的 tail / logcat -t 截断，否则一次 dump 上万行会把控制台刷爆，
+#             而且控制台不能往回翻，前面的内容等于白输出。
+LOG_TAIL_MAIN=${LOG_TAIL_MAIN:-120}
+LOG_TAIL_GUARD=${LOG_TAIL_GUARD:-60}
+LOG_TAIL_HOOK=${LOG_TAIL_HOOK:-200}
+GUARD_LOG="$MODDIR/charge-guard.log"
+NOTE_LOG="/data/local/tmp/note_engine_guard.log"
+HOOK_TAG="LenovoPenBridge"
+
+log_section() {  # log_section <标题> <文件> <行数>
+    echo "──── $1（最近 $3 行）────"
+    if [ -s "$2" ]; then
+        tail -n "$3" "$2" 2>/dev/null
+    else
+        echo "  （无内容 / 文件不存在）"
+    fi
+    echo ""
+}
+
+do_logs() {
+    echo "=============================================="
+    echo "      Lenovo Tab Pen Pro · 最近日志片段      "
+    echo "=============================================="
+    echo "采集时间  : $(date '+%F %T')"
+    echo "开机时长  : $(cut -d' ' -f1 /proc/uptime 2>/dev/null)s"
+    echo "写入侧上限: $(penlog_caps)"
+    echo "读取侧上限: 本页最多 $((LOG_TAIL_MAIN + LOG_TAIL_GUARD * 2 + LOG_TAIL_HOOK)) 行"
+    echo ""
+    log_section "pen-bridge.log · 模块主日志" "$LOG" "$LOG_TAIL_MAIN"
+    log_section "charge-guard.log · 磁吸/充电守护" "$GUARD_LOG" "$LOG_TAIL_GUARD"
+    log_section "note_engine_guard.log · 便签引擎守卫" "$NOTE_LOG" "$LOG_TAIL_GUARD"
+
+    echo "──── Hook 日志 · logcat -s $HOOK_TAG（最近 $LOG_TAIL_HOOK 行）────"
+    # ⚠️ 本 ROM 的 logcat【不支持 `-t N` 与 `-s TAG` 同用】：两者一起给会静默返回空。
+    #    实测（Android 16 / ColorOS）：`logcat -d -s X -t 3` 与 `logcat -d -t 3 -s X`
+    #    都是空输出，而 `-t 3` 单独、`-s X` 单独都正常，root 下也一样。
+    #    所以这里改成"先按 tag 过滤，再管道 tail"截断。
+    hook_dump=$(logcat -d -v time -s "$HOOK_TAG" 2>/dev/null | tail -n "$LOG_TAIL_HOOK")
+    if [ -n "$hook_dump" ]; then
+        printf '%s\n' "$hook_dump"
+    else
+        echo "  （本次开机暂无 Hook 日志：system_server 侧未注入，或缓冲区已轮转）"
+    fi
+    echo ""
+    echo "=============================================="
+    echo "Hook 日志只落在 logcat（环形缓冲自带上限）；"
+    echo "文件日志超限时保留最近 $(penlog_caps)，不整file清空。"
+    echo "=============================================="
+}
+
+# 手动把文件日志裁到很小（清屏重来用）。注意不能删文件：service.sh 用
+# exec >> 持有同一个 inode，删了以后写入会落进已 unlink 的旧 inode。
+do_clear_logs() {
+    for f in "$LOG" "$LOG.1" "$GUARD_LOG" "$NOTE_LOG"; do
+        [ -f "$f" ] || continue
+        penlog_trim "$f" 5 1024
+        echo "已裁剪: $f（保留最近 5 行）"
+    done
 }
 
 # 命令行参数快捷入口
@@ -133,6 +214,14 @@ case "$1" in
         ;;
     reboot|soft_reboot)
         do_soft_reboot
+        exit 0
+        ;;
+    log|logs)
+        do_logs
+        exit 0
+        ;;
+    clearlogs|clear-logs)
+        do_clear_logs
         exit 0
         ;;
 esac
@@ -246,7 +335,12 @@ echo "  • 磁吸/充电守护进程    : $GUARD_STATUS"
 echo "=============================================="
 echo ""
 echo "【快捷操作说明】"
+echo "  • 只看日志     : sh $0 log (本页尾部即最近日志，也可只看日志段)"
+echo "  • 裁剪日志     : sh $0 clearlogs (保留最近 5 行，不删文件)"
 echo "  • 切换启用/禁用 : sh $0 toggle (免重启即刻生效)"
 echo "  • 快速软重启   : sh $0 reboot (约5秒重载系统框架)"
 echo "  • 手势热配置   : 设置 -> 设备空间 -> 触控笔卡片"
 echo "=============================================="
+echo ""
+
+do_logs
