@@ -98,24 +98,31 @@ public final class PenBridgeReceiver extends BroadcastReceiver {
             bluetoothDevice = null;
         }
         String strFirst2 = first(intent, "macAddr", "address", "device_address");
-        if (strFirst2.length() == 0 && bluetoothDevice != null) {
+        if ((strFirst2 == null || strFirst2.isEmpty()) && bluetoothDevice != null) {
             try {
-                strFirst2 = bluetoothDevice.getAddress();
+                String devAddr = bluetoothDevice.getAddress();
+                if (devAddr != null && !devAddr.trim().isEmpty()) {
+                    strFirst2 = devAddr.trim();
+                }
             } catch (Throwable unused2) {
             }
         }
         String strFirst3 = first(intent, "name", "device_name", "penName");
-        if (strFirst3.length() == 0 && bluetoothDevice != null) {
+        if ((strFirst3 == null || strFirst3.isEmpty()) && bluetoothDevice != null) {
             try {
-                strFirst3 = bluetoothDevice.getName();
+                String devName = bluetoothDevice.getName();
+                if (devName != null && !devName.trim().isEmpty()) {
+                    strFirst3 = devName.trim();
+                }
             } catch (Throwable unused3) {
             }
         }
-        if (strFirst2.length() == 0) {
-            strFirst2 = HookUtils.penAddress(context);
+        if (strFirst2 == null || strFirst2.isEmpty()) {
+            String addr = HookUtils.penAddress(context);
+            strFirst2 = addr != null ? addr : "";
         }
-        if (strFirst3.length() == 0) {
-            strFirst3 = penState.name;
+        if (strFirst3 == null || strFirst3.isEmpty()) {
+            strFirst3 = (penState != null && penState.name != null) ? penState.name : "";
         }
         boolean z = intent.getBooleanExtra("hardware_battery", false) || hardwareSource(strFirst);
         int iIntExtra = intExtra(intent, -1, "batteryLevel", "battery_level", "battery", "level", "android.bluetooth.device.extra.BATTERY_LEVEL");
@@ -192,13 +199,16 @@ public final class PenBridgeReceiver extends BroadcastReceiver {
             if (strValueOf.contains("BOOT_COMPLETED") || strValueOf.contains("MY_PACKAGE_REPLACED") || strValueOf.contains("REMOUNT_CONTROL") || strValueOf.contains("OPEN_BLUETOOTH")) {
                 inputDeviceFindLivePen = findLivePen(context);
                 if (inputDeviceFindLivePen != null) {
-                    if (strFirst3.length() == 0) {
-                        strFirst3 = inputDeviceFindLivePen.getName();
+                    if (strFirst3 == null || strFirst3.isEmpty()) {
+                        String liveName = inputDeviceFindLivePen.getName();
+                        if (liveName != null && !liveName.trim().isEmpty()) {
+                            strFirst3 = liveName.trim();
+                        }
                     }
                     try {
                         String strValueOf2 = String.valueOf(inputDeviceFindLivePen.getClass().getMethod("getBluetoothAddress", new Class[0]).invoke(inputDeviceFindLivePen, new Object[0]));
-                        if (strValueOf2 != null && !"null".equals(strValueOf2) && !strValueOf2.isEmpty()) {
-                            strFirst2 = strValueOf2;
+                        if (strValueOf2 != null && !"null".equals(strValueOf2) && !strValueOf2.trim().isEmpty()) {
+                            strFirst2 = strValueOf2.trim();
                         }
                     } catch (Throwable unused4) {
                     }
@@ -206,33 +216,35 @@ public final class PenBridgeReceiver extends BroadcastReceiver {
                 } else {
                     BluetoothDevice bondedPen = findBondedPen(context);
                     if (bondedPen != null) {
-                        strFirst2 = bondedPen.getAddress();
+                        String bAddr = bondedPen.getAddress();
+                        if (bAddr != null && !bAddr.trim().isEmpty()) {
+                            strFirst2 = bAddr.trim();
+                        }
                         String bondedName = bondedPen.getName();
                         if (bondedName != null && !bondedName.trim().isEmpty()) {
-                            strFirst3 = bondedName;
+                            strFirst3 = bondedName.trim();
                         }
-                        // Bonding identifies the pen but does not prove a live
-                        // ACL/HOGP link.  Treating every bonded pen as connected
-                        // resurrected stale battery state at boot and after a
-                        // Bluetooth restart.
                         z2 = HookUtils.bluetoothConnected(context, strFirst2);
                     }
                 }
             }
-            String str = strFirst2;
-            String str2 = strFirst3;
+            String str = strFirst2 != null ? strFirst2 : "";
+            String str2 = strFirst3 != null ? strFirst3 : "";
             boolean z3 = (!HookUtils.disconnectRequested(context) || PenBridgeConstants.RECONNECT.equals(strValueOf) || PenBridgeConstants.RECONNECT_LEGACY.equals(strValueOf)) ? z2 : false;
             String strFirst4 = first(intent, "version", "firmware", "fwVersion");
-            if (strFirst4.length() == 0) {
-                strFirst4 = penState.firmware;
+            if (strFirst4 == null || strFirst4.isEmpty()) {
+                strFirst4 = (penState != null && penState.firmware != null) ? penState.firmware : "";
             }
             String str3 = strFirst4;
             String strFirst5 = first(intent, "sn", "serial", "serialNumber");
-            if (strFirst5.length() == 0) {
-                strFirst5 = penState.serial;
+            if (strFirst5 == null || strFirst5.isEmpty()) {
+                strFirst5 = (penState != null && penState.serial != null) ? penState.serial : "";
             }
-            int resolvedBattery = z3 ? (i2 < 0 ? penState.battery : i2) : -1;
-            PenState penState2 = new PenState(z3, str, str2, resolvedBattery, z3 ? i : 0, penState.type, str3, penState.hardware.length() == 0 ? "Lenovo Tab Pen" : penState.hardware, strFirst5, strFirst.length() == 0 ? strValueOf : strFirst, System.currentTimeMillis());
+            int resolvedBattery = z3 ? (i2 < 0 ? (penState != null ? penState.battery : -1) : i2) : -1;
+            String type = (penState != null && penState.type != null) ? penState.type : "";
+            String hw = (penState != null && penState.hardware != null && !penState.hardware.isEmpty()) ? penState.hardware : "Lenovo Tab Pen";
+            String src = (strFirst != null && !strFirst.isEmpty()) ? strFirst : strValueOf;
+            PenState penState2 = new PenState(z3, str, str2, resolvedBattery, z3 ? i : 0, type, str3, hw, strFirst5, src, System.currentTimeMillis());
             PenStateStore.write(context, penState2);
             if (strFirst.length() != 0) {
                 strValueOf = strFirst;
