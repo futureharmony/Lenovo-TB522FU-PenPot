@@ -23,31 +23,17 @@ INCLUDE = (
     "engine/libSuniaEngine.16.7.2.fixed.so",
     "system/etc/permissions/privapp-permissions-com.aclaniakea.penhidctl.xml",
     "system/priv-app/aclpenhid/PenHidCtl.apk",
+    "system/usr/keylayout/Vendor_17ef_Product_622e.kl",
     "uninstall.sh",
 )
 
 EXTERNAL = {
-    "bin/lsposed-path-sync.jar": "fix-module/module/bin/lsposed-path-sync.jar",
-    "hook/PenBridge-Hook.apk": "releases/PenBridge-Hook-tb522fu-v4.1.3.apk",
+    "hook/PenBridge-Hook.apk": "releases/PenBridge-Hook-tb522fu-v4.5.3.apk",
 }
 
 
 def build(module_dir: Path, output: Path) -> None:
     repo = module_dir.parents[0]  # tb522fu-pen-port layout: module/ at repo root
-    # Keep release packaging possible on a host without the Android/Smali
-    # toolchain.  The synchronized helper is deterministic and the checked-in
-    # artifact is the validated fallback used by FixModule as well; fail only
-    # if neither a rebuild nor that artifact is available.
-    sync_jar = repo / "fix-module/module/bin/lsposed-path-sync.jar"
-    try:
-        subprocess.run([
-            sys.executable,
-            str(repo / "fix-module/module/tools/build_lsposed_sync.py"),
-        ], check=True)
-    except subprocess.CalledProcessError:
-        if not sync_jar.is_file():
-            raise
-        print(f"toolchain unavailable; keeping {sync_jar}")
     missing = [name for name in INCLUDE if not (module_dir / name).is_file()]
     missing += [name for name, source in EXTERNAL.items()
                 if not (repo / source).is_file()]
