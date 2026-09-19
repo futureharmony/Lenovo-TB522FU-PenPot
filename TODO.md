@@ -350,6 +350,45 @@ code-101，别破坏）：
 - 安装 v4.4.0 后 `killall system_server` 软重启生效（`am crash android` 无效，pid 不变）。
 - **待用户解锁实测**：灰层样式、上滑点击、圈选翻译落图、便签关闭按钮。
 
+**v4.4.5–4.4.7 面板样式对齐原厂 + 圈选截屏定案（2026-09-19 16:0x，UI 已实机像素级比对）**：
+
+面板（`addExtraPanelRows` 重写，**已实测闭环**）：
+- **真实结构**（uiautomator + 自写 PNG 解码逐像素测得）：RecyclerView 的**一个 item == 一行**，
+  **item 自身**携带可见 #353535 卡片（宽 1064–2776 / 高 127–132，padding 40），首个子视图是
+  **透明内容层**（外边距 0），右侧箭头是 `AppCompatImageView`（32×63，StateListDrawable），
+  行间为 **1px #5D5D5D**、按内容宽内缩的分隔线。
+- v4.4.2 的错误：克隆**内容层**几何（40px 外边距）+ 把卡片 drawable 用**模块主题**重刷 →
+  得到更窄、更亮（#4A4A4A 而非 #353535）的盒子。
+- v4.4.5 起：注入行 = item 的**透明**子视图（同 40px 内缩），卡片层自然长高覆盖；
+  箭头**克隆原厂 ImageView 的 drawable**（`findStockArrow`，失败才自绘 `ChevronView`）；
+  分隔线颜色/厚度从原厂分隔线子视图 `ColorDrawable` 读出。
+- v4.4.7：行高不再取本 item（注入后 132），改为**爬升到 RecyclerView 取同层原生行**最小值
+  （127）→ 实测行距 127/128，与原厂 127 一致。
+- 实测比对（3840×2560 截图逐像素）：底色 #353535 ✓、左边界 1064 ✓、右边界 2776 ✓、
+  分隔线 1px #5D5D5D ✓、箭头在位 ✓、行高 128 vs 127 ✓。
+
+圈选（`LassoSelectOverlay`，**待重启 system_server 实测**）：
+- `/system/bin/screencap` **不可用**：system_server 被 SELinux 拒绝 exec（`error=13`），
+  同一策略也将废掉 `/system/bin/cp`（保存路径已一并改为进程内 I/O）。
+- `SurfaceControl.getInternalDisplayToken/getPhysicalDisplayIds` 在本 ROM **已被移除**
+  （NoSuchMethodException）；token 实际来自 @hide `Display.getAddress()`。
+- **关键**：本 ROM **没有顶层 `android.window.DisplayCaptureArgs`**（Android 15+ 已并入
+  `ScreenCapture` 的**嵌套类**）→ 用 `ScreenCapture$DisplayCaptureArgs$Builder(IBinder)`
+  + `setSourceCrop` → `ScreenCapture.captureDisplay(DisplayCaptureArgs)`
+  → `ScreenshotHardwareBuffer.asBitmap()`（签名从 `framework.jar` 的 dex 反解确认，
+  脚本 `/tmp/dexdump.py`）。
+- **v4.4.8 token 修正**（v4.4.5 实测报 `argument 1 has type android.os.IBinder, got
+  android.view.DisplayAddress$Physical`）：`Display.getAddress()` **不是** IBinder。
+  全量 dex 扫描结论：本 ROM `SurfaceControl` **没有任何 token getter**
+  （getInternalDisplayToken / getPhysicalDisplayIds / getPhysicalDisplayToken 全不存在），
+  `android.view.DisplayControl` 也不存在；**唯一可用**的是 OPPO 自己的
+  `android.hardware.display.OplusDisplayManager.getPhysicalDisplayToken(long)`
+  （AIDL `IOplusDisplayManager` 同签名）→ 用 `DisplayAddress$Physical.getPhysicalDisplayId()`
+  取 id 再换 token，另加 id 0..3 暴力兜底。
+- 抓图前 `Thread.sleep(250)` 等浮层真正下屏，避免把选区框/蒙层拍进去。
+- 保存链：`HookUtils.savePngToGallery` = ①provider 流 → ②MediaStore 行 DATA 直写 →
+  ③`/storage/emulated/0/Pictures/PenBridge` 普通文件 + 媒体扫描，每级结果入日志。
+
 **待办**：
 - [ ] **物理笔动作验证**（笔已重连，弹窗摘要联动正常）：实际触发各手势 → 撤销/重做/翻页/便签/圈选
 - [ ] 长按/捏握物理手势触发 → extraGestureAction 路由复测（bridge=107 已验证重启存续）

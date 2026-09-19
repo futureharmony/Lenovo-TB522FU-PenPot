@@ -194,6 +194,8 @@ final class LassoSelectOverlay {
         if (token == null) {
             throw new IllegalStateException("no display token from any source");
         }
+        HookUtils.log("lasso capture token=" + token.getClass().getName()
+                + " crop=" + crop);
         return captureWithArgs(token, crop);
     }
 
@@ -288,30 +290,57 @@ final class LassoSelectOverlay {
         } catch (Throwable th) {
             HookUtils.log("lasso token: getPhysicalDisplayToken: " + th);
         }
-        // 2) @hide Display#getAddress() -- the token of the default Display.
+        // 2) @hide Display#getAddress() -> DisplayAddress$Physical.  That is
+        // NOT an IBinder (on-device 2026-09-19: "argument 1 has type
+        // android.os.IBinder, got android.view.DisplayAddress$Physical"), so
+        // read its physical display id and ask OPPO's display service for the
+        // token -- this ROM's SurfaceControl exposes NO token getter at all
+        // (getInternalDisplayToken / getPhysicalDisplayIds / getPhysicalDisplayToken
+        // are all absent from the framework dex) and android.view.DisplayControl
+        // does not exist either.
         try {
             Object wm = ctx.getSystemService(Context.WINDOW_SERVICE);
             Object disp = wm.getClass().getMethod("getDefaultDisplay").invoke(wm);
-            Object t = disp.getClass().getMethod("getAddress").invoke(disp);
-            if (t != null) return t;
-            HookUtils.log("lasso token: Display.getAddress=null");
+            Object addr = disp.getClass().getMethod("getAddress").invoke(disp);
+            if (addr instanceof android.os.IBinder) return addr;
+            if (addr != null) {
+                Object idv = addr.getClass()
+                        .getMethod("getPhysicalDisplayId").invoke(addr);
+                long id = ((Number) idv).longValue();
+                HookUtils.log("lasso token: physical display id=" + id);
+                Object t = oplusDisplayToken(id);
+                if (t != null) return t;
+                HookUtils.log("lasso token: OplusDisplayManager token=null");
+            } else {
+                HookUtils.log("lasso token: Display.getAddress=null");
+            }
         } catch (Throwable th) {
             HookUtils.log("lasso token: Display.getAddress: " + th);
         }
-        // 3) @hide DisplayControl (system_server-only helper used by SystemUI).
-        try {
-            Class<?> dc = Class.forName("android.view.DisplayControl");
-            long[] ids = (long[]) dc.getMethod("getPhysicalDisplayIds").invoke(null);
-            if (ids != null && ids.length > 0) {
-                Object t = dc.getMethod("getPhysicalDisplayToken", Long.TYPE)
-                        .invoke(null, ids[0]);
-                if (t != null) return t;
-                HookUtils.log("lasso token: DisplayControl token=null");
+        // 3) Brute force the OPPO display service with the usual ids.
+        for (int i = 0; i < 4; i++) {
+            Object t = oplusDisplayToken(i);
+            if (t != null) {
+                HookUtils.log("lasso token: OplusDisplayManager id=" + i + " ok");
+                return t;
             }
-        } catch (Throwable th) {
-            HookUtils.log("lasso token: DisplayControl: " + th);
         }
         return null;
+    }
+
+    /** Display token via OPPO's own display service:
+     *  OplusDisplayManager.getInstance().getPhysicalDisplayToken(id). */
+    private static Object oplusDisplayToken(long displayId) {
+        try {
+            Class<?> om = Class.forName("android.hardware.display.OplusDisplayManager");
+            Object inst = om.getMethod("getInstance").invoke(null);
+            Object t = om.getMethod("getPhysicalDisplayToken", Long.TYPE)
+                    .invoke(inst, displayId);
+            return t instanceof android.os.IBinder ? t : null;
+        } catch (Throwable th) {
+            HookUtils.log("lasso token: OplusDisplayManager(" + displayId + "): " + th);
+            return null;
+        }
     }
 
     /** On-device OCR hook point.  Returns extracted text or null when no
