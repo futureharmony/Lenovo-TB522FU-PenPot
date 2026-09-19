@@ -406,7 +406,8 @@ final class OemGattProtocolHooks {
         if (context == null || intent == null) {
             return false;
         }
-        if (!"com.aclaniakea.lenovopenbridge.action.OEM_PEN_CONTROL".equals(intent.getAction())) {
+        if (!PenBridgeConstants.OEM_PEN_CONTROL.equals(intent.getAction())
+                && !PenBridgeConstants.OEM_PEN_CONTROL_LEGACY.equals(intent.getAction())) {
             return false;
         }
         String stringExtra = intent.getStringExtra("op");

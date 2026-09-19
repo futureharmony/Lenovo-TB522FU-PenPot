@@ -40,3 +40,7 @@ fi
 # 否则重新安装时会带着旧的失败计数，可能一开机就被 boot guard 熔断。
 rm -f /data/adb/tb522fu_pen_bridge.bootfail 2>/dev/null
 rm -f "$MODDIR/disable" "$MODDIR/disable-charge-guard" 2>/dev/null
+
+# --- 同步卸载配套 LSPosed Hook APK ---
+pm uninstall com.futureharmony.lenovopenbridge >/dev/null 2>&1
+pm uninstall com.aclaniakea.lenovopenbridge >/dev/null 2>&1

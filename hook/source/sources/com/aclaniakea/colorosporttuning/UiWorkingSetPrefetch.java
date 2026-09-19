@@ -35,11 +35,8 @@ public final class UiWorkingSetPrefetch implements IXposedHookLoadPackage {
 
     private void dispatchPackageHook(XC_LoadPackage.LoadPackageParam loadPackageParam, String pkg) {
         switch (pkg) {
-            case "com.oplus.healthservice":
             case "com.oplus.exsystemservice":
-                if ("com.oplus.exsystemservice".equals(loadPackageParam.packageName)) {
-                    ExSystemServiceHooks.install(loadPackageParam);
-                }
+                ExSystemServiceHooks.install(loadPackageParam);
                 HookUtils.log("broadcast/Binder target active: " + loadPackageParam.packageName);
                 break;
             case "android":

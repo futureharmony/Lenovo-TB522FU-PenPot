@@ -13,14 +13,14 @@
 #     uninstalls + reinstalls, which is harmless when the key is unchanged.
 #   * Vector CLI is fully scriptable; no manual tapping in the manager.
 #   * Boot guard only covers the KSU module. If boot hangs, disable the Hook
-#     module too:  vector-cli modules disable com.aclaniakea.lenovopenbridge
+#     module too:  vector-cli modules disable com.futureharmony.lenovopenbridge
 set -euo pipefail
 
 ADB="${ADB:-/opt/homebrew/bin/adb}"
 REPO="$(cd "$(dirname "$0")/.." && pwd)"
 HOOK_APK="${HOOK_APK:-$REPO/releases/PenBridge-Hook-tb522fu-v4.1.13.apk}"
 MODULE_ZIP="$REPO/releases/tb522fu-pen-bridge-v0.1.0.zip"
-PKG=com.aclaniakea.lenovopenbridge
+PKG=com.futureharmony.lenovopenbridge
 CLI=/data/adb/modules/zygisk_vector/cli
 # NOTE: the first entry MUST be the system_server pseudo-package `system/0`
 # (NOT `android/0`). See docs/install-vector-route.md section 3.
@@ -36,7 +36,7 @@ CLI=/data/adb/modules/zygisk_vector/cli
 #   system_server stylus hooks installed (startOtherServices=1 run=1)
 # `scope set` OVERWRITES the whole scope, so anything missing here is silently
 # deleted on the next deploy.
-SCOPE="system/0 com.coloros.note/0 com.oplus.exsystemservice/0 com.oplus.healthservice/0 com.heytap.mydevices/0 com.oplus.ipemanager/0 com.oplus.wirelesssettings/0 com.oplus.screenshot/0"
+SCOPE="system/0 com.coloros.note/0 com.oplus.exsystemservice/0 com.heytap.mydevices/0 com.oplus.ipemanager/0 com.oplus.wirelesssettings/0 com.oplus.screenshot/0 com.coloros.translate/0"
 
 SERIAL=""
 DO_MODULE=1

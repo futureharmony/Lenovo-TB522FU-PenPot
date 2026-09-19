@@ -76,6 +76,8 @@ HIDCTL_PERMISSION_FILE="$MODDIR/pen-hid-permissions.ready"
 BRIDGE_PERMISSION_FILE="$MODDIR/pen-bridge-permissions.ready"
 HIDCTL_LAUNCHER_FILE="$MODDIR/pen-hid-launcher.hidden"
 PEN_USER_DISCONNECT_KEY=lenovo_pen_user_disconnect_requested
+BRIDGE_PKG=com.futureharmony.lenovopenbridge
+BRIDGE_PKG_LEGACY=com.aclaniakea.lenovopenbridge
 
 # Respawn guard: if the real service exits (crash, OOM, kill), bring it
 # back after a short delay. KernelSU can invoke service.sh several times
@@ -402,7 +404,18 @@ grant_hidctl_bluetooth_permissions() {
 # revoke nearby-device runtime grants, so make the isolation path self-healing.
 grant_bridge_bluetooth_permissions() {
     [ -f "$BRIDGE_PERMISSION_FILE" ] && return 0
-    if [ -z "$(pm path com.aclaniakea.lenovopenbridge 2>/dev/null)" ]; then
+    target_pkg=""
+    if [ -n "$(pm path "$BRIDGE_PKG" 2>/dev/null)" ]; then
+        target_pkg="$BRIDGE_PKG"
+    elif [ -n "$(pm path "$BRIDGE_PKG_LEGACY" 2>/dev/null)" ]; then
+        target_pkg="$BRIDGE_PKG_LEGACY"
+    elif [ -f "$MODDIR/hook/PenBridge-Hook.apk" ]; then
+        pm install -r "$MODDIR/hook/PenBridge-Hook.apk" >/dev/null 2>&1
+        if [ -n "$(pm path "$BRIDGE_PKG" 2>/dev/null)" ]; then
+            target_pkg="$BRIDGE_PKG"
+        fi
+    fi
+    if [ -z "$target_pkg" ]; then
         echo "[$(date '+%F %T')] bridge permission grant skipped: Hook APK unavailable"
         return 0
     fi
@@ -410,14 +423,14 @@ grant_bridge_bluetooth_permissions() {
     for permission in \
             android.permission.BLUETOOTH_CONNECT \
             android.permission.BLUETOOTH_SCAN; do
-        if ! pm grant --user 0 com.aclaniakea.lenovopenbridge "$permission" >/dev/null 2>&1; then
+        if ! pm grant --user 0 "$target_pkg" "$permission" >/dev/null 2>&1; then
             failed=1
-            echo "[$(date '+%F %T')] bridge permission grant failed permission=$permission"
+            echo "[$(date '+%F %T')] bridge permission grant failed permission=$permission pkg=$target_pkg"
         fi
     done
     if [ "$failed" = 0 ]; then
         : >"$BRIDGE_PERMISSION_FILE"
-        echo "[$(date '+%F %T')] bridge Bluetooth runtime permissions granted"
+        echo "[$(date '+%F %T')] bridge Bluetooth runtime permissions granted for $target_pkg"
     fi
 }
 
@@ -427,12 +440,13 @@ grant_bridge_bluetooth_permissions() {
 # with "Failed to find provider info". Keep it un-stopped so the provider (and
 # therefore the writing haptic) is always reachable.
 unstop_bridge() {
-    if [ -z "$(pm path com.aclaniakea.lenovopenbridge 2>/dev/null)" ]; then
-        return 0
-    fi
-    if pm unstop --user 0 com.aclaniakea.lenovopenbridge >/dev/null 2>&1; then
-        echo "[$(date '+%F %T')] bridge Hook APK un-stopped (haptic provider reachable)"
-    fi
+    for pkg in "$BRIDGE_PKG" "$BRIDGE_PKG_LEGACY"; do
+        if [ -n "$(pm path "$pkg" 2>/dev/null)" ]; then
+            if pm unstop --user 0 "$pkg" >/dev/null 2>&1; then
+                echo "[$(date '+%F %T')] bridge Hook APK un-stopped ($pkg)"
+            fi
+        fi
+    done
 }
 
 hide_hidctl_launcher() {
@@ -839,7 +853,7 @@ request_pen_capsule() {
     charging=$(read_hardware_charging 1)
     mac=$(pen_mac_compact)
     am broadcast --user 0 --receiver-foreground \
-        -a com.aclaniakea.lenovopenbridge.action.SHOW_PENCIL_CAPSULE \
+        -a com.futureharmony.lenovopenbridge.action.SHOW_PENCIL_CAPSULE \
         -p com.oplus.ipemanager \
         --ei battery_level "$battery" \
         --ei charging_state "$charging" \
@@ -913,7 +927,7 @@ publish_hall_state() {
         hardware_battery=false
     fi
     am broadcast --user 0 --receiver-foreground \
-        -a com.aclaniakea.lenovopenbridge.action.COLOROS_PEN_STATE \
+        -a com.futureharmony.lenovopenbridge.action.COLOROS_PEN_STATE \
         -p com.oplus.ipemanager \
         $battery_args \
         --ei charging_state "$charging" \
@@ -1100,7 +1114,7 @@ monitor_real_bt_state() {
             case "$charging" in 0|1) ;; *) charging=0 ;; esac
             mac=$(pen_mac_compact)
             am broadcast --user 0 --receiver-foreground \
-                -a com.aclaniakea.lenovopenbridge.action.COLOROS_PEN_STATE \
+                -a com.futureharmony.lenovopenbridge.action.COLOROS_PEN_STATE \
                 -p com.oplus.ipemanager \
                 --ei connected "$connected" \
                 --ei battery_level "$battery" \

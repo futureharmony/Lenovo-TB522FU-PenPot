@@ -175,7 +175,7 @@ public final class GesturePreferenceManager {
             Settings.Global.putInt(ctx.getContentResolver(), key, value);
         } catch (Throwable ignored) { }
         try {
-            Intent i = new Intent("com.aclaniakea.lenovopenbridge.WRITE_GESTURE_KEY");
+            Intent i = new Intent(PenBridgeConstants.WRITE_GESTURE_KEY);
             i.putExtra("key", key);
             i.putExtra("value", value);
             ctx.sendBroadcast(i);

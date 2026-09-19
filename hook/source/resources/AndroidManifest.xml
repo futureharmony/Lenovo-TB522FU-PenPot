@@ -1,10 +1,10 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
-    android:versionCode="450003"
-    android:versionName="4.5.3"
+    android:versionCode="450004"
+    android:versionName="4.5.4"
     android:compileSdkVersion="36"
     android:compileSdkVersionCodename="16"
-    package="com.aclaniakea.lenovopenbridge"
+    package="com.futureharmony.lenovopenbridge"
     platformBuildVersionCode="36"
     platformBuildVersionName="16">
     <uses-sdk
@@ -62,6 +62,7 @@
                 <action android:name="android.bluetooth.device.action.BOND_STATE_CHANGED"/>
                 <action android:name="android.bluetooth.device.action.BATTERY_LEVEL_CHANGED"/>
                 <action android:name="android.bluetooth.adapter.action.STATE_CHANGED"/>
+                <action android:name="com.futureharmony.lenovopenbridge.action.HAPTIC_TRANSPORT"/>
                 <action android:name="com.aclaniakea.lenovopenbridge.action.HAPTIC_TRANSPORT"/>
             </intent-filter>
         </receiver>
@@ -71,7 +72,7 @@
              persisted here. See PenShareProvider. -->
         <provider
             android:name="com.aclaniakea.colorosporttuning.PenShareProvider"
-            android:authorities="com.aclaniakea.lenovopenbridge.share"
+            android:authorities="com.futureharmony.lenovopenbridge.share;com.aclaniakea.lenovopenbridge.share"
             android:exported="true"
             android:grantUriPermissions="true"
             android:directBootAware="true"/>

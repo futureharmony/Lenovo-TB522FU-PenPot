@@ -195,7 +195,8 @@ ACT_DOUBLE=$(settings get global ipe_pencil_wb_click_double_click 2>/dev/null)
 LSP_STATUS="未安装"
 [ -d /data/adb/lspd ] && LSP_STATUS="正常运行 (LSPosed/JingMatrix)"
 
-HOOK_PATH=$(pm path com.aclaniakea.lenovopenbridge 2>/dev/null | head -1)
+HOOK_PATH=$(pm path com.futureharmony.lenovopenbridge 2>/dev/null | head -1)
+[ -z "$HOOK_PATH" ] && HOOK_PATH=$(pm path com.aclaniakea.lenovopenbridge 2>/dev/null | head -1)
 if [ -n "$HOOK_PATH" ]; then
     HOOK_STATUS="已安装并加载核心 Hook"
 else

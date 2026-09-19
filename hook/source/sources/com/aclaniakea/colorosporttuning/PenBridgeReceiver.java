@@ -13,8 +13,8 @@ import android.view.InputDevice;
 
 /* loaded from: classes.dex */
 public final class PenBridgeReceiver extends BroadcastReceiver {
-    static final String ACTION_HAPTIC_TRANSPORT =
-            "com.aclaniakea.lenovopenbridge.action.HAPTIC_TRANSPORT";
+    static final String ACTION_HAPTIC_TRANSPORT = PenBridgeConstants.HAPTIC_TRANSPORT;
+    static final String ACTION_HAPTIC_TRANSPORT_LEGACY = PenBridgeConstants.HAPTIC_TRANSPORT_LEGACY;
     private static volatile long lastBondedAt = 0;
     private static volatile String lastBondedMac = "";
 
@@ -84,7 +84,7 @@ public final class PenBridgeReceiver extends BroadcastReceiver {
         if (!DeviceGate.supported() || intent == null) {
             return;
         }
-        if (ACTION_HAPTIC_TRANSPORT.equals(intent.getAction())) {
+        if (ACTION_HAPTIC_TRANSPORT.equals(intent.getAction()) || ACTION_HAPTIC_TRANSPORT_LEGACY.equals(intent.getAction())) {
             handleHapticTransport(context, intent);
             return;
         }
@@ -221,7 +221,7 @@ public final class PenBridgeReceiver extends BroadcastReceiver {
             }
             String str = strFirst2;
             String str2 = strFirst3;
-            boolean z3 = (!HookUtils.disconnectRequested(context) || "com.aclaniakea.lenovopenbridge.action.RECONNECT_PEN".equals(strValueOf)) ? z2 : false;
+            boolean z3 = (!HookUtils.disconnectRequested(context) || PenBridgeConstants.RECONNECT.equals(strValueOf) || PenBridgeConstants.RECONNECT_LEGACY.equals(strValueOf)) ? z2 : false;
             String strFirst4 = first(intent, "version", "firmware", "fwVersion");
             if (strFirst4.length() == 0) {
                 strFirst4 = penState.firmware;

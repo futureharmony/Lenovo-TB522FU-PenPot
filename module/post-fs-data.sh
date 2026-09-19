@@ -69,8 +69,8 @@ run_bounded() {
 # Vector is API 102 — writing to it risks corrupting Vector's module table.
 # Vector enables modules and scopes through its own daemon + CLI, which
 # replaces this entire block:
-#   /data/adb/modules/zygisk_vector/cli modules enable com.aclaniakea.lenovopenbridge
-#   /data/adb/modules/zygisk_vector/cli scope set com.aclaniakea.lenovopenbridge \
+#   /data/adb/modules/zygisk_vector/cli modules enable com.futureharmony.lenovopenbridge
+#   /data/adb/modules/zygisk_vector/cli scope set com.futureharmony.lenovopenbridge \
 #       android/0 com.coloros.note/0 ... (see docs/install-vector-route.md)
 # Only re-enable this block if the device actually runs LSPosed again.
 LSP_DB=/data/adb/lspd/config/modules_config.db
@@ -87,10 +87,10 @@ if [ -f "$MODDIR/enable-lsposed-path-sync" ] &&
     while [ "$sync_attempt" -lt 2 ]; do
         if run_bounded 20 env CLASSPATH="$LSP_SYNC" app_process /system/bin \
                 com.aclaniakea.tools.LsposedPathSync "$LSP_DB" "$LSP_APK" \
-                com.aclaniakea.lenovopenbridge \
+                com.futureharmony.lenovopenbridge \
                 system com.coloros.note com.oplus.exsystemservice \
-                com.oplus.healthservice com.heytap.mydevices com.oplus.ipemanager \
-                com.oplus.wirelesssettings com.oplus.screenshot >/dev/null 2>&1; then
+                com.heytap.mydevices com.oplus.ipemanager \
+                com.oplus.wirelesssettings com.oplus.screenshot com.coloros.translate >/dev/null 2>&1; then
             break
         fi
         sync_attempt=$((sync_attempt + 1))

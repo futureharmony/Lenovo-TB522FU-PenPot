@@ -1,6 +1,6 @@
 #!/system/bin/sh
 
-ui_print "- 联想手写笔桥接 Root 服务 1.1.27（ACLaniakea）"
+ui_print "- 联想手写笔桥接 Root 服务（futureharmony 定制版）"
 ui_print "- 开机按已绑定手写笔地址直接调用原厂 CoreService BLE 连接"
 ui_print "- 设置页断开同时执行原厂 CoreService、GATT/HID 实际断开"
 ui_print "- 统一 Hall/CPS/BLE 硬件充电状态与 ColorOS 设置页热切换"
@@ -21,15 +21,24 @@ ui_print "- 想回退内置笔桥：KSU/Magisk 管理器「执行」按钮 → s
 ui_print "- 切换指令：sh action.sh enable|disable|toggle（默认 disable）"
 ui_print "- 启动自保：连续 3 次开机失败将自动停用本模块"
 ui_print "- 一键救援：sh panic.sh（恢复状态并停用模块）"
-ui_print "- 卸载本模块会无条件恢复 inkdye，可随时回退"
+ui_print "- 卸载本模块会无条件恢复 inkdye，并自动卸载配套 Hook APK"
 
-# An older revision may have embedded the Hook APK in this same module.
-# Remove only those exact legacy paths during the split update. The new Root
-# package intentionally has no com.aclaniakea.lenovopenbridge APK of its own.
+# Clean legacy paths
 rm -rf "$MODPATH/system/priv-app/lenovopenbridge" \
        "$MODPATH/system/system_ext/priv-app/lenovopenbridge" 2>/dev/null
 rm -f "$MODPATH/system/etc/permissions/privapp-permissions-com.aclaniakea.lenovopenbridge.xml" \
-      "$MODPATH/system/system_ext/etc/permissions/privapp-permissions-com.aclaniakea.lenovopenbridge.xml" 2>/dev/null
+      "$MODPATH/system/system_ext/etc/permissions/privapp-permissions-com.aclaniakea.lenovopenbridge.xml" \
+      "$MODPATH/system/etc/permissions/privapp-permissions-com.futureharmony.lenovopenbridge.xml" 2>/dev/null
+
+# --- 自动同步安装/更新配套 LSPosed Hook APK ---
+if [ -f "$MODPATH/hook/PenBridge-Hook.apk" ]; then
+    ui_print "- 正在自动安装配套 LSPosed Hook APK..."
+    if pm install -r "$MODPATH/hook/PenBridge-Hook.apk" >/dev/null 2>&1; then
+        ui_print "- 配套 Hook APK 安装成功 (com.futureharmony.lenovopenbridge)"
+    else
+        ui_print "! 提示: Hook APK 未能即时安装（如在 Recovery 下），将在开机时由 service.sh 自动安装"
+    fi
+fi
 
 HIDCTL_APK="$MODPATH/system/priv-app/penhidctl/PenHidCtl.apk"
 if [ -f "$HIDCTL_APK" ]; then
@@ -71,10 +80,10 @@ if [ -f "$MODPATH/enable-lsposed-path-sync" ] && \
         com.aclaniakea.tools.LsposedPathSync \
         /data/adb/lspd/config/modules_config.db \
         "$MODPATH/hook/PenBridge-Hook.apk" \
-        com.aclaniakea.lenovopenbridge \
+        com.futureharmony.lenovopenbridge \
         system com.coloros.note com.oplus.exsystemservice \
-        com.oplus.healthservice com.heytap.mydevices com.oplus.ipemanager \
-        com.oplus.wirelesssettings com.oplus.screenshot >/dev/null 2>&1 && \
+        com.heytap.mydevices com.oplus.ipemanager \
+        com.oplus.wirelesssettings com.oplus.screenshot com.coloros.translate >/dev/null 2>&1 && \
         ui_print "- Pen Hook 路径与原厂作用域已固定，system_server 冷启动直接加载"
 fi
 

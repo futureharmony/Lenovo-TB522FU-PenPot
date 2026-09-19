@@ -88,7 +88,7 @@ notify() {
     out=$(cmd notification post -S bigtext -t "手写笔" "pen_charge_guard" "$1" 2>&1)
     rc=$?
     log "notify rc=$rc msg=$1 (ColorOS drops shell notifs; UI via hook broadcast)"
-    am broadcast -a com.aclaniakea.lenovopenbridge.action.SHOW_PENCIL_CAPSULE \
+    am broadcast -a com.futureharmony.lenovopenbridge.action.SHOW_PENCIL_CAPSULE \
         --es text "$1" >/dev/null 2>&1
 }
 

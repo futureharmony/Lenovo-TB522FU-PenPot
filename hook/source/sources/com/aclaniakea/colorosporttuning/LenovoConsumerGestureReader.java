@@ -139,7 +139,13 @@ final class LenovoConsumerGestureReader implements Runnable {
             return true;
         }
         try {
-            String str = context.createPackageContext("com.aclaniakea.lenovopenbridge", 0).getApplicationInfo().nativeLibraryDir + "/libpeninput.so";
+            String pkg = HookUtils.MODULE_PACKAGE;
+            try {
+                context.getPackageManager().getPackageInfo(pkg, 0);
+            } catch (Throwable ignored) {
+                pkg = HookUtils.MODULE_PACKAGE_LEGACY;
+            }
+            String str = context.createPackageContext(pkg, 0).getApplicationInfo().nativeLibraryDir + "/libpeninput.so";
             System.load(str);
             nativeReady = true;
             HookUtils.log("native pen input loaded: " + str);

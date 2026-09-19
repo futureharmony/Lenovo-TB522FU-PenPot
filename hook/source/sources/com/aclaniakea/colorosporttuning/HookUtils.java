@@ -18,7 +18,8 @@ import java.lang.reflect.Method;
 
 /* loaded from: classes.dex */
 final class HookUtils {
-    static final String MODULE_PACKAGE = "com.aclaniakea.lenovopenbridge";
+    static final String MODULE_PACKAGE = "com.futureharmony.lenovopenbridge";
+    static final String MODULE_PACKAGE_LEGACY = "com.aclaniakea.lenovopenbridge";
     private static final int HID_HOST_PROFILE = 4;
     private static volatile BluetoothProfile hidHostProxy;
     private static volatile boolean hidHostProxyRequested;
@@ -178,7 +179,8 @@ final class HookUtils {
             return false;
         }
         try {
-            if (String.valueOf(obj).contains(MODULE_PACKAGE)) {
+            String str = String.valueOf(obj);
+            if (str.contains(MODULE_PACKAGE) || str.contains(MODULE_PACKAGE_LEGACY)) {
                 return true;
             }
         } catch (Throwable th) {

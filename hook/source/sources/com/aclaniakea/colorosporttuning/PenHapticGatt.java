@@ -529,7 +529,7 @@ final class PenHapticGatt {
                 // coalesces the command until its s0 session is ready.
                 int readyState = Settings.Global.getInt(context.getContentResolver(),
                         "lenovo_pen_oem_control_ready", 0);
-                Intent intentPutExtra = new Intent("com.aclaniakea.lenovopenbridge.action.OEM_PEN_CONTROL")
+                Intent intentPutExtra = new Intent(PenBridgeConstants.OEM_PEN_CONTROL)
                         .setPackage("com.oplus.ipemanager")
                         .addFlags(Intent.FLAG_RECEIVER_FOREGROUND)
                         .putExtra("op", str2);

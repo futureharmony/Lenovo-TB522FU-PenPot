@@ -102,7 +102,7 @@ final class LenovoPenUEventBridge extends UEventObserver {
             return;
         }
         Intent intent = new Intent("lenovo.intent.action.PEN_BT_CHANGED");
-        intent.setPackage("com.aclaniakea.lenovopenbridge");
+        intent.setPackage(HookUtils.MODULE_PACKAGE);
         intent.putExtra("connected", zConnected ? 1 : 0);
         intent.putExtra("connectState", zConnected ? 2 : 0);
         intent.putExtra("name", "Lenovo Tab Pen Pro");
@@ -116,7 +116,7 @@ final class LenovoPenUEventBridge extends UEventObserver {
         send(intent);
         if (validBattery(iBattery) || iCharging >= 0) {
             Intent intent2 = new Intent("lenovo.intent.action.PEN_BATTERY_CHANGED");
-            intent2.setPackage("com.aclaniakea.lenovopenbridge");
+            intent2.setPackage(HookUtils.MODULE_PACKAGE);
             intent2.putExtra("name", "Lenovo Tab Pen Pro");
             intent2.putExtra("connected", zConnected ? 1 : 0);
             intent2.putExtra("hardware_identity_known", true);
@@ -151,7 +151,7 @@ final class LenovoPenUEventBridge extends UEventObserver {
         // bridge converted it into a fake ACL_CONNECTED broadcast, which
         // could start a second OEM GATT session after a real disconnect.
         try {
-            this.context.sendBroadcastAsUser(new Intent("com.aclaniakea.lenovopenbridge.action.COLOROS_PEN_STATE").setPackage("com.oplus.ipemanager").putExtras(intent), UserHandle.getUserHandleForUid(0));
+            this.context.sendBroadcastAsUser(new Intent(PenBridgeConstants.COLOROS_HANDOFF).setPackage("com.oplus.ipemanager").putExtras(intent), UserHandle.getUserHandleForUid(0));
         } catch (Throwable th2) {
             HookUtils.log("IPe state handoff failed: " + th2);
         }

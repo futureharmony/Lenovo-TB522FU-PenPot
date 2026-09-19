@@ -20,7 +20,7 @@
 | 文件 | 说明 |
 |---|---|
 | `releases/tb522fu-pen-bridge-v0.1.0.zip` | KernelSU 模块（含 Hook 副本、PenHidCtl priv-app、charge-guard、panic） |
-| `releases/PenBridge-Hook-tb522fu-v4.1.4.apk` | Xposed 模块本体（com.aclaniakea.lenovopenbridge）；v4.1.4 起为**延迟安装**版并镜像日志到 logcat |
+| `releases/PenBridge-Hook-tb522fu-v4.1.4.apk` | Xposed 模块本体（com.futureharmony.lenovopenbridge）；v4.1.4 起为**延迟安装**版并镜像日志到 logcat |
 | `releases/PenHidCtl-tb522fu-1.1.0.apk` | HID 控制器（以 priv-app 形式随模块装载） |
 
 ## 2. 部署（全部可脚本化）
@@ -33,10 +33,10 @@ adb shell su -c 'pm install -r -d /data/local/tmp/PenBridge-Hook.apk'
 # 2) 用 vector-cli 启用模块 + 配置作用域（1 + 7 项，全部 user 0）
 #    ⚠️ system_server 用伪包名 `system`，不要写成 `android`（见第 3 节）
 CLI=/data/adb/modules/zygisk_vector/cli
-adb shell su -c "$CLI modules enable com.aclaniakea.lenovopenbridge"
-adb shell su -c "$CLI scope set com.aclaniakea.lenovopenbridge \
-  system/0 com.coloros.note/0 com.oplus.exsystemservice/0 com.oplus.healthservice/0 \
-  com.heytap.mydevices/0 com.oplus.ipemanager/0 com.oplus.wirelesssettings/0 com.oplus.screenshot/0"
+adb shell su -c "$CLI modules enable com.futureharmony.lenovopenbridge"
+adb shell su -c "$CLI scope set com.futureharmony.lenovopenbridge \
+  system/0 com.coloros.note/0 com.oplus.exsystemservice/0 \
+  com.heytap.mydevices/0 com.oplus.ipemanager/0 com.oplus.wirelesssettings/0 com.oplus.screenshot/0 com.coloros.translate/0"
 
 # 3) 刷 Root 模块
 adb push releases/tb522fu-pen-bridge-v0.1.0.zip /data/local/tmp/pen-bridge.zip
@@ -90,7 +90,7 @@ com.oplus.wirelesssettings    # 无线设置（充电相关 UI）
 ```sh
 adb shell su -c '/data/adb/modules/zygisk_vector/cli log cat' | grep VectorLegacyBridge
 ```
-预期：出现 `Loading legacy module com.aclaniakea.lenovopenbridge` +
+预期：出现 `Loading legacy module com.futureharmony.lenovopenbridge` +
 `Loading class com.aclaniakea.colorosporttuning.UiWorkingSetPrefetch`。
 
 **关键判据（system_server 是否真的注入）**——查 KernelSU 的 logcat 存档最省事：
@@ -142,7 +142,7 @@ adb shell su -c 'ksud module uninstall tb522fu_pen_bridge'
 挂 `/data` → `rm -rf /data/adb/modules/tb522fu_pen_bridge` → 重启。
 
 > ⚠️ 上述救援**只覆盖 KSU 模块**。Vector hook 不在 boot guard 管辖内，
-> 若 hook 导致卡死，须用 `vector-cli modules disable com.aclaniakea.lenovopenbridge`
+> 若 hook 导致卡死，须用 `vector-cli modules disable com.futureharmony.lenovopenbridge`
 > 或安全模式处理。**排查卡死时两者要分开停用**。
 
 ## 6. 实战踩坑记录（2026-09-18）

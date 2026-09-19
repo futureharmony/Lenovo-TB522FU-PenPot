@@ -6,7 +6,7 @@
 
 ```
 module/       KernelSU/Magisk Root 模块（含 charge-guard 充电守护）
-hook/         Xposed Hook 源码（com.aclaniakea.lenovopenbridge）
+hook/         Xposed Hook 源码（com.futureharmony.lenovopenbridge）
 penhidctl/    priv-app HID 控制器源码
 scripts/      设备侦察/推送辅助脚本
 docs/         分析与验证记录
@@ -42,7 +42,7 @@ vector-cli 用法、踩坑记录、救援分层）。
   临时仅停守护：`touch $MODDIR/disable-charge-guard`。
 
 > ⚠️ 启动失败自保（boot guard）**只管 KSU 模块**。Vector hook 若导致卡死，
-> 须用 `vector-cli modules disable com.aclaniakea.lenovopenbridge` 或安全模式。
+> 须用 `vector-cli modules disable com.futureharmony.lenovopenbridge` 或安全模式。
 > **排查卡死时两者必须分开停用**（实测：hook + 模块同开曾卡死，仅模块正常）。
 
 ## 启动失败自保

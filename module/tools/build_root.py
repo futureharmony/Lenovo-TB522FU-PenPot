@@ -27,16 +27,20 @@ INCLUDE = (
     "uninstall.sh",
 )
 
-EXTERNAL = {
-    "hook/PenBridge-Hook.apk": "releases/PenBridge-Hook-tb522fu-v4.5.3.apk",
-}
+def find_latest_hook_apk(repo: Path) -> Path:
+    candidates = sorted(repo.glob("releases/PenBridge-Hook-tb522fu-v*.apk"))
+    if candidates:
+        return candidates[-1]
+    fallback = repo / "releases" / "PenBridge-Hook-tb522fu-v4.5.4.apk"
+    if fallback.is_file():
+        return fallback
+    raise FileNotFoundError("no PenBridge-Hook APK found in releases/")
 
 
 def build(module_dir: Path, output: Path) -> None:
     repo = module_dir.parents[0]  # tb522fu-pen-port layout: module/ at repo root
     missing = [name for name in INCLUDE if not (module_dir / name).is_file()]
-    missing += [name for name, source in EXTERNAL.items()
-                if not (repo / source).is_file()]
+    hook_apk = find_latest_hook_apk(repo)
     if missing:
         raise FileNotFoundError("missing module files: " + ", ".join(missing))
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -47,12 +51,10 @@ def build(module_dir: Path, output: Path) -> None:
             info.compress_type = zipfile.ZIP_DEFLATED
             info.external_attr = (stat.S_IMODE(path.stat().st_mode) | stat.S_IFREG) << 16
             archive.writestr(info, path.read_bytes())
-        for name, source in EXTERNAL.items():
-            path = repo / source
-            info = zipfile.ZipInfo(name)
-            info.compress_type = zipfile.ZIP_STORED
-            info.external_attr = (0o644 | stat.S_IFREG) << 16
-            archive.writestr(info, path.read_bytes())
+        info = zipfile.ZipInfo("hook/PenBridge-Hook.apk")
+        info.compress_type = zipfile.ZIP_STORED
+        info.external_attr = (0o644 | stat.S_IFREG) << 16
+        archive.writestr(info, hook_apk.read_bytes())
     print(output)
 
 

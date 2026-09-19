@@ -713,13 +713,14 @@ final class IpeManagerHooks {
                     if (intent == null) {
                         return;
                     }
-                    if ("com.aclaniakea.lenovopenbridge.action.COLOROS_PEN_STATE".equals(intent.getAction())) {
+                    String action = intent.getAction();
+                    if (PenBridgeConstants.COLOROS_HANDOFF.equals(action) || PenBridgeConstants.COLOROS_HANDOFF_LEGACY.equals(action)) {
                         if (zEquals) {
                             IpeManagerHooks.handoffColorOsState(context, intent);
                         }
                         IpeManagerHooks.notifySettingsPage(context, intent);
                     } else {
-                        if ("com.aclaniakea.lenovopenbridge.action.SHOW_PENCIL_CAPSULE".equals(intent.getAction())) {
+                        if (PenBridgeConstants.SHOW_CAPSULE.equals(action) || PenBridgeConstants.SHOW_CAPSULE_LEGACY.equals(action)) {
                             if (zEquals) {
                                 Context context3 = context;
                                 IpeManagerHooks.showMagneticCapsule(context3, intent.getIntExtra("battery_level", -1), IpeManagerHooks.chargingExtra(intent, -1));
@@ -727,22 +728,25 @@ final class IpeManagerHooks {
                             }
                             return;
                         }
-                        if ("com.aclaniakea.lenovopenbridge.action.DISMISS_PENCIL_CAPSULE".equals(intent.getAction())) {
+                        if (PenBridgeConstants.DISMISS_CAPSULE.equals(action) || PenBridgeConstants.DISMISS_CAPSULE_LEGACY.equals(action)) {
                             if (zEquals) {
                                 IpeManagerHooks.dismissMagneticCapsule();
                             }
                             return;
                         }
-                        if ("com.oplus.ipemanager.action.BATTERY_NOTIFY".equals(intent.getAction())) {
+                        if ("com.oplus.ipemanager.action.BATTERY_NOTIFY".equals(action)) {
                             IpeManagerHooks.notifySettingsPage(context, intent);
                         }
                     }
                 }
             };
             IntentFilter intentFilter = new IntentFilter();
-            intentFilter.addAction("com.aclaniakea.lenovopenbridge.action.COLOROS_PEN_STATE");
-            intentFilter.addAction("com.aclaniakea.lenovopenbridge.action.SHOW_PENCIL_CAPSULE");
-            intentFilter.addAction("com.aclaniakea.lenovopenbridge.action.DISMISS_PENCIL_CAPSULE");
+            intentFilter.addAction(PenBridgeConstants.COLOROS_HANDOFF);
+            intentFilter.addAction(PenBridgeConstants.COLOROS_HANDOFF_LEGACY);
+            intentFilter.addAction(PenBridgeConstants.SHOW_CAPSULE);
+            intentFilter.addAction(PenBridgeConstants.SHOW_CAPSULE_LEGACY);
+            intentFilter.addAction(PenBridgeConstants.DISMISS_CAPSULE);
+            intentFilter.addAction(PenBridgeConstants.DISMISS_CAPSULE_LEGACY);
             intentFilter.addAction("com.oplus.ipemanager.action.BATTERY_NOTIFY");
             if (Build.VERSION.SDK_INT >= 33) {
                 context.registerReceiver(broadcastReceiver, intentFilter, 2);
@@ -759,7 +763,8 @@ final class IpeManagerHooks {
                         OemGattProtocolHooks.handleControl(context, controlIntent);
                     }
                 };
-                IntentFilter controlFilter = new IntentFilter("com.aclaniakea.lenovopenbridge.action.OEM_PEN_CONTROL");
+                IntentFilter controlFilter = new IntentFilter(PenBridgeConstants.OEM_PEN_CONTROL);
+                controlFilter.addAction(PenBridgeConstants.OEM_PEN_CONTROL_LEGACY);
                 if (Build.VERSION.SDK_INT >= 33) {
                     context.registerReceiver(controlReceiver, controlFilter, null, oemControlHandler, 2);
                 } else {

@@ -1334,7 +1334,7 @@ final class SystemStylusHooks {
             }
         } else {
             setPenTouchpadEnabled(context, true);
-            sendAll(context, new Intent("com.aclaniakea.lenovopenbridge.action.DISMISS_PENCIL_CAPSULE").setPackage("com.oplus.ipemanager"), null);
+            sendAll(context, new Intent(PenBridgeConstants.DISMISS_CAPSULE).setPackage("com.oplus.ipemanager"), null);
         }
         PenBridgeReceiver.publishPhysicalEdge(context, z2);
         updateRefreshFromState(context);
@@ -1582,7 +1582,7 @@ final class SystemStylusHooks {
             int charging = HookUtils.effectiveCharging(context, Settings.Global.getInt(context.getContentResolver(), "ipe_pencil_charging_state", 0));
             String mac = Settings.Global.getString(context.getContentResolver(), "ipe_pencil_mac_addr");
             boolean present = !HookUtils.disconnectRequested(context);
-            sendAll(context, new Intent("com.aclaniakea.lenovopenbridge.action.SHOW_PENCIL_CAPSULE").setPackage("com.oplus.ipemanager").putExtra("battery_level", iBatteryForCapsule).putExtra("charging_state", charging).putExtra("chargingState", charging).putExtra("charging", charging).putExtra("present", present ? "1" : "0").putExtra("macAddr", mac == null ? "" : mac.replace(":", "")).putExtra("source", "lenovo_pen_hall_validated"), null);
+            sendAll(context, new Intent(PenBridgeConstants.SHOW_CAPSULE).setPackage("com.oplus.ipemanager").putExtra("battery_level", iBatteryForCapsule).putExtra("charging_state", charging).putExtra("chargingState", charging).putExtra("charging", charging).putExtra("present", present ? "1" : "0").putExtra("macAddr", mac == null ? "" : mac.replace(":", "")).putExtra("source", "lenovo_pen_hall_validated"), null);
             HookUtils.log("validated Hall magnetic capsule requested: battery=" + iBatteryForCapsule + " charging=" + charging);
         } else if (i < 40) {
             main.postDelayed(new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda0
@@ -1659,7 +1659,7 @@ final class SystemStylusHooks {
                 // keyguard animation, and delayed the next main-thread message
                 // by 202ms.  Return before scheduling it.
                 return;
-            } else if ("com.aclaniakea.lenovopenbridge.action.RECONNECT_PEN".equals(action)) {
+            } else if (PenBridgeConstants.RECONNECT.equals(action) || PenBridgeConstants.RECONNECT_LEGACY.equals(action)) {
                     try {
                         Settings.Global.putInt(this.val$c.getContentResolver(), "lenovo_pen_disconnect_requested", 0);
                         Settings.Global.putInt(this.val$c.getContentResolver(), "lenovo_pen_user_disconnect_requested", 0);
@@ -1780,8 +1780,8 @@ final class SystemStylusHooks {
                     }
                 }
             };
-            IntentFilter intentFilter = new IntentFilter(
-                    "com.aclaniakea.lenovopenbridge.WRITE_GESTURE_KEY");
+            IntentFilter intentFilter = new IntentFilter(PenBridgeConstants.WRITE_GESTURE_KEY);
+            intentFilter.addAction(PenBridgeConstants.WRITE_GESTURE_KEY_LEGACY);
             if (Build.VERSION.SDK_INT >= 33) {
                 context.registerReceiver(bridgeWriter, intentFilter, 2);
             } else {
@@ -1821,8 +1821,8 @@ final class SystemStylusHooks {
                     }
                 }
             };
-            IntentFilter filter = new IntentFilter(
-                    "com.aclaniakea.lenovopenbridge.RUN_ACTION");
+            IntentFilter filter = new IntentFilter(PenBridgeConstants.RUN_ACTION);
+            filter.addAction(PenBridgeConstants.RUN_ACTION_LEGACY);
             if (Build.VERSION.SDK_INT >= 33) {
                 context.registerReceiver(runner, filter, 2);
             } else {
@@ -1845,7 +1845,8 @@ final class SystemStylusHooks {
             intentFilter.addAction("android.intent.action.USER_UNLOCKED");
             intentFilter.addAction("android.intent.action.SCREEN_ON");
             intentFilter.addAction("android.intent.action.SCREEN_OFF");
-            intentFilter.addAction("com.aclaniakea.lenovopenbridge.action.RECONNECT_PEN");
+            intentFilter.addAction(PenBridgeConstants.RECONNECT);
+            intentFilter.addAction(PenBridgeConstants.RECONNECT_LEGACY);
             intentFilter.addAction("android.bluetooth.device.action.ACL_CONNECTED");
             intentFilter.addAction("android.bluetooth.device.action.ACL_DISCONNECTED");
             intentFilter.addAction("android.bluetooth.device.action.BATTERY_LEVEL_CHANGED");
@@ -1876,13 +1877,15 @@ final class SystemStylusHooks {
         BroadcastReceiver broadcastReceiver = new BroadcastReceiver() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.7
             @Override // android.content.BroadcastReceiver
             public void onReceive(Context context2, Intent intent) {
-                if ("com.aclaniakea.lenovopenbridge.haptic.TOUCHSCREEN".equals(intent.getAction())) {
+                if (PenBridgeConstants.HAPTIC_TOUCHSCREEN.equals(intent.getAction())
+                        || PenBridgeConstants.HAPTIC_TOUCHSCREEN_LEGACY.equals(intent.getAction())) {
                     SystemStylusHooks.setTouchscreen(intent.getBooleanExtra("enabled", true));
                 }
             }
         };
         try {
-            IntentFilter intentFilter = new IntentFilter("com.aclaniakea.lenovopenbridge.haptic.TOUCHSCREEN");
+            IntentFilter intentFilter = new IntentFilter(PenBridgeConstants.HAPTIC_TOUCHSCREEN);
+            intentFilter.addAction(PenBridgeConstants.HAPTIC_TOUCHSCREEN_LEGACY);
             if (Build.VERSION.SDK_INT >= 33) {
                 context.registerReceiver(broadcastReceiver, intentFilter, 2);
             } else {
@@ -1901,7 +1904,8 @@ final class SystemStylusHooks {
             BroadcastReceiver broadcastReceiver = new BroadcastReceiver() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.8
                 @Override // android.content.BroadcastReceiver
                 public void onReceive(Context context2, Intent intent) {
-                    if (intent == null || !"com.aclaniakea.lenovopenbridge.haptic.COMMAND".equals(intent.getAction())) {
+                    if (intent == null || (!PenBridgeConstants.HAPTIC_COMMAND.equals(intent.getAction())
+                            && !PenBridgeConstants.HAPTIC_COMMAND_LEGACY.equals(intent.getAction()))) {
                         return;
                     }
                     boolean booleanExtra = intent.getBooleanExtra("enabled", Settings.Global.getInt(context.getContentResolver(), "lenovo_pen_global_writing_haptic", 1) != 0);
@@ -1912,7 +1916,8 @@ final class SystemStylusHooks {
                     HookUtils.log("writing haptic runtime control=" + booleanExtra);
                 }
             };
-            IntentFilter intentFilter = new IntentFilter("com.aclaniakea.lenovopenbridge.haptic.COMMAND");
+            IntentFilter intentFilter = new IntentFilter(PenBridgeConstants.HAPTIC_COMMAND);
+            intentFilter.addAction(PenBridgeConstants.HAPTIC_COMMAND_LEGACY);
             if (Build.VERSION.SDK_INT >= 33) {
                 context.registerReceiver(broadcastReceiver, intentFilter, 2);
             } else {
