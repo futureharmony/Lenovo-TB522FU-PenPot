@@ -10,6 +10,7 @@ import android.os.Build;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.SystemClock;
+import android.view.MotionEvent;
 import android.view.View;
 import android.view.ViewGroup;
 import de.robv.android.xposed.XC_MethodHook;
@@ -241,8 +242,8 @@ final class CanvasPaintHooks {
         return act;
     }
 
-    private static final String[] UNDO_NAMES = {"menu_undo", "undo_button", "undo_btn", "btn_undo", "undo"};
-    private static final String[] REDO_NAMES = {"menu_redo", "redo_button", "redo_btn", "btn_redo", "redo"};
+    private static final String[] UNDO_NAMES = {"undo", "menu_undo", "undo_button", "undo_btn", "btn_undo"};
+    private static final String[] REDO_NAMES = {"redo", "menu_redo", "redo_button", "redo_btn", "btn_redo"};
 
     private static View findUndoRedoButton(View root, boolean redo) {
         if (root == null) return null;
@@ -253,7 +254,7 @@ final class CanvasPaintHooks {
                     int resId = root.getResources().getIdentifier(name, "id", root.getContext().getPackageName());
                     if (resId != 0) {
                         View found = root.findViewById(resId);
-                        if (found != null) {
+                        if (found != null && found.getVisibility() == View.VISIBLE && (found.getWidth() > 0 || found.isAttachedToWindow())) {
                             return found;
                         }
                     }
@@ -267,8 +268,6 @@ final class CanvasPaintHooks {
     private static View searchViewRecursive(View root, boolean redo) {
         if (root == null) return null;
         String[] targetIds = redo ? REDO_NAMES : UNDO_NAMES;
-        String desc1 = redo ? "恢复" : "撤销";
-        String desc2 = redo ? "Redo" : "Undo";
 
         int id = root.getId();
         if (id != View.NO_ID && root.getResources() != null) {
@@ -276,7 +275,10 @@ final class CanvasPaintHooks {
                 String entry = root.getResources().getResourceEntryName(id);
                 for (String targetId : targetIds) {
                     if (targetId.equals(entry) || (redo ? "redo" : "undo").equalsIgnoreCase(entry)) {
-                        return root;
+                        // Prioritize visible and laid-out views
+                        if (root.getVisibility() == View.VISIBLE) {
+                            return root;
+                        }
                     }
                 }
             } catch (Throwable ignored) {
@@ -284,9 +286,12 @@ final class CanvasPaintHooks {
         }
         CharSequence desc = root.getContentDescription();
         if (desc != null) {
-            String d = desc.toString();
-            if (desc1.equals(d) || desc2.equalsIgnoreCase(d)) {
-                return root;
+            String d = desc.toString().toLowerCase();
+            if (redo ? (d.contains("恢复") || d.contains("重做") || d.contains("redo"))
+                     : (d.contains("撤销") || d.contains("undo"))) {
+                if (root.getVisibility() == View.VISIBLE) {
+                    return root;
+                }
             }
         }
         if (root instanceof ViewGroup) {
@@ -336,6 +341,19 @@ final class CanvasPaintHooks {
                     View btn = findUndoRedoButton(root, redo);
                     if (btn != null) {
                         if (btn.isEnabled()) {
+                            long downTime = SystemClock.uptimeMillis();
+                            float x = btn.getWidth() > 0 ? btn.getWidth() / 2f : 10f;
+                            float y = btn.getHeight() > 0 ? btn.getHeight() / 2f : 10f;
+                            try {
+                                MotionEvent down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0);
+                                MotionEvent up = MotionEvent.obtain(downTime, downTime + 10, MotionEvent.ACTION_UP, x, y, 0);
+                                btn.dispatchTouchEvent(down);
+                                btn.dispatchTouchEvent(up);
+                                down.recycle();
+                                up.recycle();
+                            } catch (Throwable th) {
+                                HookUtils.log(TAG + ": dispatchTouchEvent on " + btn.getClass().getSimpleName() + " failed: " + th);
+                            }
                             boolean res = btn.performClick();
                             handled[0] = true;
                             HookUtils.log(TAG + ": clicked " + (redo ? "redo" : "undo")
