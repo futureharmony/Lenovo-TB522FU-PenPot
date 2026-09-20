@@ -1,11 +1,17 @@
 package com.aclaniakea.colorosporttuning;
 
+import android.app.Activity;
+import android.app.Application;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
 import android.content.IntentFilter;
 import android.os.Build;
+import android.os.Handler;
+import android.os.Looper;
 import android.os.SystemClock;
+import android.view.View;
+import android.view.ViewGroup;
 import de.robv.android.xposed.XC_MethodHook;
 import de.robv.android.xposed.callbacks.XC_LoadPackage;
 import java.lang.ref.WeakReference;
@@ -13,6 +19,9 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.Map;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 /**
  * CanvasPaintHooks - undo/redo bridge for the full-screen paint canvas
@@ -103,12 +112,44 @@ final class CanvasPaintHooks {
 
     private static final ArrayList<WeakReference<Object>> canvases = new ArrayList<>();
     private static boolean receiverRegistered;
+    private static WeakReference<Activity> sCurrentActivity = new WeakReference<>(null);
 
     static void install(XC_LoadPackage.LoadPackageParam loadPackageParam) {
         if (loadPackageParam == null || loadPackageParam.classLoader == null) {
             return;
         }
         final ClassLoader loader = loadPackageParam.classLoader;
+
+        // Eagerly install receiver if Application is already running
+        try {
+            Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+            Method currentAppMethod = activityThreadClass.getMethod("currentApplication");
+            Application app = (Application) currentAppMethod.invoke(null);
+            if (app != null) {
+                ensureReceiver(app);
+            }
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": currentApplication probe failed: " + th);
+        }
+
+        // Track foreground activity in the note process to access on-screen toolbar actions
+        HookUtils.hookAll(loader, "android.app.Activity", "onResume", new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                if (param.thisObject instanceof Activity) {
+                    sCurrentActivity = new WeakReference<>((Activity) param.thisObject);
+                    ensureReceiver((Context) param.thisObject);
+                }
+            }
+        });
+        HookUtils.hookAll(loader, "android.app.Activity", "onPause", new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                if (param.thisObject == sCurrentActivity.get()) {
+                    sCurrentActivity = new WeakReference<>(null);
+                }
+            }
+        });
 
         // Lifecycle seam. onStart/onStop are declared by NewPaintFragment itself
         // (it does NOT override onResume), so HookUtils.hookAll can reach them;
@@ -145,18 +186,162 @@ final class CanvasPaintHooks {
                 + loadPackageParam.packageName);
     }
 
+    private static Activity getForegroundActivity() {
+        Activity act = sCurrentActivity.get();
+        if (act != null && !act.isFinishing() && !act.isDestroyed() && act.hasWindowFocus()) {
+            return act;
+        }
+        try {
+            Class<?> activityThreadClass = Class.forName("android.app.ActivityThread");
+            Method m = activityThreadClass.getMethod("currentActivityThread");
+            Object activityThread = m.invoke(null);
+            if (activityThread != null) {
+                Field f = activityThreadClass.getDeclaredField("mActivities");
+                f.setAccessible(true);
+                Map<?, ?> map = (Map<?, ?>) f.get(activityThread);
+                if (map != null) {
+                    for (Object record : map.values()) {
+                        Field actF = record.getClass().getDeclaredField("activity");
+                        actF.setAccessible(true);
+                        Activity candidate = (Activity) actF.get(record);
+                        if (candidate != null && !candidate.isFinishing() && !candidate.isDestroyed()) {
+                            boolean paused = false;
+                            try {
+                                Field pausedF = record.getClass().getDeclaredField("paused");
+                                pausedF.setAccessible(true);
+                                paused = pausedF.getBoolean(record);
+                            } catch (Throwable ignored) {}
+                            if (!paused || candidate.hasWindowFocus()) {
+                                sCurrentActivity = new WeakReference<>(candidate);
+                                return candidate;
+                            }
+                            if (act == null) {
+                                act = candidate;
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": getForegroundActivity failed: " + th);
+        }
+        if (act != null) {
+            sCurrentActivity = new WeakReference<>(act);
+        }
+        return act;
+    }
+
+    private static View findUndoRedoButton(View root, boolean redo) {
+        if (root == null) return null;
+        String targetName = redo ? "menu_redo" : "menu_undo";
+        try {
+            if (root.getContext() != null) {
+                int resId = root.getResources().getIdentifier(targetName, "id", root.getContext().getPackageName());
+                if (resId != 0) {
+                    View found = root.findViewById(resId);
+                    if (found != null) {
+                        return found;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+        return searchViewRecursive(root, redo);
+    }
+
+    private static View searchViewRecursive(View root, boolean redo) {
+        if (root == null) return null;
+        String targetId = redo ? "menu_redo" : "menu_undo";
+        String desc1 = redo ? "恢复" : "撤销";
+        String desc2 = redo ? "Redo" : "Undo";
+
+        int id = root.getId();
+        if (id != View.NO_ID && root.getResources() != null) {
+            try {
+                String entry = root.getResources().getResourceEntryName(id);
+                if (targetId.equals(entry) || (redo ? "redo" : "undo").equalsIgnoreCase(entry)) {
+                    return root;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        CharSequence desc = root.getContentDescription();
+        if (desc != null) {
+            String d = desc.toString();
+            if (desc1.equals(d) || desc2.equalsIgnoreCase(d)) {
+                return root;
+            }
+        }
+        if (root instanceof ViewGroup) {
+            ViewGroup group = (ViewGroup) root;
+            for (int i = 0; i < group.getChildCount(); i++) {
+                View found = searchViewRecursive(group.getChildAt(i), redo);
+                if (found != null) return found;
+            }
+        }
+        return null;
+    }
+
     /**
      * Runs the canvas's own undo/redo worker. Called from the receiver in the
      * note process; never from {@code system_server}, where no canvas exists.
      *
      * @return true when a resumed canvas took the command.
      */
-    private static boolean dispatch(boolean redo) {
+    private static boolean dispatch(final boolean redo) {
         long now = SystemClock.uptimeMillis();
         if (now - lastDispatchAt < DEDUP_MS && lastDispatchRedo == redo) {
             HookUtils.log(TAG + ": duplicate " + name(redo) + " dropped (+"
                     + (now - lastDispatchAt) + "ms)");
             return true;
+        }
+
+        // 1. First priority: Check foreground Resumed Activity toolbar menu_undo / menu_redo button
+        final Activity act = getForegroundActivity();
+        if (act != null && !act.isFinishing() && !act.isDestroyed()) {
+            final boolean[] handled = new boolean[1];
+            final CountDownLatch latch = new CountDownLatch(1);
+            Runnable clickTask = new Runnable() {
+                @Override
+                public void run() {
+                    try {
+                        View root = act.getWindow() != null ? act.getWindow().getDecorView() : null;
+                        View btn = findUndoRedoButton(root, redo);
+                        if (btn != null) {
+                            if (btn.isEnabled()) {
+                                boolean res = btn.performClick();
+                                handled[0] = true;
+                                HookUtils.log(TAG + ": clicked " + (redo ? "menu_redo" : "menu_undo")
+                                        + " in " + act.getClass().getSimpleName() + " performClick=" + res);
+                            } else {
+                                HookUtils.log(TAG + ": button " + (redo ? "menu_redo" : "menu_undo")
+                                        + " is disabled in " + act.getClass().getSimpleName()
+                                        + " (nothing to " + name(redo) + ")");
+                                handled[0] = true;
+                            }
+                        } else {
+                            HookUtils.log(TAG + ": undo/redo button not found in " + act.getClass().getSimpleName());
+                        }
+                    } catch (Throwable th) {
+                        HookUtils.log(TAG + ": UI click failed: " + th);
+                    } finally {
+                        latch.countDown();
+                    }
+                }
+            };
+            if (Looper.myLooper() == Looper.getMainLooper()) {
+                clickTask.run();
+            } else {
+                act.runOnUiThread(clickTask);
+                try {
+                    latch.await(200, TimeUnit.MILLISECONDS);
+                } catch (InterruptedException ignored) {}
+            }
+            if (handled[0]) {
+                lastDispatchAt = now;
+                lastDispatchRedo = redo;
+                return true;
+            }
         }
 
         Object presenter = null;
@@ -276,6 +461,10 @@ final class CanvasPaintHooks {
         }
         IntentFilter filter = new IntentFilter(PenBridgeConstants.CANVAS_UNDO);
         filter.addAction(PenBridgeConstants.CANVAS_REDO);
+        filter.addAction("com.aclaniakea.colorosporttuning.action.CANVAS_UNDO");
+        filter.addAction("com.aclaniakea.colorosporttuning.action.CANVAS_REDO");
+        filter.addAction("com.aclaniakea.lenovopenbridge.action.CANVAS_UNDO");
+        filter.addAction("com.aclaniakea.lenovopenbridge.action.CANVAS_REDO");
         BroadcastReceiver receiver = new BroadcastReceiver() {
             @Override
             public void onReceive(Context ctx, Intent intent) {
@@ -283,7 +472,9 @@ final class CanvasPaintHooks {
                 if (action == null) {
                     return;
                 }
-                final boolean redo = PenBridgeConstants.CANVAS_REDO.equals(action);
+                final boolean redo = PenBridgeConstants.CANVAS_REDO.equals(action)
+                        || "com.aclaniakea.colorosporttuning.action.CANVAS_REDO".equals(action)
+                        || "com.aclaniakea.lenovopenbridge.action.CANVAS_REDO".equals(action);
                 ContractProbe.executeGuarded("canvas_" + name(redo),
                         new ContractProbe.PrimaryAction<Void>() {
                             @Override
@@ -311,6 +502,34 @@ final class CanvasPaintHooks {
                 app.registerReceiver(receiver, filter, Context.RECEIVER_EXPORTED);
             } else {
                 app.registerReceiver(receiver, filter);
+            }
+            if (app instanceof Application) {
+                try {
+                    ((Application) app).registerActivityLifecycleCallbacks(new Application.ActivityLifecycleCallbacks() {
+                        @Override
+                        public void onActivityCreated(Activity activity, android.os.Bundle savedInstanceState) {}
+                        @Override
+                        public void onActivityStarted(Activity activity) {}
+                        @Override
+                        public void onActivityResumed(Activity activity) {
+                            sCurrentActivity = new WeakReference<>(activity);
+                        }
+                        @Override
+                        public void onActivityPaused(Activity activity) {
+                            if (sCurrentActivity.get() == activity) {
+                                sCurrentActivity = new WeakReference<>(null);
+                            }
+                        }
+                        @Override
+                        public void onActivityStopped(Activity activity) {}
+                        @Override
+                        public void onActivitySaveInstanceState(Activity activity, android.os.Bundle outState) {}
+                        @Override
+                        public void onActivityDestroyed(Activity activity) {}
+                    });
+                } catch (Throwable th) {
+                    HookUtils.log(TAG + ": registerActivityLifecycleCallbacks failed: " + th);
+                }
             }
             receiverRegistered = true;
             HookUtils.log(TAG + ": undo/redo receiver registered");

@@ -293,7 +293,8 @@ public final class StylusActionDispatcher {
             int metaState = 0;
             for (int code : keyCodes) {
                 KeyEvent down = new KeyEvent(now, now, KeyEvent.ACTION_DOWN, code, 0,
-                        metaState, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
+                        metaState, KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
+                        KeyEvent.FLAG_FROM_SYSTEM,
                         InputDevice.SOURCE_KEYBOARD);
                 inject.invoke(im, down, 0);
                 metaState |= getModifierMeta(code);
@@ -305,7 +306,8 @@ public final class StylusActionDispatcher {
             for (int i = keyCodes.length - 1; i >= 0; i--) {
                 int code = keyCodes[i];
                 KeyEvent up = new KeyEvent(now, upNow, KeyEvent.ACTION_UP, code, 0,
-                        metaState, KeyCharacterMap.VIRTUAL_KEYBOARD, 0, 0,
+                        metaState, KeyCharacterMap.VIRTUAL_KEYBOARD, 0,
+                        KeyEvent.FLAG_FROM_SYSTEM,
                         InputDevice.SOURCE_KEYBOARD);
                 inject.invoke(im, up, 0);
                 metaState &= ~getModifierMeta(code);
