@@ -19,6 +19,7 @@ import java.lang.reflect.Field;
 import java.lang.reflect.Method;
 import java.util.ArrayList;
 import java.util.Iterator;
+import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -181,6 +182,15 @@ final class CanvasPaintHooks {
                 ensureReceiver(HookUtils.context(param.thisObject));
             }
         });
+        // Hook Service.onCreate for overlay services such as com.oplus.screenshot.LongshotService
+        HookUtils.hookAll(loader, "android.app.Service", "onCreate", new XC_MethodHook() {
+            @Override
+            protected void afterHookedMethod(MethodHookParam param) {
+                if (param.thisObject instanceof Context) {
+                    ensureReceiver((Context) param.thisObject);
+                }
+            }
+        });
 
         HookUtils.log(TAG + ": canvas undo/redo bridge installed in "
                 + loadPackageParam.packageName);
@@ -231,16 +241,21 @@ final class CanvasPaintHooks {
         return act;
     }
 
+    private static final String[] UNDO_NAMES = {"menu_undo", "undo_button", "undo_btn", "btn_undo", "undo"};
+    private static final String[] REDO_NAMES = {"menu_redo", "redo_button", "redo_btn", "btn_redo", "redo"};
+
     private static View findUndoRedoButton(View root, boolean redo) {
         if (root == null) return null;
-        String targetName = redo ? "menu_redo" : "menu_undo";
+        String[] targetNames = redo ? REDO_NAMES : UNDO_NAMES;
         try {
             if (root.getContext() != null) {
-                int resId = root.getResources().getIdentifier(targetName, "id", root.getContext().getPackageName());
-                if (resId != 0) {
-                    View found = root.findViewById(resId);
-                    if (found != null) {
-                        return found;
+                for (String name : targetNames) {
+                    int resId = root.getResources().getIdentifier(name, "id", root.getContext().getPackageName());
+                    if (resId != 0) {
+                        View found = root.findViewById(resId);
+                        if (found != null) {
+                            return found;
+                        }
                     }
                 }
             }
@@ -251,7 +266,7 @@ final class CanvasPaintHooks {
 
     private static View searchViewRecursive(View root, boolean redo) {
         if (root == null) return null;
-        String targetId = redo ? "menu_redo" : "menu_undo";
+        String[] targetIds = redo ? REDO_NAMES : UNDO_NAMES;
         String desc1 = redo ? "恢复" : "撤销";
         String desc2 = redo ? "Redo" : "Undo";
 
@@ -259,8 +274,10 @@ final class CanvasPaintHooks {
         if (id != View.NO_ID && root.getResources() != null) {
             try {
                 String entry = root.getResources().getResourceEntryName(id);
-                if (targetId.equals(entry) || (redo ? "redo" : "undo").equalsIgnoreCase(entry)) {
-                    return root;
+                for (String targetId : targetIds) {
+                    if (targetId.equals(entry) || (redo ? "redo" : "undo").equalsIgnoreCase(entry)) {
+                        return root;
+                    }
                 }
             } catch (Throwable ignored) {
             }
@@ -282,6 +299,72 @@ final class CanvasPaintHooks {
         return null;
     }
 
+    private static List<View> getAllRootViews() {
+        List<View> result = new ArrayList<>();
+        try {
+            Class<?> wmgClass = Class.forName("android.view.WindowManagerGlobal");
+            Method getInstance = wmgClass.getMethod("getInstance");
+            Object wmg = getInstance.invoke(null);
+            if (wmg != null) {
+                Field mViewsField = wmgClass.getDeclaredField("mViews");
+                mViewsField.setAccessible(true);
+                List<?> views = (List<?>) mViewsField.get(wmg);
+                if (views != null) {
+                    synchronized (wmg) {
+                        for (Object v : views) {
+                            if (v instanceof View) {
+                                result.add((View) v);
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": getAllRootViews failed: " + th);
+        }
+        return result;
+    }
+
+    private static boolean tryClickInRoot(final View root, final boolean redo, final String sourceName) {
+        if (root == null) return false;
+        final boolean[] handled = new boolean[1];
+        final CountDownLatch latch = new CountDownLatch(1);
+        Runnable clickTask = new Runnable() {
+            @Override
+            public void run() {
+                try {
+                    View btn = findUndoRedoButton(root, redo);
+                    if (btn != null) {
+                        if (btn.isEnabled()) {
+                            boolean res = btn.performClick();
+                            handled[0] = true;
+                            HookUtils.log(TAG + ": clicked " + (redo ? "redo" : "undo")
+                                    + " in " + sourceName + " (" + btn.getClass().getSimpleName()
+                                    + ") performClick=" + res);
+                        } else {
+                            HookUtils.log(TAG + ": button " + (redo ? "redo" : "undo")
+                                    + " is disabled in " + sourceName + " (nothing to " + name(redo) + ")");
+                            handled[0] = true;
+                        }
+                    }
+                } catch (Throwable th) {
+                    HookUtils.log(TAG + ": UI click failed in " + sourceName + ": " + th);
+                } finally {
+                    latch.countDown();
+                }
+            }
+        };
+        if (Looper.myLooper() == Looper.getMainLooper()) {
+            clickTask.run();
+        } else {
+            new Handler(Looper.getMainLooper()).post(clickTask);
+            try {
+                latch.await(200, TimeUnit.MILLISECONDS);
+            } catch (InterruptedException ignored) {}
+        }
+        return handled[0];
+    }
+
     /**
      * Runs the canvas's own undo/redo worker. Called from the receiver in the
      * note process; never from {@code system_server}, where no canvas exists.
@@ -299,48 +382,24 @@ final class CanvasPaintHooks {
         // 1. First priority: Check foreground Resumed Activity toolbar menu_undo / menu_redo button
         final Activity act = getForegroundActivity();
         if (act != null && !act.isFinishing() && !act.isDestroyed()) {
-            final boolean[] handled = new boolean[1];
-            final CountDownLatch latch = new CountDownLatch(1);
-            Runnable clickTask = new Runnable() {
-                @Override
-                public void run() {
-                    try {
-                        View root = act.getWindow() != null ? act.getWindow().getDecorView() : null;
-                        View btn = findUndoRedoButton(root, redo);
-                        if (btn != null) {
-                            if (btn.isEnabled()) {
-                                boolean res = btn.performClick();
-                                handled[0] = true;
-                                HookUtils.log(TAG + ": clicked " + (redo ? "menu_redo" : "menu_undo")
-                                        + " in " + act.getClass().getSimpleName() + " performClick=" + res);
-                            } else {
-                                HookUtils.log(TAG + ": button " + (redo ? "menu_redo" : "menu_undo")
-                                        + " is disabled in " + act.getClass().getSimpleName()
-                                        + " (nothing to " + name(redo) + ")");
-                                handled[0] = true;
-                            }
-                        } else {
-                            HookUtils.log(TAG + ": undo/redo button not found in " + act.getClass().getSimpleName());
-                        }
-                    } catch (Throwable th) {
-                        HookUtils.log(TAG + ": UI click failed: " + th);
-                    } finally {
-                        latch.countDown();
-                    }
-                }
-            };
-            if (Looper.myLooper() == Looper.getMainLooper()) {
-                clickTask.run();
-            } else {
-                act.runOnUiThread(clickTask);
-                try {
-                    latch.await(200, TimeUnit.MILLISECONDS);
-                } catch (InterruptedException ignored) {}
-            }
-            if (handled[0]) {
+            View decor = act.getWindow() != null ? act.getWindow().getDecorView() : null;
+            if (tryClickInRoot(decor, redo, act.getClass().getSimpleName())) {
                 lastDispatchAt = now;
                 lastDispatchRedo = redo;
                 return true;
+            }
+        }
+
+        // 2. Second priority: Check WindowManager root views (e.g. LongshotMark in com.oplus.screenshot or dialogs)
+        List<View> roots = getAllRootViews();
+        for (int i = roots.size() - 1; i >= 0; i--) {
+            View root = roots.get(i);
+            if (root != null && root.isAttachedToWindow() && root.getVisibility() == View.VISIBLE) {
+                if (tryClickInRoot(root, redo, "WindowOverlay")) {
+                    lastDispatchAt = now;
+                    lastDispatchRedo = redo;
+                    return true;
+                }
             }
         }
 

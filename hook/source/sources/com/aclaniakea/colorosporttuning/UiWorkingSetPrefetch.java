@@ -57,6 +57,7 @@ public final class UiWorkingSetPrefetch implements IXposedHookLoadPackage {
                 break;
             case "com.oplus.screenshot":
                 NoteToolkitHooks.install(loadPackageParam);
+                CanvasPaintHooks.install(loadPackageParam);
                 break;
             case "com.heytap.mydevices":
                 MyDevicesHooks.install(loadPackageParam);

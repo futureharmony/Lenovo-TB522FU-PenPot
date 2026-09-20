@@ -265,10 +265,17 @@ public final class StylusActionDispatcher {
         if (context == null) {
             return;
         }
+        dispatchCanvasUndoBroadcast(context, redo, "com.coloros.note");
+        dispatchCanvasUndoBroadcast(context, redo, "com.oplus.screenshot");
+    }
+
+    private static void dispatchCanvasUndoBroadcast(Context context, boolean redo, String pkg) {
         Intent intent = new Intent(redo ? PenBridgeConstants.CANVAS_REDO
                 : PenBridgeConstants.CANVAS_UNDO)
-                .setPackage("com.coloros.note")
                 .addFlags(Intent.FLAG_RECEIVER_FOREGROUND);
+        if (pkg != null) {
+            intent.setPackage(pkg);
+        }
         try {
             try {
                 Class<?> userHandle = Class.forName("android.os.UserHandle");
