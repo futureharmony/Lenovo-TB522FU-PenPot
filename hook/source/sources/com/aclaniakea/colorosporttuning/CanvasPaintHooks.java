@@ -341,20 +341,22 @@ final class CanvasPaintHooks {
                     View btn = findUndoRedoButton(root, redo);
                     if (btn != null) {
                         if (btn.isEnabled()) {
-                            long downTime = SystemClock.uptimeMillis();
-                            float x = btn.getWidth() > 0 ? btn.getWidth() / 2f : 10f;
-                            float y = btn.getHeight() > 0 ? btn.getHeight() / 2f : 10f;
-                            try {
-                                MotionEvent down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0);
-                                MotionEvent up = MotionEvent.obtain(downTime, downTime + 10, MotionEvent.ACTION_UP, x, y, 0);
-                                btn.dispatchTouchEvent(down);
-                                btn.dispatchTouchEvent(up);
-                                down.recycle();
-                                up.recycle();
-                            } catch (Throwable th) {
-                                HookUtils.log(TAG + ": dispatchTouchEvent on " + btn.getClass().getSimpleName() + " failed: " + th);
-                            }
                             boolean res = btn.performClick();
+                            if (!res) {
+                                long downTime = SystemClock.uptimeMillis();
+                                float x = btn.getWidth() > 0 ? btn.getWidth() / 2f : 10f;
+                                float y = btn.getHeight() > 0 ? btn.getHeight() / 2f : 10f;
+                                try {
+                                    MotionEvent down = MotionEvent.obtain(downTime, downTime, MotionEvent.ACTION_DOWN, x, y, 0);
+                                    MotionEvent up = MotionEvent.obtain(downTime, downTime + 10, MotionEvent.ACTION_UP, x, y, 0);
+                                    btn.dispatchTouchEvent(down);
+                                    btn.dispatchTouchEvent(up);
+                                    down.recycle();
+                                    up.recycle();
+                                } catch (Throwable th) {
+                                    HookUtils.log(TAG + ": dispatchTouchEvent fallback on " + btn.getClass().getSimpleName() + " failed: " + th);
+                                }
+                            }
                             handled[0] = true;
                             HookUtils.log(TAG + ": clicked " + (redo ? "redo" : "undo")
                                     + " in " + sourceName + " (" + btn.getClass().getSimpleName()

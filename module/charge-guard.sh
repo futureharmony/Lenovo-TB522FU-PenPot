@@ -45,6 +45,7 @@ LOG="$MODDIR/charge-guard.log"
 PIDFILE="$MODDIR/charge-guard.pid"
 
 HALL3=/sys/devices/virtual/hall/och1909/hall3
+HALL2=/sys/devices/virtual/hall/och1909/hall2
 POLL_SEC=${POLL_SEC:-15}
 FULL_TH=${FULL_TH:-100}
 RESUME_TH=${RESUME_TH:-95}
@@ -79,9 +80,15 @@ tx_get() {
 }
 
 hall_docked() {
-    h=$(cat "$HALL3" 2>/dev/null)
-    h=${h##* }
-    [ "$h" = "0" ] && echo 1 || echo 0
+    h1=$(cat "$HALL3" 2>/dev/null)
+    h1=${h1##* }
+    h2=$(cat "$HALL2" 2>/dev/null)
+    h2=${h2##* }
+    if [ "$h1" = "0" ] || [ "$h2" = "0" ]; then
+        echo 1
+    else
+        echo 0
+    fi
 }
 
 pen_battery() {
@@ -97,9 +104,7 @@ notify() {
     # 保留 cmd notification：在原生 AOSP 上可用，ColorOS 上无害。
     out=$(cmd notification post -S bigtext -t "手写笔" "pen_charge_guard" "$1" 2>&1)
     rc=$?
-    log "notify rc=$rc msg=$1 (ColorOS drops shell notifs; UI via hook broadcast)"
-    am broadcast -a com.futureharmony.lenovopenbridge.action.SHOW_PENCIL_CAPSULE \
-        --es text "$1" >/dev/null 2>&1
+    log "notify rc=$rc msg=$1"
 }
 
 sync_ipe_state() {

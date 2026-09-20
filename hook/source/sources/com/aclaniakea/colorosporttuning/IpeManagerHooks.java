@@ -1585,6 +1585,7 @@ final class IpeManagerHooks {
                     method.setAccessible(true);
                     method.invoke(obj, objAdapt);
                     HookUtils.log("stock magnetic capsule shown: battery=" + iMax + " OEM one-arg");
+                    scheduleCapsuleAutoDismiss();
                     return;
                 }
             }
@@ -1598,6 +1599,7 @@ final class IpeManagerHooks {
                             method2.setAccessible(true);
                             method2.invoke(obj, objAdapt2, objAdapt3);
                             HookUtils.log("stock magnetic capsule shown: battery=" + iMax + " OEM fallback");
+                            scheduleCapsuleAutoDismiss();
                             return;
                         }
                     } else {
@@ -1607,6 +1609,7 @@ final class IpeManagerHooks {
             }
             obj.getClass().getMethod("showBatteryCapsule", Integer.TYPE).invoke(obj, Integer.valueOf(iMax));
             HookUtils.log("stock magnetic capsule shown: battery=" + iMax + " charging=" + i2);
+            scheduleCapsuleAutoDismiss();
         } catch (Throwable th) {
             capsuleControl = null;
             HookUtils.log("IPe stock showBatteryCapsule: " + th);
@@ -2644,8 +2647,31 @@ final class IpeManagerHooks {
         });
     }
 
+    private static Handler sMainHandler;
+    private static final Runnable sCapsuleDismissRunnable = new Runnable() {
+        @Override
+        public void run() {
+            dismissMagneticCapsule();
+        }
+    };
+
+    public static synchronized void scheduleCapsuleAutoDismiss() {
+        if (sMainHandler == null) {
+            sMainHandler = new Handler(Looper.getMainLooper());
+        }
+        sMainHandler.removeCallbacks(sCapsuleDismissRunnable);
+        sMainHandler.postDelayed(sCapsuleDismissRunnable, 3500L);
+    }
+
+    public static synchronized void cancelCapsuleAutoDismiss() {
+        if (sMainHandler != null) {
+            sMainHandler.removeCallbacks(sCapsuleDismissRunnable);
+        }
+    }
+
     /** 原厂 dismissCapsule(getShowingCapsule())，走 CapsuleImpl.removeCapsule 的关闭动画。 */
     public static void dismissMagneticCapsule() {
+        cancelCapsuleAutoDismiss();
         Object obj = capsuleControl;
         if (obj == null) {
             return;
