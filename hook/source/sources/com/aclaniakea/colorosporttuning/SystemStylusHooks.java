@@ -37,14 +37,17 @@ import java.util.HashSet;
 /* loaded from: classes.dex */
 final class SystemStylusHooks {
     private static final int HID_HOST_PROFILE = 4;
-    private static final String PEN1_HALL = "/sys/devices/virtual/factory/interface/hw_info/pen1_hall";
-    private static final String PEN2_HALL = "/sys/devices/virtual/factory/interface/hw_info/pen2_hall";
+    private static final String PEN1_HALL = "/sys/devices/virtual/hall/och1909/hall3";
+    private static final String PEN2_HALL = "/sys/devices/virtual/hall/och1909/hall3";
+    private static final String PEN1_HALL_LEGACY = "/sys/devices/virtual/factory/interface/hw_info/pen1_hall";
+    private static final String PEN2_HALL_LEGACY = "/sys/devices/virtual/factory/interface/hw_info/pen2_hall";
     private static int hallCandidateSamples;
     // Diagnostic: counts PhoneWindowManager.interceptKeyBeforeQueueing callbacks.
     // The first few are logged unconditionally so we can tell "the hook never
     // fires on this ROM" from "it fires but the event is filtered out".
     private static int keyProbeSeq;
     private static boolean hallReadFailed;
+    private static boolean hallObserverRegistered;
     private static boolean hapticControlReady;
     private static boolean hidConnectPending;
     private static boolean initialized;
@@ -106,12 +109,11 @@ final class SystemStylusHooks {
                 SystemStylusHooks.pollPenHall(context);
                 SystemStylusHooks.updateRefreshFromState(context);
             }
-            // Real Hall/GATT/root broadcasts are the primary path. This poll
-            // is only reconciliation. The Root hall monitor remains the
-            // immediate magnetic-edge owner, so a slower framework fallback
-            // avoids periodic system_server work without delaying UI updates.
-            SystemStylusHooks.pollHandler.postDelayed(
-                    this, SystemStylusHooks.screenOn ? 2000L : 10000L);
+            // Real Hall/GATT/root broadcasts are the primary path. When physical
+            // sysfs nodes are guarded by SELinux, ContentObserver handles immediate
+            // changes, so this poll serves only as a low-frequency reconciliation.
+            long delay = SystemStylusHooks.hallReadFailed ? 30000L : (SystemStylusHooks.screenOn ? 2000L : 10000L);
+            SystemStylusHooks.pollHandler.postDelayed(this, delay);
         }
     };
     private static int lastOemPresent = -1;
@@ -454,9 +456,18 @@ final class SystemStylusHooks {
         }
     };
 
+    private static void resetSqueezeState() {
+        synchronized (SystemStylusHooks.class) {
+            main.removeCallbacks(SQUEEZE_HOLD_RUNNABLE);
+            sSqueezeDownTime = 0L;
+            sSqueezeLongTriggered = false;
+            sLastSqueezeContext = null;
+        }
+    }
+
     private static void onSqueezeDown(Context context) {
         synchronized (SystemStylusHooks.class) {
-            sLastSqueezeContext = context;
+            sLastSqueezeContext = context != null ? context.getApplicationContext() : null;
             sSqueezeDownTime = SystemClock.uptimeMillis();
             sSqueezeLongTriggered = false;
             main.removeCallbacks(SQUEEZE_HOLD_RUNNABLE);
@@ -471,6 +482,7 @@ final class SystemStylusHooks {
             long duration = now - sSqueezeDownTime;
             main.removeCallbacks(SQUEEZE_HOLD_RUNNABLE);
             sSqueezeDownTime = 0L;
+            sLastSqueezeContext = null;
             if (sSqueezeLongTriggered) {
                 sSqueezeLongTriggered = false;
                 HookUtils.log("touch strip: squeeze released after hold consumed (" + duration + "ms)");
@@ -534,7 +546,7 @@ final class SystemStylusHooks {
         // produced any action.  See dispatchStripGesture().
         if (isPen(keyEvent.getDevice()) && (lowerCase.contains("lenovo tab pen") || (lowerCase.contains("lenovo") && lowerCase.contains("pen")))) {
             if (keyCode == 134) { // Squeeze onset (Press)
-                if (keyEvent.getRepeatCount() <= 0 && keyEvent.getAction() == KeyEvent.ACTION_UP) {
+                if (keyEvent.getRepeatCount() <= 0 && (keyEvent.getAction() == KeyEvent.ACTION_DOWN || keyEvent.getAction() == KeyEvent.ACTION_UP)) {
                     onSqueezeDown(context);
                 }
                 return true;
@@ -853,6 +865,7 @@ final class SystemStylusHooks {
 
     /* JADX INFO: Access modifiers changed from: private */
     public static synchronized void releaseLong(Context context) {
+        resetSqueezeState();
         if (longLatched) {
             main.removeCallbacks(EXPIRE_LONG);
             button(context, "cancel");
@@ -938,6 +951,7 @@ final class SystemStylusHooks {
             registerBridgeSettingsWriter(context);
             registerDebugActionRunner(context);
             registerMagneticAttachListener(context);
+            registerHallObserver(context);
             LenovoConsumerGestureReader.start(context);
             Handler handler = pollHandler;
             Runnable runnable = POLL_PEN_HALL;
@@ -1217,17 +1231,55 @@ final class SystemStylusHooks {
         return (inputDevice == null || inputDevice.getName() == null || !"NVTCapacitivePen".equalsIgnoreCase(inputDevice.getName()) || (inputDevice.getSources() & 16386) == 0) ? false : true;
     }
 
+    private static void registerHallObserver(final Context context) {
+        if (hallObserverRegistered || context == null) {
+            return;
+        }
+        try {
+            android.database.ContentObserver observer = new android.database.ContentObserver(main) {
+                @Override
+                public void onChange(boolean selfChange, Uri uri) {
+                    try {
+                        int docked = Settings.Global.getInt(context.getContentResolver(), "lenovo_pen_physical_docked", -1);
+                        if (docked >= 0) {
+                            int hallValue = (docked == 1) ? 0 : 1;
+                            if (lastPenHall != hallValue) {
+                                lastPenHall = hallValue;
+                                HookUtils.log("Hall observer synced from settings docked=" + docked + " -> hall=" + hallValue);
+                                applyPenHall(context, hallValue, true);
+                            }
+                        }
+                    } catch (Throwable th) {
+                        HookUtils.log("Hall observer update failed: " + th);
+                    }
+                }
+            };
+            context.getContentResolver().registerContentObserver(
+                    Settings.Global.getUriFor("lenovo_pen_physical_docked"),
+                    false, observer);
+            hallObserverRegistered = true;
+            HookUtils.log("Hall ContentObserver registered successfully");
+        } catch (Throwable th) {
+            HookUtils.log("registerHallObserver failed: " + th);
+        }
+    }
+
     /* JADX INFO: Access modifiers changed from: private */
     public static void pollPenHall(Context context) {
         int i;
         int i3 = readInt(PEN1_HALL, -1);
         int i4 = readInt(PEN2_HALL, -1);
         if (i3 < 0 && i4 < 0) {
+            i3 = readInt(PEN1_HALL_LEGACY, -1);
+            i4 = readInt(PEN2_HALL_LEGACY, -1);
+        }
+        if (i3 < 0 && i4 < 0) {
             if (hallReadFailed) {
                 return;
             }
             hallReadFailed = true;
-            HookUtils.log("Lenovo pen hall nodes are not readable");
+            HookUtils.log("Lenovo pen hall nodes are not readable in system_server (using Settings/Broadcast fallback)");
+            registerHallObserver(context);
             return;
         }
         hallReadFailed = false;
@@ -1418,7 +1470,10 @@ final class SystemStylusHooks {
             if (iDocked != lastDockedState) {
                 lastDockedState = iDocked;
             }
-            boolean zInputEnabled = iDocked == 0 && !zDisconnected && hidConnected;
+            // IMPORTANT: Hardware writing (NVTCapacitivePen) operates via physical active capacitive
+            // signals through the Novatek touch panel. It DOES NOT require Bluetooth. Only disable
+            // writing when magnetically docked (prevent pocket mis-touches) or when explicitly disabled.
+            boolean zInputEnabled = iDocked == 0 && !zDisconnected;
             if (zInputEnabled != lastInputEnabled) {
                 lastInputEnabled = zInputEnabled;
                 setPenInputEnabled(context, zInputEnabled);
@@ -1716,10 +1771,9 @@ final class SystemStylusHooks {
                     int profileState = intent.getIntExtra("android.bluetooth.profile.extra.STATE", -1);
                     if (profileState == 0) {
                         SystemStylusHooks.releaseLong(this.val$c);
-                        SystemStylusHooks.setPenInputEnabled(this.val$c, false);
-                        SystemStylusHooks.lastInputEnabled = false;
+                        SystemStylusHooks.stopWriting();
                         SystemStylusHooks.setRefreshActive(this.val$c, false);
-                        HookUtils.log("real HID disconnected: pen input disabled");
+                        HookUtils.log("real HID disconnected: gestures/refresh released (physical writing preserved)");
                     } else if (profileState == 2 && !HookUtils.disconnectRequested(this.val$c)) {
                         SystemStylusHooks.updateRefreshFromState(this.val$c);
                         HookUtils.log("real HID connected: pen input gate restored");

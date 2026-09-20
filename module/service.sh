@@ -224,6 +224,22 @@ apply_inkdye_state() {
 }
 apply_inkdye_state &
 
+# --- 防整机重启：禁用/停止移植ROM缺失专有驱动的高危服务 ---
+apply_system_stability_fixes() {
+    stop vendor.urcc-hal-aidl 2>/dev/null
+    setprop ctl.stop vendor.urcc-hal-aidl 2>/dev/null
+    i=0
+    while [ "$i" -lt 40 ]; do
+        pm disable com.oplus.gesture >/dev/null 2>&1
+        if pm list packages -d 2>/dev/null | grep -q "^package:com.oplus.gesture$"; then
+            echo "[$(date '+%F %T')] com.oplus.gesture disabled for boot stability"
+            break
+        fi
+        i=$((i + 1)); sleep 3
+    done
+}
+apply_system_stability_fixes &
+
 # 不 fork 的等待。
 #
 # 每次调用外部 sleep 都是一次 fork+exec，而本服务有 6 处 1 秒轮询、3 处 2 秒
@@ -1571,8 +1587,8 @@ wait_for_cps_power() {
     return 1
 }
 
-monitor_cps_gpio &
-echo "[$(date '+%F %T')] CPS hall monitor started path=$CPS_PEN_HALL"
+# TB522FU CPS wireless charging is managed by kernel power supply driver; monitor_cps_gpio is unneeded
+# monitor_cps_gpio &
 
 # CPS power is a charging concern only. Bluetooth pen recovery must not wait
 # for Hall/CPS because the OEM pen protocol is wireless even while undocked.

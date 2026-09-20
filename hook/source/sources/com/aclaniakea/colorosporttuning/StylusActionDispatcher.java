@@ -26,9 +26,26 @@ import java.util.Arrays;
 public final class StylusActionDispatcher {
     private static final String TAG = "StylusActionDispatcher";
 
-    private static boolean torchOn = false;
+    private static volatile boolean sTorchCallbackRegistered = false;
+    private static volatile boolean sTorchState = false;
 
     private StylusActionDispatcher() { }
+
+    private static synchronized void ensureTorchCallback(CameraManager cm) {
+        if (sTorchCallbackRegistered || cm == null) return;
+        try {
+            cm.registerTorchCallback(new CameraManager.TorchCallback() {
+                @Override
+                public void onTorchModeChanged(String cameraId, boolean enabled) {
+                    sTorchState = enabled;
+                    HookUtils.log(TAG + ": torch mode updated from system: " + cameraId + " -> " + enabled);
+                }
+            }, null);
+            sTorchCallbackRegistered = true;
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": registerTorchCallback failed: " + th);
+        }
+    }
 
     /**
      * Dispatch custom bridge action by code (101 - 114).
@@ -109,7 +126,7 @@ public final class StylusActionDispatcher {
             Intent i = new Intent();
             i.setClassName("com.coloros.note",
                     "com.nearme.note.paint.QuickPaintActivity");
-            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
             context.startActivity(i);
             HookUtils.log(TAG + ": ColorOS QuickPaint launched");
             return true;
@@ -330,13 +347,15 @@ public final class StylusActionDispatcher {
     public static void toggleTorch(Context context) throws Exception {
         CameraManager cm = (CameraManager) context.getSystemService(CameraManager.class);
         if (cm == null) throw new IllegalStateException("no CameraManager");
+        ensureTorchCallback(cm);
         for (String id : cm.getCameraIdList()) {
             Boolean flash = cm.getCameraCharacteristics(id)
                     .get(CameraCharacteristics.FLASH_INFO_AVAILABLE);
             if (flash != null && flash) {
-                torchOn = !torchOn;
-                cm.setTorchMode(id, torchOn);
-                HookUtils.log(TAG + ": torch " + id + " -> " + torchOn);
+                boolean targetState = !sTorchState;
+                cm.setTorchMode(id, targetState);
+                sTorchState = targetState;
+                HookUtils.log(TAG + ": torch " + id + " -> " + targetState);
                 return;
             }
         }
