@@ -141,12 +141,27 @@ def adb_su(adb: str, remote_cmd: str) -> subprocess.CompletedProcess:
     )
 
 
-def device_online(adb: str) -> bool:
+def device_state(adb: str) -> str:
+    """One of 'device' | 'multiple' | 'none'.
+
+    'multiple' is the case that used to masquerade as 'none': with USB and WiFi
+    both attached, a bare `adb get-state` fails with "more than one
+    device/emulator" and the step-4 self-check was skipped without saying why.
+    """
     try:
         proc = subprocess.run([adb, "get-state"], capture_output=True, text=True)
     except OSError:
-        return False
-    return proc.returncode == 0 and proc.stdout.strip() == "device"
+        return "none"
+    if proc.returncode == 0 and proc.stdout.strip() == "device":
+        return "device"
+    err = (proc.stderr or "") + (proc.stdout or "")
+    if "more than one device" in err:
+        return "multiple"
+    return "none"
+
+
+def device_online(adb: str) -> bool:
+    return device_state(adb) == "device"
 
 
 def read_runtime_scope(adb: str) -> set[str] | None:
@@ -296,10 +311,18 @@ def main() -> None:
         except SystemExit as exc:
             print(f"\n  [warn] {exc}")
         if not online:
-            note = "no device connected"
+            state = device_state(adb) if adb else "none"
+            if state == "multiple":
+                note = "多个设备同时在线（USB + WiFi）"
+                print(f"\n  [warn] {note} —— 裸 adb 命令报 more than one device，"
+                      f"已跳过 scope 自检与推送")
+                print("         定向到 WiFi： eval \"$(scripts/adb_wifi.sh env)\"")
+                print("         或显式指定：  export ANDROID_SERIAL=<ip>:5555")
+            else:
+                note = "no device connected"
+                print(f"\n  [skip] {note} —— 跳过 scope 自检与推送")
             if args.require_device:
                 raise SystemExit(f"{note}; --require-device was set")
-            print(f"\n  [skip] {note} —— 跳过 scope 自检与推送")
 
     # Step 4: Vector scope self-check
     scope_ok = False

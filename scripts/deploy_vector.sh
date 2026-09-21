@@ -93,7 +93,24 @@ done
 A=("$ADB")
 [ -n "$SERIAL" ] && A+=(-s "$SERIAL")
 
-"${A[@]}" get-state >/dev/null 2>&1 || { echo "no device; adb connect first" >&2; exit 1; }
+# `get-state` failing does NOT mean "no device" -- with USB and WiFi both
+# attached it fails with "more than one device/emulator", and the old message
+# ("no device; adb connect first") sent you chasing a WiFi problem that did not
+# exist. Distinguish the two.
+PREFLIGHT_ERR="$("${A[@]}" get-state 2>&1 >/dev/null)" || {
+    case "$PREFLIGHT_ERR" in
+        *"more than one device"*)
+            echo "multiple devices attached (USB + WiFi); pin one:" >&2
+            echo "  WiFi: eval \"\$(scripts/adb_wifi.sh env)\"   # or: export ANDROID_SERIAL=<ip>:5555" >&2
+            echo "  USB : scripts/deploy_vector.sh <SERIAL>          # see: adb devices" >&2
+            ;;
+        *)
+            echo "no device; adb connect first" >&2
+            ;;
+    esac
+    exit 1
+}
+
 [ -f "$HOOK_APK" ] || { echo "missing $HOOK_APK" >&2; exit 1; }
 
 echo "== 0. preflight =="
