@@ -1,6 +1,6 @@
 id=tb522fu_pen_bridge
 name=TB522FU - 手写笔桥接移植版
 author=futureharmony
-version=0.1.8
-versionCode=108
+version=0.1.17
+versionCode=117
 description=Lenovo TB522FU (sun/SM8750P) 手写笔桥接与 ColorOS 移植调优模块，由 futureharmony 定制开发。默认接管并禁用系统内置笔桥 com.inkdye.lenovopentocoloros；安装/卸载自动同步配套 LSPosed Hook APK；可在 Root 管理器中通过 action.sh 查看实时状态与控制；卸载自动还原。

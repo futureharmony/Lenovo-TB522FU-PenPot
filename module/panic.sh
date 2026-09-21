@@ -30,8 +30,8 @@ else
 fi
 rm -f "$MODDIR/inkdye-disabled.state"
 
-# 2) 停掉守护与服务进程
-for f in charge-guard.pid service.pid cps-gpio.pid; do
+# 2) 停掉服务进程
+for f in service.pid; do
     p="$MODDIR/$f"
     [ -r "$p" ] || continue
     pid=$(cat "$p" 2>/dev/null)
@@ -42,16 +42,10 @@ for f in charge-guard.pid service.pid cps-gpio.pid; do
     rm -f "$p"
 done
 
-# 3) 恢复无线充电发射（裸数字写法，驱动只认 0/1）
-if [ -w /sys/bus/i2c/devices/11-0041/tx_status ]; then
-    echo 1 >/sys/bus/i2c/devices/11-0041/tx_status 2>/dev/null && \
-        echo "  tx_status: 1"
-fi
-
-# 4) 清掉一次性标记，避免下次开机沿用旧的临时状态
+# 3) 清掉一次性标记，避免下次开机沿用旧的临时状态
+#    （v0.1.17：模块不再写 tx_status，无硬件状态需要恢复）
 rm -f "$MODDIR/pen-hall.state" "$MODDIR/pen-capsule.last" \
-      "$MODDIR/pen-connect.last" "$MODDIR/pen-boot-ready" \
-      "$MODDIR/disable-charge-guard" 2>/dev/null
+      "$MODDIR/pen-connect.last" "$MODDIR/pen-boot-ready" 2>/dev/null
 
 # 5) 默认让下次开机跳过本模块（--keep 则保留）
 if [ "$KEEP" = "1" ]; then

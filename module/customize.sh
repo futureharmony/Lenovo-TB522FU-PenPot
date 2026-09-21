@@ -8,10 +8,10 @@ ui_print "- 已移除自定义 CPS 内核模块，避免异常重启"
 ui_print "- 自定义 HID 实际断开/连接与真实 Hall 磁吸弹窗"
 ui_print "- HID 控制器仅通过后台服务调用，无桌面启动器图标"
 ui_print "- 启动后授予 HID 服务 Bluetooth Connect/Scan 运行时权限"
-ui_print "- 磁吸仅控制 CPS/充电/弹窗，蓝牙连接不依赖 Hall"
+ui_print "- 磁吸仅控制弹窗与充电状态显示，蓝牙连接不依赖 Hall"
 ui_print "- 支持切换到其他已绑定蓝牙地址的手写笔"
 ui_print "- 设备空间手写笔存在状态仅跟随真实蓝牙连接"
-ui_print "- Root 仅在开机一次性写入 pen_wakeup 节点，避免 system_server 权限失败"
+ui_print "- 不做任何充电/TX/GPIO/休眠控制：官方没有的逻辑一律不加"
 ui_print "- 连接状态只接受真实 ACL/GATT/Hall/CPS 事件，拒绝强制已连接回放"
 ui_print "- 刷新率策略统一绑定：笔场景锁 120Hz，其余场景最高 144Hz"
 ui_print "- 内置签名 Hook 副本并固定 LSPosed 早期路径，消除冷启动随机路径竞态"
@@ -53,9 +53,7 @@ set_perm "$MODPATH/service.sh" 0 0 0755
 set_perm "$MODPATH/post-fs-data.sh" 0 0 0755
 set_perm "$MODPATH/action.sh" 0 0 0755
 set_perm "$MODPATH/panic.sh" 0 0 0755
-set_perm "$MODPATH/charge-guard.sh" 0 0 0755
 set_perm "$MODPATH/uninstall.sh" 0 0 0755
-[ -f "$MODPATH/bin/pen-cps-gpio" ] && set_perm "$MODPATH/bin/pen-cps-gpio" 0 0 0755
 [ -f "$MODPATH/bin/lsposed-path-sync.jar" ] && set_perm "$MODPATH/bin/lsposed-path-sync.jar" 0 0 0644
 [ -f "$MODPATH/hook/PenBridge-Hook.apk" ] && set_perm "$MODPATH/hook/PenBridge-Hook.apk" 0 0 0644
 

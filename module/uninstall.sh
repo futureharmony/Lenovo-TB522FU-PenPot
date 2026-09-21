@@ -1,20 +1,14 @@
 #!/system/bin/sh
-
+# ============================================================================
+# 卸载脚本（v0.1.17 减法版）
+# ----------------------------------------------------------------------------
+# v0.1.17 起本模块不再触碰任何充电/TX/GPIO/唤醒节点，卸载时没有硬件状态
+# 需要恢复——只需交还 inkdye、清自保标记、卸配套 Hook APK。
 # The vendor DSI/panel driver owns these nodes. Never write them from the
 # Root service or its uninstall hook; this is part of the black-screen fix.
+# ============================================================================
 
-# Stop the real CPS GPIO keeper if this module is removed/disabled.
 MODDIR=${0%/*}
-PIDFILE="$MODDIR/cps-gpio.pid"
-if [ -r "$PIDFILE" ]; then
-    pid=$(cat "$PIDFILE" 2>/dev/null)
-    case "$pid" in
-        ''|*[!0-9]*) ;;
-        *) kill "$pid" 2>/dev/null ;;
-    esac
-    rm -f "$PIDFILE"
-fi
-[ -x /system/bin/gpioset ] && /system/bin/gpioset gpiochip0 10=0 108=0 >/dev/null 2>&1
 
 # --- 恢复系统内置 inkdye 笔桥（本模块卸载/禁用时交还控制权）---
 # 模块默认会禁用 inkdye，所以卸载时**无条件**恢复启用。
@@ -23,23 +17,10 @@ pm enable "$INKDYE_PKG" >/dev/null 2>&1 || \
     echo "WARN: failed to re-enable $INKDYE_PKG; run manually: pm enable $INKDYE_PKG" >&2
 rm -f "$MODDIR/inkdye-enabled.state" "$MODDIR/inkdye-disabled.state"
 
-# --- 收回充电守护：停进程并把无线发射恢复到开启态（裸数字写法）---
-CG_PID="$MODDIR/charge-guard.pid"
-if [ -r "$CG_PID" ]; then
-    pid=$(cat "$CG_PID" 2>/dev/null)
-    case "$pid" in
-        ''|*[!0-9]*) ;;
-        *) kill "$pid" 2>/dev/null ;;
-    esac
-    rm -f "$CG_PID"
-fi
-[ -w /sys/bus/i2c/devices/11-0041/tx_status ] && \
-    echo 1 >/sys/bus/i2c/devices/11-0041/tx_status 2>/dev/null
-
 # --- 清掉自保状态：失败计数与 disable 标记 ---
 # 否则重新安装时会带着旧的失败计数，可能一开机就被 boot guard 熔断。
 rm -f /data/adb/tb522fu_pen_bridge.bootfail 2>/dev/null
-rm -f "$MODDIR/disable" "$MODDIR/disable-charge-guard" 2>/dev/null
+rm -f "$MODDIR/disable" 2>/dev/null
 
 # --- 同步卸载配套 LSPosed Hook APK ---
 pm uninstall com.futureharmony.lenovopenbridge >/dev/null 2>&1

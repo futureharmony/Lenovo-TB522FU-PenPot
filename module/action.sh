@@ -63,16 +63,9 @@ do_disable() {
     # 2. 设置全局运行时禁用属性 (LSPosed Hook 极速热透传)
     setprop persist.lenovo.penbridge.disabled 1
 
-    # 3. 停止磁吸与充电后台守护进程
-    local guard_pid=$(cut -d' ' -f1 "$MODDIR/charge-guard.pid" 2>/dev/null)
-    if [ -n "$guard_pid" ]; then
-        kill -15 "$guard_pid" 2>/dev/null
-        sleep 0.2
-        kill -9 "$guard_pid" 2>/dev/null
-    fi
-    pkill -f "$MODDIR/charge-guard.sh" 2>/dev/null
-    rm -f "$MODDIR/charge-guard.pid" "$MODDIR/.service.lock"
-    echo "  [√] 后台磁吸/充电守护进程已停止"
+    # 3. 清理服务锁：各监视循环轮询 disable 标记，会自行退出
+    rm -f "$MODDIR/.service.lock"
+    echo "  [√] 后台监视循环将随 disable 标记自行退出"
 
     # 4. 恢复系统旧版笔桥 (若设备中存在)
     if pm list packages | grep -q "$INKDYE_PKG"; then
@@ -108,14 +101,6 @@ do_enable() {
         echo "  [√] 系统内置旧版笔桥已禁用 (模块独占接管)"
     fi
 
-    # 4. 启动后台磁吸/充电守护进程
-    if [ -f "$MODDIR/charge-guard.sh" ]; then
-        nohup /system/bin/sh "$MODDIR/charge-guard.sh" >/dev/null 2>&1 &
-        sleep 0.5
-        local new_pid=$(cut -d' ' -f1 "$MODDIR/charge-guard.pid" 2>/dev/null)
-        echo "  [√] 磁吸/充电守护进程已启动 (PID: ${new_pid:-运行中})"
-    fi
-
     echo "  [√] Hook 核心拦截已恢复实时生效"
     echo "  [√] 模块标记已清除"
     echo ""
@@ -143,7 +128,6 @@ do_soft_reboot() {
 LOG_TAIL_MAIN=${LOG_TAIL_MAIN:-120}
 LOG_TAIL_GUARD=${LOG_TAIL_GUARD:-60}
 LOG_TAIL_HOOK=${LOG_TAIL_HOOK:-200}
-GUARD_LOG="$MODDIR/charge-guard.log"
 NOTE_LOG="/data/local/tmp/note_engine_guard.log"
 HOOK_TAG="LenovoPenBridge"
 
@@ -164,10 +148,9 @@ do_logs() {
     echo "采集时间  : $(date '+%F %T')"
     echo "开机时长  : $(cut -d' ' -f1 /proc/uptime 2>/dev/null)s"
     echo "写入侧上限: $(penlog_caps)"
-    echo "读取侧上限: 本页最多 $((LOG_TAIL_MAIN + LOG_TAIL_GUARD * 2 + LOG_TAIL_HOOK)) 行"
+    echo "读取侧上限: 本页最多 $((LOG_TAIL_MAIN + LOG_TAIL_GUARD + LOG_TAIL_HOOK)) 行"
     echo ""
     log_section "pen-bridge.log · 模块主日志" "$LOG" "$LOG_TAIL_MAIN"
-    log_section "charge-guard.log · 磁吸/充电守护" "$GUARD_LOG" "$LOG_TAIL_GUARD"
     log_section "note_engine_guard.log · 便签引擎守卫" "$NOTE_LOG" "$LOG_TAIL_GUARD"
 
     echo "──── Hook 日志 · logcat -s $HOOK_TAG（最近 $LOG_TAIL_HOOK 行）────"
@@ -191,7 +174,7 @@ do_logs() {
 # 手动把文件日志裁到很小（清屏重来用）。注意不能删文件：service.sh 用
 # exec >> 持有同一个 inode，删了以后写入会落进已 unlink 的旧 inode。
 do_clear_logs() {
-    for f in "$LOG" "$LOG.1" "$GUARD_LOG" "$NOTE_LOG"; do
+    for f in "$LOG" "$LOG.1" "$NOTE_LOG"; do
         [ -f "$f" ] || continue
         penlog_trim "$f" 5 1024
         echo "已裁剪: $f（保留最近 5 行）"
@@ -292,13 +275,6 @@ else
     HOOK_STATUS="未检测到 Hook APK，请检查安装"
 fi
 
-GUARD_PID=$(cut -d' ' -f1 "$MODDIR/charge-guard.pid" 2>/dev/null)
-if [ -n "$GUARD_PID" ] && [ -d "/proc/$GUARD_PID" ]; then
-    GUARD_STATUS="正常守护中 (PID: $GUARD_PID)"
-else
-    GUARD_STATUS="未运行或已停止"
-fi
-
 if [ -f "$DISABLE_FLAG" ]; then
     MODULE_STATE="【已禁用 (DISABLED)】"
 else
@@ -331,7 +307,6 @@ echo ""
 echo "【核心服务与后台状态】"
 echo "  • LSPosed 框架        : $LSP_STATUS"
 echo "  • 笔桥 Hook 核心支持库 : $HOOK_STATUS"
-echo "  • 磁吸/充电守护进程    : $GUARD_STATUS"
 echo "=============================================="
 echo ""
 echo "【快捷操作说明】"

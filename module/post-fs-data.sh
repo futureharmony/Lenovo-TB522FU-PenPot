@@ -32,9 +32,7 @@ if [ "$fail" -gt "$BOOT_GUARD_MAX" ]; then
     : >"$MODDIR/disable" 2>/dev/null
     pm enable com.inkdye.lenovopentocoloros >/dev/null 2>&1
     rm -f "$MODDIR/inkdye-enabled.state" "$MODDIR/inkdye-disabled.state" \
-          "$MODDIR/charge-guard.pid" "$MODDIR/service.pid" 2>/dev/null
-    [ -w /sys/bus/i2c/devices/11-0041/tx_status ] && \
-        echo 1 >/sys/bus/i2c/devices/11-0041/tx_status 2>/dev/null
+          "$MODDIR/service.pid" 2>/dev/null
     echo "[$(date '+%F %T')] BOOT GUARD tripped after $fail failed boots; module disabled" \
         >>"$MODDIR/pen-bridge.log" 2>/dev/null
     exit 0

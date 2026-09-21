@@ -11,38 +11,28 @@ MODDIR=${0%/*}
 #      BluetoothGatt.disconnect()，使设备/HID 真实离开连接态；
 #   3) 常驻监控真实 ACL/GATT/Hall/CPS 事件，驱动 ColorOS 设置页手写笔
 #      卡片、磁吸胶囊、电量与存在状态（状态只跟随真实事件，不强行回放）；
-#   4) CPS 开机上电：仅在真实磁吸 Hall 对为 0:1 时保持 CPS GPIO，磁吸只
-#      负责充电与弹窗；不使用自定义内核模块；
-#   5) PenHidCtl（priv-app HID 控制器）开机授予蓝牙运行时权限，只调后台
+#   4) PenHidCtl（priv-app HID 控制器）开机授予蓝牙运行时权限，只调后台
 #      PenHidService，无启动器入口；
-#   6) 不监听屏幕状态、不做唤醒回放：状态只跟随真实 Hall/GATT/Root 事件。
-#      早期版本在唤醒后延迟回放过一次，那是为了绕开"唤醒瞬间写 DSI/panel 节点
-#      导致黑屏"；后来改成 pen_wakeup_* 只在开机按需写一次，回放就没必要了，
-#      代码也早已删除（本文件里搜不到任何屏幕状态监听）。
-#   7) 刷新率策略由 post-fs-data 绑定，本服务不管理亮度/背光/屏幕电源。
+#   5) 不监听屏幕状态、不做唤醒回放、不做任何充电/TX/GPIO/休眠控制：
+#      官方 ZUXOS 取证（docs/pen_official_rom_verdict_20260921.md）证明
+#      充满断电 → 笔深休眠 → 重新吸附唤醒是官方驱动+笔固件的完整行为链，
+#      官方系统层没有任何"保持 TX / 唤醒笔"的逻辑，模块一律不介入。
 # 仅适用于 SM8650Q / pineapple 平台；Hook 仍独立安装，模块内签名副本
 # 仅用于 LSPosed 在 PackageManager 恢复 /data/app 前稳定读取。
 # ============================================================================
 
 LOGFILE="$MODDIR/pen-bridge.log"
-MODE=/proc/pen_wakeup_mode
-SWITCH=/proc/pen_wakeup_switch
 UEVENT=/sys/devices/virtual/lenovo_penraw/lenovo_penraw/uevent
 # TB522FU (sun/SM8750P): och1909 hall driver exposes four channels.
 # Calibrated 2026-09-18: pen magnetic dock == hall3, attached reads 0,
 # detached reads 1. hall1_1/hall1_2 idle 0, hall2 idle 1 (kbd cover side).
 PEN1_HALL=/sys/devices/virtual/hall/och1909/hall3
-CPS_GPIOCHIP=gpiochip0
-CPS_GPIODEV=/dev/gpiochip0
-CPS_GPIOSET=/system/bin/gpioset
-CPS_HELPER="$MODDIR/bin/pen-cps-gpio"
-CPS_PEN_HALL=/sys/devices/virtual/hall/och1909/hall3
 # CPS8601 无线充节点。此前写死的是 pineapple/SM8650Q 的地址
 # （…/qupv3_i2c_geni_se/98c000.i2c/i2c-2/2-0041），在 sun/SM8750P 上该路径
 # 根本不存在，于是所有 CPS 读取静默空转、模块自己永远产不出新鲜样本
 # （2026-09-18 实测：本机挂在 11-0041）。CPS8601 的 I2C 地址恒为 0x41，
-# 用总线符号链接按地址解析即可同时兼容两块板子；这也是 charge-guard.sh
-# 已经验证过的稳定路径形式。
+# 用总线符号链接按地址解析即可同时兼容两块板子（v0.1.16 前的
+# charge-guard.sh 首次验证过该路径形式；该守护已随 v0.1.17 裁撤）。
 CPS_UEVENT=
 CPS_TX_STATUS=
 CPS_PS_ONLINE=
@@ -58,7 +48,6 @@ resolve_cps_nodes() {
         CPS_PS_ONLINE=/sys/class/power_supply/cps_wls_tx/online
 }
 resolve_cps_nodes
-CPS_PIDFILE="$MODDIR/cps-gpio.pid"
 CPS_DISABLED="$MODDIR/disable"
 HALL_STATE_FILE="$MODDIR/pen-hall.state"
 CAPSULE_DEDUP_FILE="$MODDIR/pen-capsule.last"
@@ -300,61 +289,6 @@ else
     echo "[$(date '+%F %T')] nap: 自检未通过，回退外部 sleep"
 fi
 
-count=0
-while { [ ! -e "$MODE" ] || [ ! -e "$SWITCH" ]; } && [ "$count" -lt 60 ]; do
-    sleep_sec 1
-    count=$((count + 1))
-done
-
-apply_pen_wake() {
-    mode=$(cat "$MODE" 2>/dev/null | tr -d '\r')
-    wake=$(cat "$SWITCH" 2>/dev/null | tr -d '\r')
-    mode_write=0
-    switch_write=0
-
-    # system_server cannot write these vendor proc nodes on this ROM.  The
-    # Root service is the only writer, and writes each node only when it is
-    # not already enabled.  This avoids the old repeated DSI/panel writes
-    # while still enabling the CPS pen-wakeup path once after boot.
-    if [ "$mode" != 1 ] && [ -w "$MODE" ]; then
-        if printf '1\n' >"$MODE" 2>/dev/null; then
-            mode_write=1
-        fi
-    fi
-    if [ "$wake" != 1 ] && [ -w "$SWITCH" ]; then
-        if printf '1\n' >"$SWITCH" 2>/dev/null; then
-            switch_write=1
-        fi
-    fi
-
-    mode=$(cat "$MODE" 2>/dev/null | tr -d '\r')
-    wake=$(cat "$SWITCH" 2>/dev/null | tr -d '\r')
-    echo "[$(date '+%F %T')] pen wake root apply mode=$mode switch=$wake wrote_mode=$mode_write wrote_switch=$switch_write"
-}
-
-# The CPS driver or vendor power manager can reset these proc switches after
-# boot. Keep the kernel wake path enabled while the module is active, but only
-# rewrite a node after observing that it has been turned off.
-monitor_pen_wake() {
-    while [ ! -e "$CPS_DISABLED" ]; do
-        mode=$(cat "$MODE" 2>/dev/null | tr -d '\r')
-        wake=$(cat "$SWITCH" 2>/dev/null | tr -d '\r')
-        # Both proc nodes read back as a bare "1" on this kernel. The old
-        # monitor also demanded $SWITCH equal the literal string
-        # "Pen Wakeup SWITCH 1!", which never matched, so the guard fired on
-        # EVERY 30 s pass: it logged "pen wake node reset detected" while
-        # apply_pen_wake then declined to write anything (wrote_*=0). That
-        # constant false alarm buried the real disconnect signal in the log.
-        # Accept either encoding; only a genuinely disabled node is a reset.
-        if [ -n "$mode" ] && [ -n "$wake" ] \
-                && { [ "$mode" != 1 ] \
-                     || { [ "$wake" != 1 ] && [ "$wake" != "Pen Wakeup SWITCH 1!" ]; }; }; then
-            echo "[$(date '+%F %T')] pen wake node reset detected mode=$mode switch=$wake"
-            apply_pen_wake
-        fi
-        sleep_sec 30
-    done
-}
 
 # v1.0.61 wrote a connected snapshot immediately after requesting GATT.  That
 # snapshot could survive a module update and make the next boot look connected
@@ -410,9 +344,7 @@ settings put global lenovo_pen_oem_control_ready 0 >/dev/null 2>&1
 settings put global lenovo_pen_oem_control_pid 0 >/dev/null 2>&1
 settings put global lenovo_pen_oem_haptic_forward 1 >/dev/null 2>&1
 echo "[$(date '+%F %T')] stale OEM haptic transport session cleared"
-apply_pen_wake
 reset_pen_state_mirror
-monitor_pen_wake &
 
 # Priv-app allowlists do not grant Android 12+ Bluetooth runtime permissions.
 # Root only calls PenHidCtl's explicit service component. The APK has no
@@ -651,8 +583,8 @@ read_cps_charging() {
     # 所以收发器节点是唯一可信的内核侧来源：
     #   tx_status "cps_wls_en:1" -> 线圈在送电（正在充电）
     #   tx_status "cps_wls_en:0" -> 驱动已断（充满或未吸附）
-    # 语义已由 charge-guard.sh 在 2026-09-18 实测确认：笔充满时驱动会自己
-    # 置 cps_wls_en:0。因此它同时是「充电中」与「笔在不在线圈上」的真值。
+    # 2026-09-18 实测确认：笔充满时驱动会自己置 cps_wls_en:0。因此它
+    # 同时是「充电中」与「笔在不在线圈上」的真值。本模块只读不写。
     state=
     if [ -n "$CPS_TX_STATUS" ] && [ -r "$CPS_TX_STATUS" ]; then
         IFS= read -r line <"$CPS_TX_STATUS"
@@ -1046,16 +978,13 @@ monitor_charging_cache() {
 # Two-way sync (system Bluetooth -> Device Space). dumpsys masks the first
 # four MAC octets, so match the visible last two octets of the pen address
 # against the HOGP (LE HID) profile state; HOGP state 2 is a live link.
-real_bt_connected() {
-    # 笔已自行关机的标志（pen-revive-guard.sh 维护）。见 docs/pen-sleep-death-analysis.md：
-    # 笔满电后经 ASK 包让 CPS 驱动 close tx，自己随即掉电，但蓝牙栈的 HOGP
-    # profile state 不清零 —— 那是【僵尸连接】。此判据一旦被僵尸连接占住，
-    # monitor_hall_capsule 的 `! real_bt_connected` 就恒假，吸附边沿的重连
-    # （request_pen_connect）永不执行，表现为「吸上去是死的，必须再吸一次」。
-    # 这里让 CPS 侧的确定性事实压过蓝牙栈的滞后状态。
-    case "$(settings get global lenovo_pen_powered_down 2>/dev/null | tr -d '\r')" in
-        1) return 1 ;;
-    esac
+#
+# v0.1.17 简化：powered_down 否决（pen-revive-guard 维护）已随该守护一并
+# 裁撤 —— 官方系统没有"笔掉电标记"，蓝牙栈的 HOGP state 就是唯一真值。
+# 历史教训保留：曾试验过的 powered_down 陈旧否决会让真实在线的笔被判成
+# 未连接（docs/pen_undock_after_dock_sleep_unusable_20260921.md §1.5），
+# 这也是"官方没有的逻辑一律不加"的直接证据。
+bt_stack_hogp_live() {
     mac=$(resolve_pen_mac)
     is_pen_mac "$mac" || return 1
     tail=${mac#*:*:*:*:}
@@ -1072,6 +1001,12 @@ real_bt_connected() {
         | grep -E "$tail .*hogp connection state=2" >/dev/null 2>&1
 }
 
+real_bt_connected() {
+    # v0.1.17：pen-revive-guard 已按"官方无此逻辑"裁撤，powered_down
+    # 不再有写入方；真实链路只信蓝牙栈本身。
+    bt_stack_hogp_live
+}
+
 # 笔是否正在线圈上真实响应（CPS 侧带内通信判据）。
 # 与 real_bt_connected() 的分工：后者读蓝牙栈，而笔突然掉电时 HOGP state
 # 会滞后保持 2（僵尸连接）；本判据读 CPS 内核驱动，与 Hall 磁场边沿同步，
@@ -1080,6 +1015,15 @@ pen_cps_responsive() {
     [ -n "$CPS_PS_ONLINE" ] && [ -r "$CPS_PS_ONLINE" ] || return 1
     [ "$(tr -d '\r' <"$CPS_PS_ONLINE" 2>/dev/null)" = 1 ]
 }
+
+
+# 用户是否已解锁。仅用于把失败原因写清楚（诊断），**不参与任何决策** ——
+# 决策一律以真实的 am 投递结果为准。
+# 实测 `dumpsys user` 单次约 13ms。
+user_unlocked() {
+    dumpsys user 2>/dev/null | grep -q 'State: RUNNING_UNLOCKED'
+}
+
 
 # 笔在用时的 120Hz 由原厂 OplusRefreshRatePolicyImpl 依据
 # settings_enable_oppo_pencil 自行投票；本模块不读取或写入用户的
@@ -1116,6 +1060,8 @@ monitor_real_bt_state() {
     last_oem_recovery=0
     oem_recovery_attempts=0
     oem_recovery_exhausted=0
+    # 「投递不出去」的独立计数：未解锁 / 包未登记时的失败不消耗 3 次尝试预算。
+    oem_recovery_blocked=0
     while [ ! -e "$CPS_DISABLED" ]; do
         if real_bt_connected; then
             connected=1
@@ -1181,6 +1127,7 @@ monitor_real_bt_state() {
             # across a genuine disconnect/reconnect edge.
             oem_recovery_attempts=0
             oem_recovery_exhausted=0
+            oem_recovery_blocked=0
             last_oem_recovery=0
             last="$connected"
         fi
@@ -1195,9 +1142,23 @@ monitor_real_bt_state() {
                             && [ "$now" -ge "$last_oem_recovery" ] \
                             && [ "$((now - last_oem_recovery))" -ge 30 ]; then
                         last_oem_recovery="$now"
-                        oem_recovery_attempts=$((oem_recovery_attempts + 1))
-                        request_oem_pen_action "$OEM_CONNECT_ACTION"
-                        echo "[$(date '+%F %T')] live HOGP missing OEM haptic session; recovery requested attempt=$oem_recovery_attempts/3"
+                        # 投递失败（未解锁、包还没登记）不消耗 3 次尝试预算：那与
+                        # 「原厂接收方拒绝了活链路」是两回事。开机后到首次解锁之间
+                        # 必然不可达，旧实现把三次预算全烧在这里，然后一直等到下一次
+                        # 真实蓝牙边沿才恢复 OEM 会话（实测 12:09 那次启动：attempt
+                        # 1/3、2/3 全是 unlocked=0）。这里改成预算只记「真投出去」的
+                        # 次数，投递不出去的另行计数并封顶，避免无限重试。
+                        if request_oem_pen_action "$OEM_CONNECT_ACTION"; then
+                            oem_recovery_attempts=$((oem_recovery_attempts + 1))
+                            echo "[$(date '+%F %T')] live HOGP missing OEM haptic session; recovery requested attempt=$oem_recovery_attempts/3"
+                        else
+                            oem_recovery_blocked=$((oem_recovery_blocked + 1))
+                            echo "[$(date '+%F %T')] OEM haptic recovery not deliverable; channel unreachable, budget kept (${oem_recovery_blocked}/40)"
+                            if [ "$oem_recovery_blocked" -ge 40 ]; then
+                                oem_recovery_exhausted=1
+                                echo "[$(date '+%F %T')] OEM haptic recovery deferred until next real BT link edge"
+                            fi
+                        fi
                     elif [ "$oem_recovery_attempts" -ge 3 ] && [ "$oem_recovery_exhausted" = 0 ]; then
                         # The OEM receiver rejected a live link repeatedly.
                         # Retrying forever turns a missing optional session
@@ -1280,13 +1241,10 @@ monitor_hall_capsule() {
                                 request_pen_capsule_when_ready &
                             fi
                         elif [ "$state" = 0 ] && [ "$previous" = 1 ]; then
-                            # 离开吸附位：关闭吸附胶囊，若蓝牙未连则发起重连
+                            # 离开吸附位：关闭吸附胶囊。
                             am broadcast --user 0 --receiver-foreground \
                                 -a com.futureharmony.lenovopenbridge.action.DISMISS_PENCIL_CAPSULE \
                                 -p com.oplus.ipemanager >/dev/null 2>&1
-                            if ! real_bt_connected; then
-                                request_pen_connect
-                            fi
                         fi
                     fi
                     boot_cycle=0
@@ -1325,8 +1283,12 @@ request_oem_pen_action() {
         return 0
     fi
     if [ -z "$(pm path com.oplus.ipemanager 2>/dev/null)" ]; then
-        echo "[$(date '+%F %T')] OEM $action skipped: IPeManager unavailable"
-        return 0
+        # 「包还不在 PMS 视野里」（开机早期 priv-app 尚未登记，实测 12:08:55
+        # 那几次 `pm path` 全空）也不等于投递成功：调用方若据此认为 OEM 通路
+        # 可用，就会在只有 HID 半边可用的时候先断链。硬重连把它当失败，延后
+        # 重试；其它调用方本来就不看返回值，行为不变。
+        echo "[$(date '+%F %T')] OEM $action unavailable: IPeManager not registered yet"
+        return 1
     fi
     # These are the vendor service's real actions.  CONNECT_PENCIL reaches
     # s0.x()/BleManager.b(), while DISCONNECT_PENCIL reaches s0.z() and the
@@ -1341,9 +1303,16 @@ request_oem_pen_action() {
             -a "$action" --es device_mac_info "$mac" $extra >/dev/null 2>&1; then
 
         echo "[$(date '+%F %T')] OEM $action requested mac=$mac"
-    else
-        echo "[$(date '+%F %T')] OEM $action request failed mac=$mac"
+        return 0
     fi
+    # 失败有三种成因，调用方按返回值决定是否延后（硬重连会，其它调用忽略）：
+    #   1) 用户未解锁 -> PMS 过滤掉非 direct-boot-aware 的 CoreService，
+    #      am 报 "Error: Not found; no service started" (rc=255)；
+    #   2) 以 shell(uid 2000) 身份调用 -> "Requires permission
+    #      com.oplus.permission.safe.IOT"。模块以 root(uid 0) 运行，不受此限；
+    #   3) 包尚未进入 PMS（开机早期 priv-app 未登记）-> 上面的 pm path 判空。
+    echo "[$(date '+%F %T')] OEM $action request failed mac=$mac unlocked=$(user_unlocked && echo 1 || echo 0)"
+    return 1
 }
 
 request_pen_connect() {
@@ -1402,6 +1371,7 @@ request_pen_disconnect() {
     request_oem_pen_action "$OEM_DISCONNECT_ACTION"
     run_hidctl disconnect
 }
+
 
 # The stock settings action updates the IPe state, but on this port HID Host
 # remains connected. Enforce an explicit settings-page Disconnect at both the
@@ -1462,45 +1432,6 @@ monitor_battery_cache &
 monitor_charging_cache &
 monitor_real_bt_state &
 
-# TB522FU: 充满断电 + 充电通知 + IPeManager 充电状态修正。
-# 独立脚本，可用 `touch $MODDIR/disable-charge-guard` 临时停用。
-# 用 -f + `sh` 而不是 -x：模块文件权限由打包时的 set_perm 决定，
-# 早先漏配导致 charge-guard.sh 为 0644 → -x 判定失败 → 守护静默不启动。
-# 另注：pidfile 落在 /data 会跨重启保留，脚本内已用 boot_id + cmdline 双重
-# 校验，防止把被内核复用的 PID 误判为"已在运行"（2026-09-18 实测踩坑）。
-if [ -f "$MODDIR/charge-guard.sh" ]; then
-    echo "[$(date '+%F %T')] launching charge-guard"
-    sh "$MODDIR/charge-guard.sh" &
-    # 后台确认守护确实起来了；若缺席（单实例误判、异常退出等）补启一次。
-    (
-        sleep 3
-        cg_pid=$(cat "$MODDIR/charge-guard.pid" 2>/dev/null)
-        cg_pid=${cg_pid%% *}; case "$cg_pid" in ''|*[!0-9]*) cg_pid= ;; esac
-        if [ -z "$cg_pid" ] || [ ! -d "/proc/$cg_pid" ]; then
-            echo "[$(date '+%F %T')] charge-guard missing after launch; relaunching"
-            sh "$MODDIR/charge-guard.sh" &
-        fi
-    ) &
-fi
-
-# 笔「链路状态守护」（pen-revive-guard.sh v2，2026-09-21 重定位）：
-#   完整因果链与五组证伪实验见 docs/pen-sleep-death-analysis.md。
-#   笔满电 -> 经带内 ASK 包下令 CPS 驱动 close tx -> 驱动关载波 ->
-#   笔失去载波自行关机 -> 蓝牙 HOGP 状态滞后（僵尸连接）-> 吸附边沿的重连
-#   被僵尸判据吃掉 -> 用户必须物理重新吸附。
-#   【软件无法唤醒已关机的笔】：写 tx_status 只产生 Analog Ping，而 Hall
-#   边沿走内核内调用（Digital Ping），笔只认后者。v1 的 TX 脉冲方案已证伪。
-# v2 因此不再写 tx_status（一个字节都不写），改为维护
-#   settings lenovo_pen_powered_down
-# 供本文件 real_bt_connected() 消费，让镜像诚实、重连恢复：
-#   touch $MODDIR/pen-revive.dryrun   只记录检测结果（不改 settings）
-#   touch $MODDIR/disable-pen-revive  整体停用
-# 注意与 charge-guard 的分工：两者都是纯观察者，都不写 tx_status。
-if [ -f "$MODDIR/pen-revive-guard.sh" ]; then
-    echo "[$(date '+%F %T')] launching pen-revive-guard"
-    sh "$MODDIR/pen-revive-guard.sh" &
-fi
-
 monitor_hid_latch &
 
 # The ported IPeManager package carries the vendor Bluetooth receivers in
@@ -1518,139 +1449,6 @@ for receiver in \
     fi
 done
 
-# On this port the CPS8601 is probed before hall_detect has replayed the
-# initial docked state. The vendor hall notifier's real event 1 sequence is
-# therefore never emitted at boot: cps_power_gpio (13) is high, but the
-# controller's sw_en (10) and boost_mode (108) pins remain low. The second
-# Hall node alone is high both when docked and when detached, so gate the
-# real GPIO keeper on the validated Hall pair (0:1 == docked). No pen,
-# Bluetooth or attention state is synthesized here; the CPS driver must still
-# report the actual chip, battery and HID state.
-start_cps_gpio() {
-    # TB522FU: the CPS8601 driver owns the wireless TX path via the kernel
-    # power-supply framework (cps_wls_tx online=1 observed the moment the pen
-    # docks). No GPIO keeper is needed here, and the TB710FU line numbers
-    # (10/108) are invalid on this board. Keep the hook disabled until a
-    # concrete failure is proven on-device.
-    return 0
-    [ -r "$CPS_PEN_HALL" ] || return 0
-    [ "$(read_hall_state)" = 1 ] || return 0
-    [ -x "$CPS_HELPER" ] || [ -x "$CPS_GPIOSET" ] || {
-        echo "[$(date '+%F %T')] CPS GPIO helper unavailable; wake skipped"
-        return 0
-    }
-    [ -e "$CPS_GPIODEV" ] || return 0
-
-    if [ -r "$CPS_PIDFILE" ]; then
-        old_pid=$(cat "$CPS_PIDFILE" 2>/dev/null)
-        case "$old_pid" in
-            ''|*[!0-9]*) old_pid= ;;
-            *) kill -0 "$old_pid" 2>/dev/null && return 0 ;;
-        esac
-    fi
-    rm -f "$CPS_PIDFILE"
-
-    if [ -x "$CPS_HELPER" ]; then
-        "$CPS_HELPER" >/dev/null 2>&1 &
-        cps_pid=$!
-        sleep_sec 1
-        if kill -0 "$cps_pid" 2>/dev/null; then
-            echo "$cps_pid" >"$CPS_PIDFILE"
-            echo "[$(date '+%F %T')] CPS GPIO handle holder started pid=$cps_pid hall=1 gpio=10,108"
-            return 0
-        fi
-        echo "[$(date '+%F %T')] CPS GPIO handle helper exited; using gpioset fallback"
-    fi
-
-    (
-        cleanup_cps_gpio() {
-            "$CPS_GPIOSET" "$CPS_GPIOCHIP" 10=0 108=0 >/dev/null 2>&1
-            exit 0
-        }
-        trap cleanup_cps_gpio HUP INT TERM
-        while [ ! -e "$CPS_DISABLED" ] && [ -r "$CPS_PEN_HALL" ] \
-                && [ "$(read_hall_state)" = 1 ]; do
-            "$CPS_GPIOSET" "$CPS_GPIOCHIP" 10=1 108=1 >/dev/null 2>&1
-            # gpioset is a fallback for kernels where the line-holder helper
-            # exits. The CPS state is latched; refreshing at 5 s avoids a
-            # needless one-Hz process/exec loop while the pen is docked.
-            sleep_sec 5
-        done
-        cleanup_cps_gpio
-    ) &
-    cps_pid=$!
-    echo "$cps_pid" >"$CPS_PIDFILE"
-    echo "[$(date '+%F %T')] CPS real wake sequence started pid=$cps_pid hall=1 gpio=10,108"
-}
-
-stop_cps_gpio() {
-    had_pid=0
-    if [ -r "$CPS_PIDFILE" ]; then
-        cps_pid=$(cat "$CPS_PIDFILE" 2>/dev/null)
-        case "$cps_pid" in
-            ''|*[!0-9]*) ;;
-            *)
-                had_pid=1
-                kill "$cps_pid" 2>/dev/null
-                ;;
-        esac
-        rm -f "$CPS_PIDFILE"
-    fi
-    [ "$had_pid" = 1 ] && "$CPS_GPIOSET" "$CPS_GPIOCHIP" 10=0 108=0 >/dev/null 2>&1
-}
-
-monitor_cps_gpio() {
-    wait_count=0
-    while [ ! -r "$CPS_PEN_HALL" ] && [ "$wait_count" -lt 120 ]; do
-        sleep_sec 1
-        wait_count=$((wait_count + 1))
-    done
-    while [ ! -e "$CPS_DISABLED" ]; do
-        if [ -r "$CPS_PEN_HALL" ] && [ "$(read_hall_state)" = 1 ]; then
-            start_cps_gpio
-        else
-            stop_cps_gpio
-        fi
-        sleep_sec 2
-    done
-    stop_cps_gpio
-}
-
-wait_for_cps_power() {
-    wait_count=0
-    while [ ! -e "$CPS_DISABLED" ] && [ "$wait_count" -lt 20 ]; do
-        if [ "$(read_hall_state)" = 0 ]; then
-            echo "[$(date '+%F %T')] CPS boot power skipped: pen is not magnetically docked"
-            return 1
-        fi
-        if [ -r "$CPS_PEN_HALL" ] && [ "$(read_hall_state)" = 1 ]; then
-            start_cps_gpio
-            cps_pid=$(cat "$CPS_PIDFILE" 2>/dev/null)
-            case "$cps_pid" in
-                ''|*[!0-9]*) ;;
-                *)
-                    if kill -0 "$cps_pid" 2>/dev/null; then
-                        echo "[$(date '+%F %T')] CPS boot power ready pid=$cps_pid"
-                        return 0
-                    fi
-                    ;;
-            esac
-        fi
-        sleep_sec 1
-        wait_count=$((wait_count + 1))
-    done
-    echo "[$(date '+%F %T')] CPS boot power wait ended without a live GPIO holder"
-    return 1
-}
-
-# TB522FU CPS wireless charging is managed by kernel power supply driver; monitor_cps_gpio is unneeded
-# monitor_cps_gpio &
-
-# CPS power is a charging concern only. Bluetooth pen recovery must not wait
-# for Hall/CPS because the OEM pen protocol is wireless even while undocked.
-if [ "$(read_hall_state)" = 1 ] && wait_for_cps_power; then
-    echo "[$(date '+%F %T')] CPS boot power ready before Bluetooth retries"
-fi
 touch "$PEN_BOOT_READY_FILE"
 
 # Re-emit the driver's current INFO/MAC/TOUCH_INFORMATION snapshot after the

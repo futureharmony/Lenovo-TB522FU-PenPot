@@ -5,6 +5,28 @@
 > **框架是 Vector（JingMatrix，`zygisk_vector`），不是 LSPosed。** 安装与验证步骤见
 > [`docs/install-vector-route.md`](docs/install-vector-route.md)。
 
+## v0.1.17 减法重构（2026-09-21）：移除官方系统没有的逻辑
+- [x] **依据**：`docs/pen_official_rom_verdict_20260921.md` 五层取证（.ko/dtbo/HAL/官方笔框架/笔固件）证明
+      「充满断电 → 笔深休眠 → 重新吸附唤醒」是官方驱动+笔固件的完整行为链，官方系统层
+      **没有任何**充电/TX/唤醒/重连干预逻辑。适配层（inkdye）与本模块同卡，问题不在软件层。
+- [x] **整体删除**（模块 payload 内）：
+      1. `charge-guard.sh`（充电守护：通知 + IPeManager 充电状态修正）；
+      2. `pen-revive-guard.sh`（链路守护：僵尸连接检测 + `lenovo_pen_powered_down` 标记）；
+      3. CPS GPIO keeper（`start/stop/monitor_cps_gpio`、`wait_for_cps_power`、`bin/pen-cps-gpio`、gpioset）；
+      4. `pen_wakeup_mode/switch` 写入（`apply_pen_wake`/`monitor_pen_wake` 及开机等待循环）；
+      5. D1a 硬重连全套（笔尖 evdev 探针、三态判定、看门狗、挂起等待者、`request_pen_reconnect_hard`、
+         离座边沿决策块、`request_pen_connect_bounded` 的硬重连兜底）；
+      6. `real_bt_connected()` 的 powered_down 否决（守护已删，标志无写入方）；
+      7. uninstall/panic/post-fs-data 中的 `tx_status` 写入与守护 pid 清理；action.sh 的守护启停/日志段；
+         customize.sh 的对应 ui_print 与 set_perm；build_root.py 白名单两行。
+- [x] **保留**（移植桥接必需 / 官方行为等价物）：开机与吸附边沿 `CONNECT_PENCIL`、设置页断开/连接对账、
+      磁吸胶囊、电量/充电/Hall/蓝牙状态镜像（**只读**，喂 ColorOS UI）、PenHidCtl priv-app、Hook、
+      keylayout overlay、boot guard、panic、inkdye 切换、note engine 钉版守卫（移植崩溃修复，非笔电源逻辑）。
+- [x] service.sh 2163 → 1513 行；版本 0.1.17 / 117；zip `releases/tb522fu-pen-bridge-v0.1.17.zip`
+      （md5 786933fa194eb7a667cb98c792a81bf8）。
+- [ ] **回归实测**（装 v0.1.17 后）：① 开机吸附自动连接；② 吸附弹胶囊；③ 设置页断开/连接；
+      ④ 长时息屏吸附后取笔——预期与官方一致（笔深睡需重新吸附，这是官方设计，不再尝试软件复活）。
+
 ## P0 — 侦察（决定项目成败，先做）
 - [ ] 离线：`strings kernel_abs.elf | grep -iE 'lenovo_penraw|PEN_FRAMEWORK|pen_hall|cps'` — 确认内核是否导出笔事件接口
 - [ ] 设备在线：跑 `scripts/recon_sysfs.sh`，找 TB522FU 的 Hall / CPS / 笔 uevent 节点
@@ -157,6 +179,9 @@
   - 解除条件**只有一个**：笔重新上电（`tx=1` 或 `online=1`）。**笔离开吸附位时不解除** ——
     笔离座本就自行关机，保持标志才诚实；若在 detach 清标志，用户「拿起→放回」时 attach
     边沿会看到 0，重连请求又会被僵尸连接吃掉（那正是要修的 bug）。
+    - ⚠️ **2026-09-21 11:18 该前提被用户实测证伪**：「笔离座本就自行关机」不成立 —— 破僵尸后
+      笔在**全程未吸附**的情况下恢复了完整书写（`event5` 3822 条压力/倾斜事件，`physical_docked=0`
+      恒定 196 采样）。且这个「离座不解除」正是 v0.1.9 要修的自锁环的一半成因，见下方 P2.5-b。
   - 不用 `online` 做判据（与 TX 同秒归零，无独立区分度）；不用 HOGP（僵尸连接就是它不翻转造成的）；
     不用 `lenovo_pen_hardware_battery_last_at`（它由本模块 `monitor_battery_cache` 在
     `connected=1` 时周期刷新，僵尸期间会被自己喂成常青，不具备活性含义）。
@@ -173,6 +198,248 @@
   - ⚠️ **不是本模块引入的**：`docs/p0-recon-20260918.md`（移植第一天）第 79–82 行就记到了
     「充满 → online 归零 → 静止 23 分钟」。charge-guard v2 的 `tx_set 0` 只存在 4 小时
     （`059e018` 11:39 → `d7e8609` 15:36），与现象无关。
+
+## P2.5-b 僵尸连接自锁环：`powered_down` 短路判据把模块自己的自恢复废掉（v0.1.9，2026-09-21）
+
+**现象**（用户 4 步实测）：拿笔书写 ✅ → 重新吸附 → 锁屏静置 2 分钟 → 解锁 → **写不出**，
+必须重新吸附才恢复；随后确认**笔全程未吸附**时靠软件破僵尸即可书写。
+
+- [x] **实验 1 完成**（11:12，root，零用户操作）：`DISCONNECT_PENCIL` → `HOGP 2→3→0`（<2s）；
+      `CONNECT_PENCIL` → **6 秒内**完整会话重建（`services=12 characteristics=36`、
+      固件 `PARKER-V3 V1.26`、序列号 `HVE70MYJ`、notify 回包、`real HID connected`）。
+      11:02 的 CONNECT 失败与 11:12 的成功，**唯一差异是中间那次 DISCONNECT**。
+- [x] **实验 1b 完成**（11:14–11:18，用户手写）：破僵尸后**不吸附**即可书写，
+      `event5` 3822 条（`ABS_PRESSURE`/`ABS_TILT`/`BTN_DIGI` 齐全），
+      `physical_docked=0` 恒定 196 个 1 秒采样 ⇒ **L1「笔固件掉电、只能靠线圈唤醒」证伪**。
+- [x] **代码级根因定位**（不是猜测，有模块自身日志）：
+      `service.sh::real_bt_connected()` 里 `powered_down=1 → return 1` 的短路，
+      而 `request_pen_connect_bounded()` 正是拿它当重连成功判据。实测 `pen-bridge.log`：
+      ```
+      11:12:23 explicit pen reconnect window ended without HOGP   ← 宣告失败
+      11:12:23 real BT state mirror connected=0 (was 1)           ← 于是清镜像
+      ```
+      **而 `dumpsys` 从 11:12:14 起 `hogp connection state=2` 就已成立** —— 连上了却报没连。
+      **自锁环**：置位要求 `docked=1`、解除要求回到线圈，而离座分支故意不动标志
+      ⇒ 笔带着 `powered_down=1` 离座后该标志**结构上再也无法更新**
+      ⇒ 判据恒假 ⇒ 自恢复永不确认 + 镜像永远报「未连接」
+      ⇒ 并连带写出 `settings_enable_oppo_pencil=0` / `ipe_pencil_present=0`
+      （模块持续向 ColorOS 宣告「笔不存在」）。
+- [x] **v0.1.9 修复**（4 处，`sh -n` 通过，构建并推送设备 Download）：
+      | 编号 | 改动 |
+      |---|---|
+      | F-A | 拆出 `bt_stack_hogp_live()`（纯栈读取）；`powered_down` 短路**限定在 `physical_docked=1` 时**生效 |
+      | F-B | 新增 `request_pen_reconnect_hard()`：`DISCONNECT` → 轮询等 `HOGP` 落下（≤6s）→ 清自造闩锁 → `CONNECT` |
+      | F-C | 离座边沿：`left_powered_down=1`（失败场景指纹）走 F-B，否则维持原普通路径 |
+      | F-D | `request_pen_connect_bounded()` 三次普通 `connect` 耗尽后兜底追加 F-B |
+      - F-A 修「假阴性」；F-C 修「发错原语」（11:02 其实**发过** connect，只是被僵尸 `not disconnected. state=2` 拒绝）
+      - 依据文档：`docs/pen_undock_after_dock_sleep_unusable_20260921.md` §1.6 / §1.6.1 / §1.6.2
+- [x] **实验 3 执行（11:31）：❌ 失败 —— 修复未被触发。** 详见
+      `docs/pen_exp3_v019_failure_20260921.md`。直接原因：离座边沿（`service.sh:1308`）两个条件
+      同时为假 —— `left_powered_down=0`（停充→离座仅 **47 秒** < `POWERED_DOWN_AFTER_SEC=90`）、
+      `! real_bt_connected` 恒假（僵尸 `HOGP=2` 全程 163 采样）⇒ **离座零动作**。
+- [x] **实验 3b 救助（11:34，root 零操作）**：`DISCONNECT` → `HOGP 2→0`；`CONNECT` → 6 秒内
+      真实重建（`GATT_CH_OPEN` + `read 2a19 → battery 100` + 笔 notify 回包 `01 00 01 0d …`）。
+- [x] **实验 3c 完成（11:38，用户手写）：✅ 通过** —— 救助后**全程未吸附**书写正常：
+      `cap_ev5` 新增 **744 条**笔迹事件（`ABS_PRESSURE` 113 值 / `ABS_TILT` 84 值 /
+      `ABS_X`·`ABS_Y` 各 164 唯一值，0→4265 压力曲线），`physical_docked=0` 恒定 301 采样；
+      模块侧 `explicit pen reconnect confirmed by HOGP attempt=1`（**F-A 解耦生效，不再假阴性**）。
+      ⇒ **笔不需回座唤醒；硬重连有效且充分；缺的只是触发条件。**
+      ⇒ 另实测确认：F-B 的 `DISCONNECT` 由 **OEM CoreService 通路**完成即可，
+      `run_hidctl`（因 `penhidctl` 崩溃而不可用）**不是阻塞项**。
+- [x] **D1a 已实施（v0.1.10，用户 2026-09-21 11:44 选定）** —— 离座边沿改用「笔尖节点短窗口活性」判据。
+      改动 5 处：
+      | # | 内容 |
+      |---|---|
+      | 1 | 新增常量 `PEN_TIP_DEVICE_NAME` / `INPUT_DEVICES_FILE` / `PEN_TIP_ALIVE_WINDOW=2` / `PEN_HARD_RECONNECT_DEDUP*` |
+      | 2 | 新增 `pen_tip_event_node()`：按**设备名**从 `/proc/bus/input/devices` 解析 evdev 节点 |
+      | 3 | 新增 `pen_tip_alive_within()`：**三态**返回（0=有事件／1=零事件／2=判不了） |
+      | 4 | 重写 `monitor_hall_capsule()` 离座分支：栈真断 → 直接硬重连；栈报「在」（可能是僵尸）→ 活性判据裁决 |
+      | 5 | `request_pen_reconnect_hard()` 增加 10 秒去重（防 Hall 抖动引发重连风暴） |
+      - **三态设计理由**：把「工具故障」误当成「休眠」会导致**每次离座都无谓重连**（6 秒不可用），
+        所以只有 `getevent` 返回 **124**（超时）才判静默；节点打不开/工具异常一律走 `2`（保守不动）。
+      - **设备实测**：`NVTCapacitivePen` 的 evdev 节点 = **`/dev/input/event5`**
+        （⚠️ `dumpsys input` 里的 `9: NVTCapacitivePen` 是 **InputDevice id，不是 evdev 节点号**）；
+        解析函数输出正确；零事件路径连跑 3 轮稳定 `rc=1` / 耗时 2s；**无 `rc=2` 降级**。
+      - 构建：v0.1.10 / versionCode 110，MD5 `af6cf6ba44e34916ce4725f4e988cc4d`（设备侧已核对一致），
+        scope 8/8 一致，Hook APK 仍 v4.6.0 未变。
+      - ⚠️ **遗留风险（部署后须实测确认）**：`rc=0` 路径（有事件时返回 0）**未能自主验证** ——
+        该内核（6.6.82）下 `sendevent` 注入的事件不被广播给其他 evdev 客户端
+        （`sendevent rc=0` 但 `getevent` 仍超时），属 `evdev_write()` 的语义限制。
+        若此处误判，症状是「**每次拿笔都要等约 6 秒**」且模块日志出现
+        `pen tip silent ... assuming sleeping emitter` —— 出现即说明判据有误，需排查。
+- [x] **D1a 通路审计 + v0.1.11→v0.1.13 迭代**（2026-09-21 12:1x，实机实测）
+      - **新发现（A/B 已证）**：`com.oplus.ipemanager` 只声明 `PARTIALLY_DIRECT_BOOT_AWARE`，
+        `CoreService` 自身**不是 direct-boot-aware**；用户处于 `RUNNING_LOCKED` 时 PMS 在
+        `resolveService` 阶段就过滤掉它 ⇒ `am startservice` 报
+        `Not found; no service started`（rc=255），`cmd package query-services` 返回
+        `No services found`。模块自带的 `com.aclaniakea.penhidctl` 同样没有该标记
+        ⇒ **该窗口内 OEM 与 HID 两条通路同时不可达**（不是 ROM 的 am 缺陷）。
+      - **影响边界（极易被高估，务必记住）**：`RUNNING_LOCKED` 只存在于
+        **「开机 → 该次开机首次解锁」**之间。解锁过一次后即使关屏、停在锁屏界面，
+        用户仍是 `RUNNING_UNLOCKED` ⇒ **用户复现路径（吸附→锁屏→解锁→取笔）全程解锁态，
+        D1a 主路径不受影响**；唯一受影响的是「开机后首次解锁前」这一小段
+        （实测 11:49 / 12:09 两次启动的 OEM 会话恢复全程失败；12:03 那次启动的解锁定位于
+        12:03:38.5，同一条调用 0.5 秒后即成功，可作对照）。
+      - **另一个独立成因**：以 **shell(uid 2000)** 身份调用会被
+        `Requires permission com.oplus.permission.safe.IOT` 拒绝；模块以 **root(uid 0)**
+        运行不受限 —— 早期用 `adb shell am startservice` 手测总是失败就是此因。
+      - **改动**：v0.1.11 引入「不可达就挂起」状态（pending 标记 + 后台等待者）；
+        v0.1.12 判据改为「**先尝试、真的投不出去才挂起**」+ `mkdir` 原子锁保证单实例；
+        v0.1.13 `request_oem_pen_action()` 三种失败（未解锁／包未登记／权限）一律 `return 1`。
+      - **去重时间戳改为「投递成功后才写」** —— 延后不消耗 10 秒去重窗口。
+      - **桩测试 5/5 通过**（设备上跑，函数体从 `service.sh` 原样抽取）：
+        T1 TTL 放弃 / T2 恢复触发 / T3 单实例去重 / T4 延迟恢复 / T5 持有者死亡接管。
+        T3 当场抓出「去重依赖 `/proc/<pid>/cmdline` 匹配脚本名」的脆弱实现（改名即失效），
+        已改为 `mkdir` 锁；另纠正了「拿笔尖活性当恢复触发器」的死锁设计
+        （休眠的笔尖节点本就零事件，那正是 D1a 判据本身）。
+      - 完整证据：`docs/pen_exp3_v019_failure_20260921.md` **§14**。
+- [x] **缺陷 B：开机 OEM 会话恢复的 3 次预算在未解锁窗口被烧光**（同批修复，v0.1.13 实测）
+      - 旧实现每次失败都占用预算（30 秒间隔），未解锁窗口内 90 秒烧完 ⇒ `exhausted`，
+        随后只能「等到下一次真实蓝牙边沿」才恢复 OEM 会话（实测 12:09 那次启动：
+        attempt 1/3、2/3 全是 `unlocked=0`）。
+      - 修复：预算只记「真投出去」的次数；投递不出去的另计 `oem_recovery_blocked`
+        （封顶 40 次 ≈ 20 分钟），真实蓝牙边沿时一并清零。
+      - 实测 v0.1.13 启动日志：`OEM haptic recovery not deliverable; channel unreachable,
+        budget kept (1/40)` → `(2/40)`，不再出现 `attempt=1/3`。
+- [x] **D1a 第二层失效：判据子壳静默死锁**（2026-09-21 12:22 用户复查「还是不行」，实机取证）
+      - **现象**：12:21:57 离座边沿，模块日志**整段静默 80 秒以上** —— 判据、重连、日志全无。
+        与 11:31 那次表现相同但成因不同：这次是**代码根本没跑完**。
+      - **根因**：`$(pen_tip_event_node)` 的子壳永久卡在 `/proc/bus/input/devices` 的
+        **无限超时 poll**（`syscall 73 ppoll, nfds=1, tmo_p=NULL`；`fdinfo/0` 读偏移冻结在
+        `pos:1`；六次采样一字不变），父壳 `31695` 停在 `pipe_read` 等它，永无结果。
+        **`( ... ) &` 的失败是静默的** —— 这正是 D1a 整条被吃掉的原因。
+      - **对照**：同一 `while read` 构造在 root shell、`nsenter` 进同一挂载命名空间、
+        以及新起的「仿模块 fd 环境」进程里**都能正常跑完 106 行** ⇒ 与运行时状态相关的
+        偶发阻塞，**不能靠「复现不出来」排除**。
+      - **改动**：v0.1.14 —— ①节点解析改扫 sysfs（`/sys/class/input/input*/name` +
+        `inputN/eventM`，彻底不碰 procfs）；②新增 `pen_tip_probe_reap()` 探针看门狗，
+        监视循环每秒记账、超 `PEN_TIP_PROBE_MAX=15` 秒收尸并强制重连；③`rc=2`（判不了）
+        由「不动」改为「重连」（失败保险向）；④两条通路都登记 PID+起始秒。
+        v0.1.15 —— ⑤`request_pen_reconnect_hard` **同时清两个闩锁**（见下条）；
+        ⑥探针增加「为什么判不了」的诊断行；⑦节点扫不到时等 1 秒重试一次。
+      - **实测**（函数体从 `service.sh` 原样抽取，设备上跑）：节点 → `/dev/input/event5`
+        （修正了初版少一层 `input/` 的缺陷）；静默 → `rc=1`/2s；看门狗·健康不杀／
+        卡死杀并强制重连／未到上限不动作；强制缺节点 → 1 秒重试 + 诊断 + `rc=2`。
+      - **端到端**：v0.1.14 重启后 12:33:00 的离座边沿**第一次留下完整日志链**
+        （`pen tip liveness unknown (rc=2); hard reconnecting as fail-safe` → 硬重连成功）。
+        核心目标（不再静默）达成。证据见 `docs/pen_exp3_v019_failure_20260921.md` §15。
+- [x] **缺陷 C：硬重连「断而不建」，比僵尸连接更糟**（12:33:05 实测抓到，v0.1.15 修复）
+      - Hook 的 `IpeManagerHooks` 处理 `DISCONNECT_PENCIL` 时把
+        `lenovo_pen_disconnect_requested` 与 `lenovo_pen_user_disconnect_requested`
+        **两个闩锁一起置 1**（`CONNECT_PENCIL` 则一起清 0），而硬重连只清了前者
+        ⇒ `request_pen_connect` 立刻以 `pen connect skipped: user disconnect choice is active`
+        返回：**链被我们亲手断掉又拒绝重建**。这次只因用户 5 秒后又把笔吸回座上
+        （吸附边沿会清闩锁）才没暴露成新故障。
+      - 修复：硬重连里两个闩锁一起清（用户主动点「断开」造成的闩锁仍在函数开头提前返回，
+        不会被误清）。
+- [x] **exp6 已重做：用户反馈「一切都正常」，笔确已恢复；残留仅为 13 秒重连窗口**（2026-09-21 13:24–13:30，多路仪器取证）
+      - **证据**：笔尖 `event5` 产生 **4674 行**完整 NVTCapacitivePen 报文（`ABS_X/Y` +
+        `ABS_DISTANCE` + `ABS_TILT_X/Y` + `BTN_DIGI` DOWN/UP 严格配对），**5 段书写**
+        （段 3→段 4 空档 22 秒），`hid9` 同步产出 12 组 `MSC_SCAN 0x619/0x620` 笔键报文，
+        `event4` 活跃 673 行 —— 与"画 → 按笔键 → 再画 → 手指划"逐项吻合。
+        **笔的物理层、驱动层、输入层全部正常**（与 §13 以来"BLE 活但屏幕零事件"的旧现场相反）。
+      - **13:12 那次"还是写不出"被重新定性**：模块当时**做对了每一步**（探针 → fail-safe
+        硬重连 → 清双闩锁 → CONNECT），但「取下笔 → 链路可用」间隔
+        **13:12:25 → 13:12:38 = 13 秒**，用户在窗口内就验收了。13:12:38 之后
+        `pen-bridge.log` 再无任何输出 ⇒ 13:24 的成功书写**全程无模块介入**，是纯物理书写。
+      - **`rc=143` 成因定案（D6 关闭）**：不是 getevent 的毛病，是 **`timeout` 自身的
+        竞态** —— 同一条命令、同一个节点，13:12 模块记录 `rc=143`（128+SIGTERM），
+        13:29 本轮实测得到 `rc=124`（toybox 正常超时码，纯度探针 `timeout 1 sleep 5`
+        同样返回 124）。`timeout` 发 SIGTERM 与子进程自退存在赛跑，谁先结算退出状态
+        谁生效。旧代码把 143 归入 `*)` 判成「无法判定」，且**决策会被退出码悄悄改写**。
+      - **v0.1.16 已实施**：判据改为**读输出而非退出码**（`getevent -l -c 1` + 匹配 `EV_`），
+        与工具版本/信号竞态彻底解耦。实机校验：静默分支 8/8 轮正确、零误报。
+      - 详见 `docs/pen_exp3_v019_failure_20260921.md` §16。
+- [ ] **D5** 停充后周期性极短 TX 脉冲维持笔的发射子系统清醒
+      【**唯一能把「长时吸附后写不出」归零的方向；2026-09-21 14:46 已由实验定案为
+      残留缺陷的病因**。新证据（详见 `docs/pen_exp3_v019_failure_20260921.md` §17）：
+      失败的自变量是**充停后的吸附时长**，不是 `powered_down`——成功 1.9/2.5/6.2 min，
+      失败 17 min，刚吸附过则秒级恢复；阈值在 6.2–17 min 之间。
+      机制：CPS 驱动 `.ko` 字符串显示 **笔自己通过带内通信 `charging_cmd` 命令驱动
+      `close tx`**（非用户态干涉），此后 TX 连续关闭 ~19 分钟无再充活动
+      （`pen-revive.log`: `tx off 1129s`），笔即在此期间深休眠。
+      两条**可写的** TX 杠杆已探明：`/sys/class/power_supply/cps_wls_tx/online`(`-rw-`)
+      与 `wls_tx/cmd`(`-rw-`)；厂商私有 `tx_status`（v2 踩过坑）优先不用。
+      先做**零代码脉冲验证**：吸附+息屏，每 60s 脉冲一次 × 20 分钟 → 取下即写。
+      同时保留原判据：若 D5 成立，离座分支会走 `pen tip alive after undock; link kept`，
+      13 秒窗口一并归零】
+- [x] **D8 已结案：原假设被证伪，判据并非空转**（2026-09-21 14:11:39 实测）
+      - 原假设是「离座瞬间笔尖必然零事件 ⇒ D1a 探针等价于无条件重连」。**实测推翻**：
+        用户在**拿起笔立即书写**时，2 秒探针窗口内捕获到笔尖事件（`event5` 同期 268 行），
+        判据走 `ALIVE` 并打印 **`pen tip alive after undock; link kept`** —— **保持链路，
+        零延迟可写**。这是 v0.1.10 引入 D1a 以来 `ALIVE` 分支的**首次真实触发**。
+      - ⇒ **判据能真实区分两种时序**：「拿起就写」→ `ALIVE` → 不重连；
+        「取下搁置后再写」→ `SILENT` → 硬重连（~13 秒）。
+        **13 秒窗口因此不是普遍现象**，只在后者出现，而「取下即写」这条最常用路径
+        已经是零延迟。
+      - **顺带显形的物理事实**：`powered_down=1` 全程为 1 时笔尖仍在发射 ⇒
+        `powered_down` 描述的是**充电/BLE 侧**状态，与**笔尖电容发射**是两套独立系统。
+        书写不依赖 BLE ⇒ **排查"写不出"时不能拿 `powered_down` 当病灶推理**。
+- [x] **v0.1.16 已部署并端到端验证**（2026-09-21 14:09，**热重载，未重启设备**）
+      - 部署手法：`mv` **原子替换** `service.sh` + `module.prop` —— **不能用 `cp` 覆盖**：
+        shell 是流式读脚本的，`cp` 会截断一个正在被读取的文件，让运行中的实例读到
+        错位内容甚至执行垃圾；rename 保留旧 inode 给已打开的 fd，运行实例不受影响。
+        之后停掉旧工作实例及其全部子进程、**保留 ppid=1 的 respawn 循环**，
+        8 秒内自动以新文件重建（实测 14:09:05 完整启动序列，新工作进程 7310 + guard 7536/7545）。
+      - 新版 md5 `7f03a4a1c5acf4931bd24b532475114c`；zip `d4aec284c5ccd97df28492406789a429`
+        （Vector scope 自检 8/8 一致）；回滚备份 `*.v0115.bak` 在 `/data/local/tmp`。
+- [x] **🛑 模块已从设备上卸载（2026-09-21 15:11，交还系统内置笔桥 inkdye）**
+      用户指令：「移除本模块，恢复 inkdye 版本」。执行内容与实测结果：
+      - 停止模块运行时：supervisor 3168 + 工作实例 + `charge-guard` / `pen-revive-guard`
+        共 **10 个进程**全部清空（先杀 respawn 源头，再清子进程）。
+      - `pm enable --user 0 com.inkdye.lenovopentocoloros` → `enabled=1`
+        （原为 `3` = DISABLED_USER），且 `disabledComponents` 计数为 0。
+      - Vector `modules disable` + `pm uninstall` 配套 Hook APK；`pm uninstall --user 0`
+        `com.aclaniakea.penhidctl`；overlay `/system/priv-app/aclpenhid` 随模块消失。
+      - 清 `persist.lenovo.penbridge.disabled`（`resetprop -p -d`）+ **34 个 `lenovo_pen*`
+        settings 镜像键**；**OEM 的 20 个 `ipe_pencil_*` 键一律未动**（归属判定：
+        `lenovo_pen*` 由本模块 `HookUtils.java` / `service.sh` 写入，`ipe_pencil_*` 是原厂）。
+      - `ksud module uninstall tb522fu_pen_bridge` + 重启 → 模块目录已删除，
+        `ksud module list` 不再出现。
+      - **键位覆盖自动回落到 ROM 原版**：`Vendor_17ef_Product_622e.kl` 现为 987 B /
+        `2009-01-01` ROM 时间戳、首行是 ROM 自带注释（模块版是 1463 B + 我们的注释）。
+      - **全程未写任何 CPS/充电节点**：`tx_status` 仍是 `cps_boost_mode:0, cps_wls_en:0`。
+        实测 `uninstall.sh` 里的 `echo 1 > tx_status` **被驱动拒绝**（值未变）⇒
+        该行是遗留 no-op；且 `charge-guard` v3 / `pen-revive-guard` v2 本就只读，
+        所谓"恢复 TX=1"没有实际对象。
+      - 离线备份：`../offline_backups/tb522fu_pen_bridge_backup_20260921_150946.tgz`
+        （6.0 MB，md5 `f074e468cfc6efe2295c05b90fd4d8b2`）+ `*_snapshot.txt`；
+        重装可直接用 `releases/tb522fu-pen-bridge-v0.1.16.zip`。
+      - 重启后复核：loadavg 回落、cpu-1-1-1 `37.8 °C`、笔输入节点
+        （`NVTCapacitivePen`→event5、笔 HID→event8/9）全在。
+      - **遗留待决**：① `com.oplus.gesture` 仍处禁用 —— 是本模块为"开机稳定性"禁的
+        （`service.sh:232`），与笔功能无关，**未擅自恢复**（恢复有 bootloop 风险）；
+        ② 便签引擎 `libSuniaEngine.so` 仍是补丁版 `db61d1ff…`，
+        **原版本地无源可还原**（ROM 无 com.coloros.note，应用来自 `/data/app`，
+        且设备上无 `.guard.bak.*` 备份）。
+- [ ] **D9**：给 13 秒窗口加可观测性 —— 在硬重连收敛点打印耗时
+      （`hard pen reconnect converged in Ns`），把"能不能写"从用户体感变成日志读数，
+      后续优化才有基线。
+- [ ] **D11**：笔键按压能否唤醒深休眠的笔？（低成本备选，30 秒可测）
+      - 现象线索：2026-09-21 `14:45:33-39`（用户「用笔书写」步骤）`/proc/nvt_pen_diff`
+        全程为 **0**；紧接 `14:45:40-42`（用户「按笔键 3 次」步骤）抬到 **762**，
+        随后回落 111。提示**笔键可能触发一次笔侧唤醒**。
+      - 若成立 ⇒ 可给用户一条不依赖重新吸附的现场自救手法（离座后按笔键再写）；
+        更进一步，模块可在离座分支里主动触发一次等价的笔侧唤醒。
+- [ ] **D12**：`/proc/nvt_pen_diff` 语义校验（未校验前不得单独作判据）
+      - 该节点是**快照型**：裸读返回 `EAGAIN("Try again")`，需带重试才成功；
+        且同一值可连续重复十余次（`111 409` 重复 15 次、`655 2685` 重复 11 次），
+        **存在"缓存上一帧"的嫌疑**。
+      - 更硬的坑：失败态读到 1191/762，成功态读到 655 —— **数值大小与"能否书写"
+        不单调对应**，不能直接当"笔在发射"的证据。
+      - 可信的次要信号：**读取成败本身**。手指一碰屏幕 IC 即醒，读才从 `fail` 转 `ok`
+        （14:45:18 之前 11 次全 fail，触碰后转 ok）。
+      - 校验方法：笔远离屏幕 10s → 笔尖贴屏 10s → 再远离 10s，全程高频采样，
+        看数值是否跟随。
+- [ ] **D1b** GATT 探测【**已降级**：休眠不拆 BLE 承载，read 可能照常成功】
+      **D4「监听链路静默」已证伪** —— 正常态亦静默 3.5 分钟（`fe41` 是按需上报，非心跳）。
+      复核依据见 `docs/pen_exp3_v019_failure_20260921.md` §13.5 / §13.6。
+- [ ] **N1（P1）**：`penhidctl` 100% 崩溃（`Failed to open APK ... I/O error` + NPE `getStringArray` on null，
+      由 KSU overlay 提供、App mount ns 不可见）⇒ `run_hidctl` 的 disconnect/connect 通道实际不可用。
+      改为 `pm install` 到 `/data` 再 grant；F-B 目前主要靠 OEM CoreService 通路，故 N1 不阻塞本修复。
+- [ ] **N6（P1）**：`live uhid link=false` 仍上报 `connected` ⇒ 笔按键/手势（`event8/9`）静默失效。
+      本轮实测 `event8/9` 在整个书写期间**均为 0 字节**，与该判断一致（未按笔键，故不能独立定案）。
+
 - [ ] **待验证（设备回归后）**：Hall 驱动 rebind 能否软件化「重新吸附」——
       对 `soc:hall_detect@0` 做 unbind+bind 会让 Hall 驱动重新 probe，可能触发完整的
       「笔来了」通知链。**风险**：失败会让 Hall 吸附检测整体失效（重启可恢复）。
@@ -198,6 +465,30 @@
   已改为 `exec` 之后的后台函数 `apply_inkdye_state()`：**最多 40×3s 重试 + `pm list packages -d --user 0` 复核状态**，确认后打印。实机验证 `enabled=3`（DISABLED_USER）✅
 - [x] **charge-guard 单实例守卫修正**（2026-09-18）：pidfile 在 `/data` 跨重启保留，旧实现只 `kill -0 <old>` → 撞上被复用的 PID 时守护**静默 exit 0**（守护整轮缺席）。
   已改为 boot_id + `/proc/<pid>/cmdline` 双校验，pidfile 记 `pid bootid`；`service.sh` 补启动日志 + 后台 liveness 复核（失败补启一次）。实机验证单实例、日志正常 ✅
+
+### ❌ 实验 3（v0.1.9 部署后真实路径）失败：修复未被触发（2026-09-21 11:31）
+
+完整分析见 `docs/pen_exp3_v019_failure_20260921.md`。
+
+- [x] **部署 + 重启**：v0.1.9（versionCode 109）已装，`system_server stylus hooks installed`，
+      scope 8/8 校验通过；开机基线 `powered_down=0 link_connected=1 HOGP=2`（判据已正常）。
+- [x] **用户真实路径复现**：吸附(11:27:48) → 锁屏静置(11:28:20–11:30:50) →
+      满电停充(11:30:25) → 解锁 → 拿笔(11:31:12) → **写不出**；`event5` 在 11:31:12 后 **0 事件**。
+- [x] **直接原因（零动作）**：离座边沿两个条件同时为假 ——
+      `left_powered_down=0`（`pen-revive.log`：`tx off 45s/90s`，**未到 90s 阈值**）
+      且 `! real_bt_connected` 为假（僵尸 `HOGP=2`）⇒ `pen-bridge.log` 在 11:31:12 后**再无输出**。
+- [x] **认知修正 1**：`powered_down=1` **不能**当失败场景指纹 —— 失败只需 47 秒静置，标志需要 90 秒。
+- [x] **认知修正 2**：v0.1.8 那次的 `connected=0`（11:00:50）很可能是 `powered_down` 短路写镜像的
+      **结果**而非链路断开证据（两场景真实栈状态同为 `HOGP=2`）。
+- [x] **认知修正 3**：N3 解耦（F-A）在离座边沿是**负向**的 —— 旧代码靠短路副作用"歪打正着"发过一次
+      connect，解耦后判据恒真、连试都不试。⇒ **必须有活性判据补位**。
+- [x] **救助实验再次通过**（11:34，零操作）：`DISCONNECT` → `HOGP 2→0`；`CONNECT` → 6 秒内
+      真实重建（`GATT_CH_OPEN` + 读写成功 + 笔 notify 回包）⇒ 笔活着，修复动作有效。
+- [x] **新缺陷记录**：硬重连后 HID 输入设备**重新枚举**（id 10/11 → 12/13），
+      hook 缓存的旧节点失效 ⇒ 全程报 `live uhid link=false`（与 L5 同源）。
+- [ ] **采坑待修**：`cap_ev8/9` 采集写死了节点号，重连后会漏测 ⇒ 改按**设备名动态发现** `eventN`。
+- [ ] **修复待选（用户要求暂缓）**：主推 **D1a 笔尖活性闭环**（离座后 ~2s 内 `event5` 无事件 ⇒ 硬重连），
+      备选 D1b GATT 探测（hook 侧）。见失败分析 §10。
 
 ## P1 构建（2026-09-18 完成）
 - [x] Hook APK：`releases/PenBridge-Hook-tb522fu-v4.1.3.apk`（DeviceGate=SM8750P/sun，213KB，Xposed API 已正确从 dex 剔除）
