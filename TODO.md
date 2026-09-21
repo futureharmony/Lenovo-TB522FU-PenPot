@@ -27,6 +27,203 @@
 - [ ] **回归实测**（装 v0.1.17 后）：① 开机吸附自动连接；② 吸附弹胶囊；③ 设置页断开/连接；
       ④ 长时息屏吸附后取笔——预期与官方一致（笔深睡需重新吸附，这是官方设计，不再尝试软件复活）。
 
+## 唤醒守护 v0.1.18（2026-09-21 实验定案后实施）
+- [x] **实验定案**（`docs/pen_wake_experiment_E0_E4_20260921.md`）：深睡笔的唤醒触发器 =
+      自身 BLE 链路完整 link-down → link-up。真断链 5s 后 `CONNECT_PENCIL` 重建即唤醒，
+      无需重启蓝牙/重新吸附/任何 GATT 命令。haptic 命令总线深睡时可达（笔会震动）但唤醒不了触控。
+- [x] **唤醒后书写震动丢失定案**（19:15 定案，**19:19 实测确认修复**）：link cycle 会重置笔端震动会话，系统侧无人重放
+      inkdye 的连接握手（SWITCH=01 → REQ_INF=01 → IMP CONNECTED 波形 `020501000000`）。
+      握手重放后用户实测"震动了"——重放即修复，无需重启蓝牙。
+      **唤醒守护动作序列必须在 CONNECT_PENCIL 完成后追加本握手重放**（实验文档 §3b）。
+- [x] **v0.1.18 实现完成**（默认关闭，`action.sh wake-guard-on/off` 开关）：
+      - Hook v4.7.0：`PenHapticGatt.refreshSession()`（存量/重建传输上重放 SWITCH→REQ_INF→CONNECTED 波形，
+        传输未就绪时置 pendingRefresh 由 onServicesDiscovered 收尾）；SystemStylusHooks 注册
+        `haptic.REFRESH` 动态 receiver（RECEIVER_EXPORTED，root 可达）。
+      - service.sh：`monitor_wake_guard`（2s 轮询）；触发 = 开关文件 + 离座边沿武装（pen-wake-arm.state，
+        每吸附会话一轮）+ hall=0 + link_connected=1 + ev5 零发射 6s（`pen_input_silent`，timeout+dd 单事件探针，
+        evdev 多客户端广播不抢事件；节点按 /proc/bus/input/devices 名字含 pen 解析）；动作 =
+        `request_pen_disconnect` → 轮询确认 link=0（≤6s，防 E4c 假重连）→ 失连 3s → `request_pen_connect` →
+        轮询 link=1（≤8s）→ 广播 `haptic.REFRESH`（不加 -p：system_server 动态 receiver 不属于 app 包名）；
+        冷却 120s；手动入口 `action.sh wake`（touch pen-wake-now，同一条代码路径）。
+      - panic.sh/uninstall.sh 同步清理唤醒状态文件。
+- [ ] **回归实测**（装 v0.1.18 + Hook 4.7.0 后）：
+      ① 笔满电深睡 → 吸附存放数分钟 → 取下静置 ~10s → 期望自动断链重连（log 搜 "wake guard"）且能书写、有震动；
+      ② 清醒笔取下后正常书写 → 期望守护静默（不触发，pen_input_silent=1）；
+      ③ `action.sh wake` 手动触发 → 同上闭环；
+      ④ 开关关闭时行为与官方一致（深睡笔需重新吸附）。
+      > ⚠️ **该回归实测从未生效**：接续的 v0.1.19 定位证明唤醒守护**一次都没执行过**
+      > （节点解析恒失败，且默认关闭）。①②④ 之前若有"不生效"的观察，应归因于此，而非实验结论有误。
+- [ ] 探针 APK `com.exp.penprobe` 如需长期复用——源码与构建说明已存档 `tools/penprobe/`。
+
+## v0.1.19 唤醒守护静默空转修复（2026-09-21 用户实测报告后定位）
+**用户报告**：dock 睡死的笔取下后，震动可用但**写不出字**；有时连震动也没有；
+必须重新吸附再断连才恢复 —— 即项目声称已解决的场景**实际未修复**。
+
+- [x] **根因 1（决定性）：`resolve_pen_input_node` 在本机永不命中，唤醒守护恒不执行。**
+      实测 `/proc/bus/input/devices` 的写法是 `H: Handlers=event5 cpufreq` —— 第一个
+      handler 与 `Handlers=` **粘在一起**，按空白分词得到的字段是 `H:` / `Handlers=event5` /
+      `cpufreq`，没有任何一个等于裸的 `eventN`，所以 `$i ~ /^event[0-9]+$/` 永远为假。
+      ⇒ 每次离座只打一行 `pen input node unresolvable; skipping`（**失败是静默的**），
+      唤醒循环从 v0.1.18 部署起**一次都没跑过**。设备证据：20:21 / 20:22 / 20:23 / 20:25 /
+      20:57 / 21:00 共 7 次离座，全部是这个形态。
+      修法：主路径改回 v0.1.14 的 **sysfs 精确名匹配**（`/sys/class/input/input*/name`
+      == `NVTCapacitivePen` → `/dev/input/event5`），`/proc` 仅作兜底且改用 `match()` 在整行里定位。
+- [x] **根因 2：断而不建（v0.1.15 修过，随 D1a 在 v0.1.17 被一并删除）。**
+      `request_pen_disconnect` 发出的 `DISCONNECT_PENCIL` 会让 Hook 把
+      `lenovo_pen_disconnect_requested` 与 `lenovo_pen_user_disconnect_requested`
+      **两个闩锁一起置 1**，而 `request_pen_connect` 见到闩锁直接跳过 ⇒ 变成"断而不建"，
+      比僵尸连接更糟。20:11:57 那次手动唤醒的日志实证：`pen connect skipped: Settings
+      disconnect latch is set`，链路是**靠当时还在跑的 boot 重试循环**（`real OEM boot
+      connect retry attempt=2`）才回来的 —— 稳态下没有这个循环。
+      修法：循环内先快照"这是不是用户在设置页的显式选择"，不是则断链后**主动清掉两个闩锁**再连。
+- [x] **根因 3：默认关闭。** v0.1.17 删掉了原来无条件执行的 D1a 硬重连，v0.1.18 的守护又默认关闭
+      ⇒ **默认安装下"睡死笔"场景无人接管**。修法：`customize.sh` 安装时 `touch pen-wake-guard.state`
+      （默认开启；`action.sh wake-guard-off` 删除该文件即持久关闭）。
+- [x] **顺带：`link != 1` 分支不再空转。** 原实现打一行 `nothing to cycle` 就返回 —— 而"连蓝牙载波
+      都掉了"正是用户说的"连震动都没了"。改为走同一套 link cycle（先断后连是破僵尸 HOGP 的唯一路径）。
+- [x] **失败保险向**：节点判不了（rc=2）不再"跳过"，而是当作"笔没在发射"照常唤醒 ——
+      宁可多走一次 ~13 秒循环，也不能让"判据坏了"表现为"笔坏了"。
+- [x] **实机验证（2026-09-21 21:11–21:13，免重启替换 service.sh + 两分支实测）**：
+      - 睡死分支（笔尖 6s 零事件）：`link cycle start(was_connected=1)` → `link down confirmed
+        after 0s` → `cleared self-inflicted disconnect latches` → `link restored after 0s;
+        replaying haptic handshake`；Hook 侧 `haptic session refresh: inkdye handshake replay
+        requested (post-wake)` ×2（新旧 action 各一）确认送达。
+      - 清醒分支（窗口内注入 12 次笔尖事件）：`pen emitted input; awake, no wake needed`，
+        **未写冷却戳 = 未触发断链**，无误伤。
+      - 两闩锁在循环后均为 0；`pen-wake-arm.state` 被消费；冷却戳正常写入。
+- [ ] **待用户复测真·深睡场景**：满电吸附数分钟（等驱动 close tx → 笔深睡）→ 取下静置 → 期望
+      自动唤醒后可书写且有震动。判据：`sh action.sh log` 搜 `wake guard`，必须看到
+      `link cycle start`，**不得**再出现 `unresolvable; skipping`。
+- [ ] **未运行时验证**：`link=0` 那条分支（改后走循环）只做了代码级检查，未构造该状态实测。
+- [x] 版本 0.1.19 / 119；zip `releases/tb522fu-pen-bridge-v0.1.19.zip`（md5 33b106656253aa4baa4e0f0af6c97584）；
+      Hook 无改动（仍 v4.7.0，scope 8 项回读一致）。
+
+### 排查坑记录（本次踩到，写进模块注释）
+- **手动重启本服务的正确姿势**：必须 `/data/adb/ksu/bin/busybox sh`（且 PATH 前置
+  `/data/adb/ksu/bin`，否则重生循环里的 `sh "$0"` 会解析到 mksh）。原因：`/system/bin/sh` 是
+  mksh，`exec 9>file` 在 exec 时**丢 fd**，于是入口的 `flock -n 9` 报
+  `flock: Bad file descriptor` → 脚本静默 `exit 0`（表现：进程树空、日志无新行，极易误判为"改坏了"）。
+  开机时 KernelSU 用 busybox ash 调，所以正式路径不受影响。
+- **`/sdcard` 在锁屏（user 0 未解锁）下整条不挂载**：`adb push … /sdcard/…` 会报
+  `remote secure_mkdirs() failed`（甚至可能先报一次假的 "1 file pushed"），
+  `su -c 'ls /sdcard/Download/…'` 也说不存在。`/sdcard` 是 user 0 的 FUSE 挂载点，
+  FBE 首次解锁前不存在。锁屏时要落盘就 root 直写 `/data/media/0/…`。
+  **别据此判断包没推成功。**
+- **热替换 `service.sh` 后别急着看进程树**：重生循环里是 `sh "$0"` 之后 `sleep 8`，
+  杀掉旧主体后要等 ~8–9 秒新主体才出现；且旧主体的 6 个监视子壳会被 reparent 到 PID 1
+  变成**孤儿**（继续独立轮询、写日志），必须单独 `kill` 或重启清理。
+
+## v0.1.20 唤醒守护第四处静默空转：锁屏窗口（2026-09-21 重启验证时发现）
+
+**发现经过**：v0.1.19 用 `ksud module install` + 重启做正式部署验证，开机日志每 30 秒出现
+`OEM … CONNECT_PENCIL request failed … unlocked=0` / `OEM haptic recovery not deliverable;
+channel unreachable, budget kept (n/40)`。顺着 `unlocked=0` 查下去。
+
+- [x] **根因 4：`CoreService` 无 `directBootAware`，锁屏窗口内 OEM 通路结构性不可用。**
+      设备侧复现（当 `State: RUNNING_LOCKED`）：
+      `am startservice --user 0 -n com.oplus.ipemanager/.btadsorb.CoreService -a …CONNECT_PENCIL`
+      → `Error: Not found; no service started`，`rc=255`。
+      manifest 佐证（`aapt2 dump xmltree`）：`btadsorb.CoreService` 只有
+      `permission/enabled/exported/process=":ble"`，**没有** `android:directBootAware`。
+      ⇒ user 0 未首次解锁时 PMS 直接过滤该组件。
+      **窗口边界**：FBE 首次解锁后 State 恒为 `RUNNING_UNLOCKED`，之后息屏/锁屏都不再回到
+      `RUNNING_LOCKED`，所以暴露面 = **开机 → 首次解锁**。
+- [x] **危害：一次性武装被一个"必然失败"的窗口吃掉。** `run_wake_guard_once()` 第一行就是
+      `rm -f "$WAKE_GUARD_ARM_FILE"`，所以锁屏时用户先取下笔（屏幕还没解锁）的流程是：
+      武装 → 6s 零事件 → DISCONNECT/CONNECT 双双 rc=255 → `link never went down within 6s;
+      abort` → **武装已烧掉，本次离座会话不再重试**。用户随后解锁、落笔 —— 笔是死的。
+      与用户原始报告**同形**，只是换了条静默路径。
+- [x] **修法：在 `monitor_wake_guard` 里、消费武装之前加锁屏闸门。**
+      `user_unlocked` 为假则**保持武装不消费**，只打一行日志（新增 `pen-wake.defer` 做日志
+      去重，并在离座边沿复位，使命中范围限定在一次吸附会话内）；解锁后的下一次 2 秒轮询
+      就会正常补做这次唤醒。手动入口 `action.sh wake`（`pen-wake-now`）**不受**闸门约束。
+      注：`user_unlocked()` 原是"只写日志、不参与决策"的既有函数，v0.1.20 起参与一次决策，
+      注释已同步更新。
+- [x] **设备侧逻辑验证（设备当时确为 `RUNNING_LOCKED`）**：第 1 次判定打印 deferring、
+      **武装标记仍在（未消费）**、去重标记写入；第 2 次判定静默（去重生效）。
+      `wm dismiss-keyguard` 未能解锁（设备设了安全锁）⇒ **"解锁后闸门打开"这半未在真机观察到**。
+- [ ] **待用户复测**：锁屏状态下（开机后不先解锁）从 dock 取下睡死笔 → 期望日志出现
+      `user not unlocked yet; OEM channel unreachable, deferring (arm kept)`，
+      **且解锁后**同一次离座会话能补上 `link cycle start` → `replaying haptic handshake`。
+- [x] **重启验证（v0.1.19 + v0.1.20 各一轮）**：`ksud module install` 暂存内容与 release zip
+      逐字节一致（`service.sh` md5 `edc415fc96fd554ca002cbd2093dc9da`）；开机后
+      `version=0.1.20`、守护开关 = 开启、`system_server stylus hooks installed` 命中、
+      Hook `4.7.0`、Vector scope 8 项回读一致、笔尖节点解析到 `/dev/input/event5`、
+      进程树 1 循环 + 1 主体 + 监视组且**无 PPID=1 孤儿**、两闩锁为 0。
+- [x] 版本 0.1.20 / 120；zip `releases/tb522fu-pen-bridge-v0.1.20.zip`
+      （md5 bbde8293ec448d6b525260ff77398505）；Hook 无改动（仍 v4.7.0）。
+
+
+## v0.1.21 唤醒时序调参 + 循环验证（2026-09-21 21:36 生产样本驱动）
+
+> 用户报"解锁后笔有震动但无笔画，过了一会就正常了"。这是 v0.1.19 上线后**第一次真实复现**
+> 该场景且带完整日志。完整时间线、判定与证据见
+> [`docs/pen_wake_guard_silent_noop_20260921.md`](docs/pen_wake_guard_silent_noop_20260921.md) §12。
+
+- [x] **确认修复有效**：守护完整跑完一轮（`link cycle start` → `link restored`），
+      **无** `unresolvable; skipping`。窗口内 Android 侧 `NVTCapacitivePen` 是启用态
+      （`mode DIRECT`），零事件来自笔端而非上层丢弃。
+- [x] **根因（配置层）**：断链 21:36:44.58 → 首个笔画 21:36:48.5 = **3.9s**，
+      而失连保持只有 3s ⇒ 重连只比笔醒来早 **0.37s**。3s 是 E4 区间(2–5s)的下沿。
+      ⇒ 新增 `WAKE_OFFLINE_HOLD_SECONDS=5`（区间上沿，实测离线约 7s）。
+- [x] **补"循环跑完 ≠ 修好了"**：新增 `verify_pen_awake()` / `WAKE_VERIFY_SECONDS=12`，
+      重连后看笔尖节点，三态落日志（`cycle OK` / `WARN cycle FAILED` / `WARN cycle UNVERIFIABLE`）。
+      **只记日志不改行为** —— 先让"白跑一趟"可见，再按真实发生率决定要不要加重试。
+- [x] 顺带补掉 `run_wake_guard_once` 里最后一处**无声 return**：冷却跳过现在会打
+      `in cooldown (Ns < 120s); skipping this undock`。
+- [x] **埋标定点**：正常分支与 `cycle OK` 分支都打 `${n}s after undock` —— 用来标定
+      `WAKE_QUIET_SECONDS=6` 该不该放宽（见下方待办）。
+- [x] 三分支实机验证：`cycle OK - pen emitted input 18s after undock`（注入事件命中验证窗）/
+      `WARN cycle FAILED - pen still silent 12s after cycle (30s after undock)` /
+      `in cooldown (55s < 120s)`。
+- [x] 版本 0.1.21 / 121；zip `releases/tb522fu-pen-bridge-v0.1.21.zip`
+      （md5 8b1796861e3681e5428cc99c05dc0a79）；Hook 无改动（仍 v4.7.0）。
+      已 `ksud module install` + 重启验证：模块 0.1.21 / 守护开启 /
+      `service.sh` md5 35096ae29c37963d436a6951c240e5a9 / Hook 4.7.0 /
+      `system_server stylus hooks installed (startOtherServices=1 run=1)` /
+      Vector 作用域 8/8（含 `system`）/ 进程树 1 循环 + 1 主体 + 6 监视壳且无孤儿 / 两闩锁 0。
+
+### 待办（需要真实数据，不要凭猜改）
+
+- [ ] **对照组：标定"离座 → 首笔"的健康延迟**。当前唯一样本是 **11s**，而
+      `WAKE_QUIET_SECONDS=6` ⇒ 窗口内必然判"睡死" ⇒ 守护实际退化成**每次离座都断链重连**
+      （代价约 7s BLE 离线 + 握手重放）。**该样本已被循环污染**（循环在 6–8s 介入，
+      之后测到的延迟必然 ≥ 循环耗时）。
+      做法：`sh action.sh wake-guard-off` → 吸附等 ~10 分钟 → 取下**立即书写**，
+      记录首个笔画出现的时刻；再开回守护重测一组。两组都取 3–5 次。
+      判据：若健康延迟稳定 < 4s → 6s 窗口合适；若稳定 ≥ 8s → 应放宽窗口
+      （并同时考虑把"每轮断链"改成"仅在窗口内确无自愈迹象时"）。
+- [ ] **决定要不要加重试**：`WARN cycle FAILED` 日志的**真实发生率**。
+      若确有"一轮不成、需重新吸附"的样本，再实现第二轮（当前一次性武装，
+      一轮失败后本次吸附会话不再重试 —— 这正是用户最早报的"必须重新吸附一次"形态）。
+      注意"验证窗口内静默"是**歧义条件**（用户把笔放一边不碰屏幕同样静默），
+      加重试前先想清楚怎么避免每轮都白做。
+- [ ] 用户复测真·深睡场景（吸附充满断电 → 笔深睡 → 取下书写）：
+      `sh action.sh log` 搜 `wake guard`，须见 `link cycle start` 与 `cycle OK|FAILED`。
+
+
+## v0.1.22 锁屏期唤醒通路（PenHidCtl DBA 化，2026-09-21 深夜）
+- [x] **发现**：这台 ROM **息屏就把 user 0 锁回 RUNNING_LOCKED**（不是"仅开机首解前"），
+      v0.1.20 的锁屏闸门建立在错误假设上，实际把每次息屏期间的守护全部挡死。
+      锁屏期 PMS 只放行 directBootAware 组件：OEM CoreService 与旧 penhidctl 的
+      `am` 投递双双 rc=255（对照实验确认）。
+- [x] **PenHidCtl 4.1.5**：`PenHidService` 加 `directBootAware`；新增执行回执
+      `penhid.result`（默认 fail，policy 调用成功才 ok）；发现 1 参
+      `connect()/disconnect()` 隐藏方法在此 ROM 不存在 ——
+      `setConnectionPolicy(FORBIDDEN/ALLOWED)` 即踢链/回链触发器（HOGP 2→0→2 实测）。
+- [x] **PMS mtime 重扫陷阱**：overlay 更新 APK 后重启 PMS 仍跑旧版（缓存 timeStamp 与
+      overlay 呈现 mtime 逐秒相同）。解法 = 覆盖安装场景走 `pm install -r`
+      （UPDATED_SYSTEM_APP，实测保留 PRIVILEGED + BLUETOOTH_PRIVILEGED granted，
+      且根治 App 进程打不开 overlay APK 的历史崩溃）；全新安装仍走 overlay。
+- [x] **service.sh**：`run_hidctl` 升级为回执轮询的已验证调用；删除锁屏闸门；
+      回链窗口 8s→25s（锁屏态实测回链 ~23s）；断链确认改双判据（镜像或栈）；
+      abort 时恢复 ALLOWED（否则笔被留在 FORBIDDEN 死态）。
+- [x] **验证**：最严苛窗口（重启后 FBE 从未解锁、CE 未挂载）断链/回链 + 回执 +
+      0 崩溃全通过；`action.sh wake` 模块路径完整闭环。
+- [ ] 待用户样本：息屏后取睡死笔，确认自动唤醒 + 笔画可用；锁屏期唤醒后震动是否
+      需等解锁（预期退化形态"笔画先回、震动后回"）。
+- [ ] 待对照数据：健康"离座→首笔"延迟（§12.5），决定 WAKE_QUIET_SECONDS 是否放宽。
+
 ## P0 — 侦察（决定项目成败，先做）
 - [ ] 离线：`strings kernel_abs.elf | grep -iE 'lenovo_penraw|PEN_FRAMEWORK|pen_hall|cps'` — 确认内核是否导出笔事件接口
 - [ ] 设备在线：跑 `scripts/recon_sysfs.sh`，找 TB522FU 的 Hall / CPS / 笔 uevent 节点

@@ -13,10 +13,15 @@ MODDIR=${0%/*}
 #      卡片、磁吸胶囊、电量与存在状态（状态只跟随真实事件，不强行回放）；
 #   4) PenHidCtl（priv-app HID 控制器）开机授予蓝牙运行时权限，只调后台
 #      PenHidService，无启动器入口；
-#   5) 不监听屏幕状态、不做唤醒回放、不做任何充电/TX/GPIO/休眠控制：
+#   5) 默认不监听屏幕状态、不做唤醒回放、不做任何充电/TX/GPIO/休眠控制：
 #      官方 ZUXOS 取证（docs/pen_official_rom_verdict_20260921.md）证明
 #      充满断电 → 笔深休眠 → 重新吸附唤醒是官方驱动+笔固件的完整行为链，
-#      官方系统层没有任何"保持 TX / 唤醒笔"的逻辑，模块一律不介入。
+#      官方系统层没有任何"保持 TX / 唤醒笔"的逻辑，模块一律不介入；
+#   6) 例外：唤醒守护（pen-wake-guard.state 存在才生效；customize.sh 安装时
+#      默认创建该文件 = 默认开启，`action.sh wake-guard-off` 持久关闭）——
+#      深睡笔取下后自动断链重连唤醒（实验定案见
+#      docs/pen_wake_experiment_E0_E4_20260921.md §3/§3b），重连后必须
+#      广播 haptic REFRESH 让 Hook 重放 inkdye 握手，否则书写无震动。
 # 仅适用于 SM8650Q / pineapple 平台；Hook 仍独立安装，模块内签名副本
 # 仅用于 LSPosed 在 PackageManager 恢复 /data/app 前稳定读取。
 # ============================================================================
@@ -66,6 +71,39 @@ HIDCTL_LAUNCHER_FILE="$MODDIR/pen-hid-launcher.hidden"
 PEN_USER_DISCONNECT_KEY=lenovo_pen_user_disconnect_requested
 BRIDGE_PKG=com.futureharmony.lenovopenbridge
 BRIDGE_PKG_LEGACY=com.aclaniakea.lenovopenbridge
+
+# --- 唤醒守护（可选，默认关闭）：状态文件与参数 -----------------------------
+# 开关 = pen-wake-guard.state（action.sh wake-guard on/off 维护）；
+# 武装 = pen-wake-arm.state（离座边沿写入**离座时刻的 epoch**，一轮唤醒尝试后消费掉；
+#        内容既用于日志，也是"离座 -> 首个笔画"延迟的唯一时间基准）；
+# 冷却 = pen-wake.last（上次唤醒时间戳）；手动触发 = pen-wake-now。
+# ⚠️ 这些定义必须在 monitor_wake_guard fork 之前完成（文件顶部），
+#    否则子进程拿到空变量、[ -e "" ] 永假 —— 2026-09-21 实测踩过。
+WAKE_GUARD_ENABLED_FILE="$MODDIR/pen-wake-guard.state"
+WAKE_GUARD_ARM_FILE="$MODDIR/pen-wake-arm.state"
+WAKE_GUARD_LAST_FILE="$MODDIR/pen-wake.last"
+WAKE_GUARD_NOW_FILE="$MODDIR/pen-wake-now"
+WAKE_QUIET_SECONDS=6
+WAKE_COOLDOWN_SECONDS=120
+# 断链后保持离线的秒数。E4 实验测得"断链 -> 笔醒来"落在 2–5s，所以这个值
+# 必须 ≥ 区间上沿，**不能取下沿**。
+# 2026-09-21 21:36 生产样本（用户报"有震动无笔画"那次）：断链 21:36:44.58 ->
+# 首个笔画 21:36:48.5 = **3.9s**。当时配置是 3s，实际重连落在 21:36:48.87，
+# 只比笔醒来早 0.37s —— 余量小到一次偏移就会退回"连上了但触控死"。
+WAKE_OFFLINE_HOLD_SECONDS=5
+# 断链后等待链路回来的窗口（秒）。解锁态 2–5s 内回链，8s 原本够用；
+# 锁屏态实测 ~23s（屏幕灭着时 BLE 重连慢得多），所以放宽到 25s。
+WAKE_LINK_BACK_SECONDS=25
+# 唤醒循环之后的验证窗口（秒）。**只记日志、不改行为**：用来回答"这一轮到底
+# 成没成"。此前循环跑完就返回，无法区分"修好了"和"白跑一趟"，而"判断不出却
+# 当成功"这类静默失败在本项目已踩过四次（见
+# docs/pen_wake_guard_silent_noop_20260921.md 的教训段）。
+WAKE_VERIFY_SECONDS=12
+# 笔尖数字笔节点的 sysfs 精确名。TB522FU 上是 NVTCapacitivePen：触控驱动注册的
+# 虚拟节点（Sysfs=/devices/virtual/input/input8），常驻，**不**随笔的 uhid HID
+# 链路一起注销/重建，所以离座瞬间也扫得到。改用名不匹配只影响兜底路径。
+PEN_TIP_DEVICE_NAME=NVTCapacitivePen
+PEN_INPUT_NODE=
 
 # Respawn guard: if the real service exits (crash, OOM, kill), bring it
 # back after a short delay. KernelSU can invoke service.sh several times
@@ -1245,6 +1283,12 @@ monitor_hall_capsule() {
                             am broadcast --user 0 --receiver-foreground \
                                 -a com.futureharmony.lenovopenbridge.action.DISMISS_PENCIL_CAPSULE \
                                 -p com.oplus.ipemanager >/dev/null 2>&1
+                            # 唤醒守护武装：本次吸附会话允许一轮唤醒尝试
+                            # （monitor_wake_guard 消费；守护默认开启，开关在
+                            # run_wake_guard_once 内二次确认）。
+                            # 内容 = 离座时刻的 epoch：守护据此算"离座 -> 首个
+                            # 笔画"的延迟。用 touch 会丢掉这个基准，改 > 写。
+                            date '+%s' >"$WAKE_GUARD_ARM_FILE" 2>/dev/null
                         fi
                     fi
                     boot_cycle=0
@@ -1255,24 +1299,70 @@ monitor_hall_capsule() {
     done
 }
 
+# penhidctl 的执行回执：PenHidService 结束前把 "<elapsedRealtime> <action>
+# ok|fail <detail>" 写进自己的 files 目录。锁屏（DBA）态落在 /data/user_de/0/，
+# 解锁后落在 /data/user/0/，两个都探测。
+hidctl_result_file() {
+    for f in /data/user_de/0/com.aclaniakea.penhidctl/files/penhid.result \
+             /data/user/0/com.aclaniakea.penhidctl/files/penhid.result; do
+        [ -f "$f" ] && { printf '%s' "$f"; return 0; }
+    done
+    return 1
+}
+
 run_hidctl() {
     action="$1"
     mac=$(resolve_pen_mac)
     if ! is_pen_mac "$mac"; then
         echo "[$(date '+%F %T')] HID $action skipped: no bonded pen MAC"
-        return 0
+        return 1
     fi
     if [ -z "$(pm path com.aclaniakea.penhidctl 2>/dev/null)" ]; then
         echo "[$(date '+%F %T')] HID $action skipped: helper APK unavailable"
-        return 0
+        return 1
     fi
     grant_hidctl_bluetooth_permissions
-    if am start-foreground-service --user 0 -n "$HIDCTL_SERVICE" \
+    # 先清回执再调用：任何随后出现的回执都必然属于本次调用
+    # （elapsedRealtime 开机即归零，跨重启比较时间戳不可靠，靠"先删后收"排除旧件）。
+    rm -f /data/user_de/0/com.aclaniakea.penhidctl/files/penhid.result \
+          /data/user/0/com.aclaniakea.penhidctl/files/penhid.result 2>/dev/null
+    if ! am start-foreground-service --user 0 -n "$HIDCTL_SERVICE" \
             --es action "$action" --es mac "$mac" >/dev/null 2>&1; then
-        echo "[$(date '+%F %T')] HID $action service requested mac=$mac"
-    else
-        echo "[$(date '+%F %T')] HID $action request failed mac=$mac"
+        # rc!=0：PMS 拒绝解析（组件不可见 / 非 direct-boot-aware / 包未登记），
+        # "Error: Not found; no service started"。am 退出码是同步判据，无需等回执。
+        echo "[$(date '+%F %T')] HID $action request rejected mac=$mac unlocked=$(user_unlocked && echo 1 || echo 0)"
+        return 1
     fi
+    # am 的 rc=0 只证明"投递成功"，不证明"做了"。轮询回执；服务自身 8s
+    # profile 超时也会落一份 fail 回执，所以窗口要盖过它（12s）。
+    receipt=
+    i=0
+    while [ "$i" -lt 12 ]; do
+        sleep_sec 1
+        rf=$(hidctl_result_file)
+        if [ -n "$rf" ]; then
+            line=$(cat "$rf" 2>/dev/null)
+            # 回执必须匹配本次 action（防止并发调用时串台）。
+            case "$line" in
+                *" $action "*) receipt=$line; break ;;
+            esac
+        fi
+        i=$((i + 1))
+    done
+    if [ -z "$receipt" ]; then
+        echo "[$(date '+%F %T')] HID $action no receipt within 12s mac=$mac (service may have crashed before writing)"
+        return 1
+    fi
+    set -- $receipt
+    verdict="$3"
+    shift 3
+    detail="$*"
+    if [ "$verdict" = ok ]; then
+        echo "[$(date '+%F %T')] HID $action ok ($detail) mac=$mac"
+        return 0
+    fi
+    echo "[$(date '+%F %T')] HID $action FAILED ($detail) mac=$mac"
+    return 1
 }
 
 request_oem_pen_action() {
@@ -1373,6 +1463,329 @@ request_pen_disconnect() {
 }
 
 
+# ---------------------------------------------------------------------------
+# 唤醒守护（默认开启；关闭走 action.sh wake-guard-off）
+#   —— docs/pen_wake_experiment_E0_E4_20260921.md §3
+# 深睡笔取下后的软件唤醒，触发器 = 笔自身 BLE 链路完整 link-down -> link-up
+# （E4c-fix 实测定案）。唤醒的副作用是笔端震动会话被重置，重连后必须广播
+# haptic REFRESH 让 Hook 重放 inkdye 握手（§3b 定案），否则书写无震动。
+#
+# 触发条件（全部满足才动手）：
+#   1) 开关文件存在（pen-wake-guard.state，customize.sh 安装时建立）；
+#   2) 离座边沿武装（monitor_hall_capsule 在 dock 1->0 时写 pen-wake-arm.state）；
+#   3) 离座持续（hall=0）；
+#   4) 用户没在设置页显式点过"断开"。
+#      （v0.1.20 曾要求"用户已解锁"，v0.1.22 删除：PenHidCtl DBA 化后锁屏期
+#      HID 通路可用，闸门只会把每次息屏期间的守护白白挡住 —— 这台 ROM 息屏
+#      就把 user 0 锁回 RUNNING_LOCKED，不是"仅开机首解前"。）
+# 之后分两种形态：
+#   a) 真实链路在线（lenovo_pen_link_connected=1）—— 深睡笔的常态："链路在、
+#      触控死"。先听 WAKE_QUIET_SECONDS 秒笔尖节点，有事件=笔醒着，不动；
+#      零事件（或节点判不了）→ 唤醒循环。
+#   b) 链路已断（=0）—— 连 BLE 载波都掉了的形态。v0.1.18 在这里直接打一行
+#      "nothing to cycle" 就返回，等于把故障丢回给"重新吸附"；现在改走同一套
+#      循环（先断后连正是破僵尸 HOGP 的唯一有效路径，docs §1.5.2）。
+# 动作：DISCONNECT_PENCIL -> 若原本有链路则轮询确认断链（前置坑：有链路时
+#   CONNECT_PENCIL 会被 CoreService 静默跳过，"explicit pen connect already has
+#   a real link"，E4c 假重连教训）-> 清掉本次断开自己置上的闩锁 -> 失连保持
+#   WAKE_OFFLINE_HOLD_SECONDS 秒 -> CONNECT_PENCIL -> 轮询确认回链 -> 广播
+#   haptic REFRESH 重放握手 -> **verify_pen_awake 验证笔是否真的活了**（只记
+#   日志，2026-09-21 补：此前"循环跑完"被当成"修好了"，无法区分白跑）。
+# 一次性武装：每次吸附会话只尝试一轮；冷却 WAKE_COOLDOWN_SECONDS。
+#
+# ⚠️ 已知局限（2026-09-21 生产样本暴露，待数据决定）：
+#   · WAKE_QUIET_SECONDS=6 的静默窗口可能**短于健康的"离座 -> 首笔"延迟**。
+#     样本里这个延迟是 11s，而窗口只有 6s ⇒ 每次离座都必然判成"睡死"，
+#     守护退化成"无条件断链重连"。日志里的 `${n}s after undock` 就是为
+#     标定这个值加的（正常分支与 cycle OK 分支都打）。
+#   · 一轮不成就没有第二轮（一次性武装）。"验证 FAILED" 日志的**发生率**
+#     决定要不要加重试 —— 没有证据表明第二轮有用，所以先不盲加。
+# ---------------------------------------------------------------------------
+
+# 笔的 evdev 输入节点。
+#
+# ⚠️ 2026-09-21 实测教训（唤醒守护形同虚设的真因）：上一版走
+# `/proc/bus/input/devices` + awk 按空白分词找 `/^event[0-9]+$/`，在本机
+# **永远匹配不到** —— 该文件的写法是 `H: Handlers=event5 cpufreq`，第一个
+# handler 与 `Handlers=` 是**粘在一起**的，分词后字段是 `H:` /
+# `Handlers=event5` / `cpufreq`，没有任何一个等于裸的 `eventN`。于是本函数
+# 恒失败 → 每次离座只打一行 "pen input node unresolvable; skipping"，
+# 唤醒循环**一次都没执行过**（20:21 起每次离座都是这个形态）。设备实测：
+# 同一份 sysfs 里 `NVTCapacitivePen` 明明在 `/sys/class/input/input8/event5`。
+# 修法：主路径回到 v0.1.14 的 **sysfs 精确名匹配**（那套当时实测有效），
+# `/proc` 仅作兜底且改用 `match()` 在**整行**里找 eventN。调用方对"判不了"
+# 一律按**失败保险向**处理，见 run_wake_guard_once。
+resolve_pen_input_node() {
+    if [ -n "$PEN_INPUT_NODE" ] && [ -e "$PEN_INPUT_NODE" ]; then
+        return 0
+    fi
+    PEN_INPUT_NODE=
+    # 主路径：sysfs 按精确设备名找。`inputN/eventM` 是目录，字符设备在
+    # /dev/input/ 下，所以只能取 basename 再拼回 /dev/input/。
+    for node_dir in /sys/class/input/input*; do
+        [ -r "$node_dir/name" ] || continue
+        [ "$(cat "$node_dir/name" 2>/dev/null)" = "$PEN_TIP_DEVICE_NAME" ] || continue
+        for node_ev in "$node_dir"/event*; do
+            [ -e "$node_ev" ] || continue
+            case "${node_ev##*/}" in
+                event[0-9]*)
+                    PEN_INPUT_NODE="/dev/input/${node_ev##*/}"
+                    return 0
+                    ;;
+            esac
+        done
+    done
+    # 兜底：/proc/bus/input/devices 里第一条名字含 pen 的设备。必须用
+    # match() 在整行里定位 eventN，不能按空白分词（理由见上方教训）。
+    [ -r /proc/bus/input/devices ] || return 1
+    node=$(awk '
+        /^N: Name=/ { pen = tolower($0) ~ /pen/; next }
+        pen && /^H: Handlers=/ {
+            if (match($0, /event[0-9]+/)) {
+                print "/dev/input/" substr($0, RSTART, RLENGTH); exit
+            }
+        }
+    ' /proc/bus/input/devices 2>/dev/null | head -n 1)
+    [ -n "$node" ] || return 1
+    [ -e "$node" ] || return 1
+    PEN_INPUT_NODE="$node"
+    return 0
+}
+
+# 连续 $1 秒节点零事件则返回 0；期间任一秒读到事件返回 1；节点不可判定返回 2。
+# evdev 是多客户端广播：每次探针独立 open/read/close，不会抢走真实输入管线的
+# 事件。探针用外部 timeout+dd（各一进程/秒），仅存在于武装窗口，非常驻。
+pen_input_silent() {
+    resolve_pen_input_node || return 2
+    left="$1"
+    while [ "$left" -gt 0 ]; do
+        if timeout 1 dd if="$PEN_INPUT_NODE" of=/dev/null bs=24 count=1 2>/dev/null; then
+            return 1
+        fi
+        left=$((left - 1))
+    done
+    return 0
+}
+
+trigger_haptic_refresh() {
+    # 接收方是 Hook 在 system_server 注册的动态 receiver
+    # （RECEIVER_EXPORTED，root am broadcast 可达）；不加 -p ——
+    # system_server 的注册不属于任何 app 包名，-p 会把广播拦在门外。
+    am broadcast --user 0 --receiver-foreground \
+        -a com.futureharmony.lenovopenbridge.haptic.REFRESH >/dev/null 2>&1
+    am broadcast --user 0 --receiver-foreground \
+        -a com.aclaniakea.lenovopenbridge.haptic.REFRESH >/dev/null 2>&1
+}
+
+do_pen_wake_cycle() {
+    mac=$(resolve_pen_mac)
+    if ! is_pen_mac "$mac"; then
+        echo "[$(date '+%F %T')] wake guard: no bonded pen MAC; abort"
+        return 1
+    fi
+    # 用户在设置页显式点过"断开"就尊重用户意图，不抢连接。手动入口
+    # （action.sh wake）也走这里，所以这道检查放在循环内部而不是最外层。
+    if [ "$(settings get global "$PEN_USER_DISCONNECT_KEY" 2>/dev/null | tr -d '\r')" = 1 ]; then
+        echo "[$(date '+%F %T')] wake guard: user disconnect choice is active; abort"
+        return 1
+    fi
+    was=$(settings get global lenovo_pen_link_connected 2>/dev/null | tr -d '\r')
+    echo "[$(date '+%F %T')] wake guard: link cycle start (was_connected=${was:-unknown}; disconnect pen BLE link)"
+    request_pen_disconnect
+    i=0
+    if [ "$was" = 1 ]; then
+        # 前置坑：必须确认真断链，否则 CONNECT_PENCIL 静默跳过（E4c 假重连）。
+        # 判据**不能只信镜像**（lenovo_pen_link_connected）：锁屏态实测镜像
+        # 滞后可达 >6s（22:37 样本：HID 已断链、镜像 6s 内纹丝不动），只信
+        # 它会把"断链慢半拍"误判成"没断开"。改为双判据：镜像 !=1 **或**
+        # 蓝牙栈 HOGP 非 2（real_bt_connected，栈是唯一真源）。
+        disconnected=0
+        while [ "$i" -lt 10 ]; do
+            sleep_sec 1
+            connected=$(settings get global lenovo_pen_link_connected 2>/dev/null | tr -d '\r')
+            if [ "$connected" != 1 ] || ! real_bt_connected; then
+                disconnected=1
+                break
+            fi
+            i=$((i + 1))
+        done
+        # 无论判成"断了"还是"没断"，自致闩锁都清掉（是我们断的，不是用户）。
+        settings put global "$PEN_USER_DISCONNECT_KEY" 0 >/dev/null 2>&1
+        settings put global lenovo_pen_disconnect_requested 0 >/dev/null 2>&1
+        if [ "$disconnected" != 1 ]; then
+            # ⚠️ abort 绝不能把笔留在 FORBIDDEN：22:37 样本里"镜像滞后误判
+            # 没断开 → abort"，实际链路已断且 policy=FORBIDDEN，笔被扔在
+            # 死链状态。恢复 ALLOWED 让栈把链路带回来，再报失败。
+            echo "[$(date '+%F %T')] wake guard: link never went down within 10s; re-allowing profile and aborting"
+            run_hidctl connect
+            return 1
+        fi
+        echo "[$(date '+%F %T')] wake guard: link down confirmed after ${i}s"
+    else
+        # 本来就没链路：给栈一秒把 DISCONNECT 结算掉即可，不必等"落下"。
+        sleep_sec 1
+        # 闩锁同样清掉（保持与确认分支一致）。
+        settings put global "$PEN_USER_DISCONNECT_KEY" 0 >/dev/null 2>&1
+        settings put global lenovo_pen_disconnect_requested 0 >/dev/null 2>&1
+        echo "[$(date '+%F %T')] wake guard: link was already down"
+    fi
+    echo "[$(date '+%F %T')] wake guard: cleared self-inflicted disconnect latches; holding offline ${WAKE_OFFLINE_HOLD_SECONDS}s"
+    sleep_sec "$WAKE_OFFLINE_HOLD_SECONDS"
+    request_pen_connect
+    # 回链窗口：解锁态 E4 实测 2–5s（原 8s 够用）；**锁屏态实测 ~23s**
+    # （2026-09-21 22:32 生产样本：policy 切回 ALLOWED 后 23s 链路才回来，
+    # 屏幕灭着时 BLE 重连明显更慢）。8s 窗口会把"慢但成功"误判成失败。
+    # 判据用两个：Hook 镜像（lenovo_pen_link_connected，Hook 在 system_server
+    # 锁屏也活着）+ 蓝牙栈本身（real_bt_connected 的 HOGP state=2）。
+    i=0
+    connected=
+    while [ "$i" -lt "$WAKE_LINK_BACK_SECONDS" ]; do
+        sleep_sec 1
+        connected=$(settings get global lenovo_pen_link_connected 2>/dev/null | tr -d '\r')
+        [ "$connected" = 1 ] && break
+        if real_bt_connected; then
+            connected=1
+            break
+        fi
+        i=$((i + 1))
+    done
+    if [ "$connected" = 1 ]; then
+        echo "[$(date '+%F %T')] wake guard: link restored after ${i}s; replaying haptic handshake"
+        sleep_sec 1
+        trigger_haptic_refresh
+        return 0
+    fi
+    echo "[$(date '+%F %T')] wake guard: link did not come back within 8s"
+    return 1
+}
+
+# 离座 -> 首笔 的延迟（秒）。$1 = 离座时刻 epoch。取不到基准/时钟异常返回 1
+# （调用方用 "?" 显示）。这是判断"WAKE_QUIET_SECONDS 窗口该不该这么短"的唯一
+# 数据来源：窗口若恒小于真实醒来延迟，守护就会**每次离座都白跑一轮断链**。
+pen_undock_age() {
+    case "$1" in ''|*[!0-9]*) return 1 ;; esac
+    t=$(date '+%s' 2>/dev/null)
+    case "$t" in ''|*[!0-9]*) return 1 ;; esac
+    [ "$t" -ge "$1" ] || return 1
+    echo "$((t - $1))"
+}
+
+# 唤醒循环之后的**验证**：这一轮到底成没成？
+#
+# 背景（2026-09-21 21:36 生产样本）：循环"跑完"和"笔活了"是两件事。此前
+# do_pen_wake_cycle 返回 0 只代表"链路回来了 + 握手重放了"，**不代表笔能写**。
+# 于是"循环跑了但没用"会以完全正常的日志出现 —— 与 v0.1.18 的
+# "unresolvable; skipping" 同属一类静默失败（本项目第五次踩）。
+#
+# ⚠️ 本函数**只记日志，不改行为**：不重试、不回滚、不延长武装。原因是没有
+# 证据表明第二轮循环有用，而"验证窗口内静默"这个条件本身是歧义的 ——
+# 用户把笔放一边不碰屏幕同样是静默。先让失败可见，拿到真实发生率再决定
+# 要不要加重试（TODO.md 已记）。
+verify_pen_awake() {
+    undock_at="$1"
+    pen_input_silent "$WAKE_VERIFY_SECONDS"
+    rc=$?
+    age=$(pen_undock_age "$undock_at")
+    age=${age:-?}
+    case "$rc" in
+        1)
+            echo "[$(date '+%F %T')] wake guard: cycle OK - pen emitted input ${age}s after undock"
+            ;;
+        2)
+            echo "[$(date '+%F %T')] wake guard: WARN cycle UNVERIFIABLE - pen input node unresolvable after cycle (${age}s after undock)"
+            ;;
+        *)
+            echo "[$(date '+%F %T')] wake guard: WARN cycle FAILED - pen still silent ${WAKE_VERIFY_SECONDS}s after cycle (${age}s after undock); re-dock may be required"
+            ;;
+    esac
+}
+
+run_wake_guard_once() {
+    # 离座时刻先取再删（monitor_hall_capsule 写入的 epoch）。
+    undock_at=$(cat "$WAKE_GUARD_ARM_FILE" 2>/dev/null)
+    # 消费武装标记：每次吸附会话最多一轮。
+    rm -f "$WAKE_GUARD_ARM_FILE"
+    if [ "$(settings get global "$PEN_USER_DISCONNECT_KEY" 2>/dev/null | tr -d '\r')" = 1 ]; then
+        echo "[$(date '+%F %T')] wake guard: undocked but user disconnect choice is active; skipping"
+        return 0
+    fi
+    now=$(date '+%s' 2>/dev/null)
+    previous=$(cat "$WAKE_GUARD_LAST_FILE" 2>/dev/null)
+    case "$previous" in
+        ''|*[!0-9]*) ;;
+        *)
+            # 冷却跳过也要留痕。原来这里是一句无声的 return 0 —— 与 v0.1.18 的
+            # "unresolvable; skipping" 同属静默路径：日志上看不出"守护来过但
+            # 被冷却挡住了"，只会以为守护没被触发。冷却本身是对的（防风暴），
+            # 但"没做事"必须可解释。
+            if [ "$now" -ge "$previous" ] && [ "$((now - previous))" -lt "$WAKE_COOLDOWN_SECONDS" ]; then
+                echo "[$(date '+%F %T')] wake guard: in cooldown ($((now - previous))s < ${WAKE_COOLDOWN_SECONDS}s since last cycle); skipping this undock"
+                return 0
+            fi
+            ;;
+    esac
+    connected=$(settings get global lenovo_pen_link_connected 2>/dev/null | tr -d '\r')
+    if [ "$connected" != 1 ]; then
+        # 形态 b：链路已经不在。原实现在这里打一行 "nothing to cycle" 就返回，
+        # 而这个形态恰恰是用户报的"连震动都没了"——什么都不做等于把故障丢回
+        # 给"必须重新吸附"。改走唤醒循环（先断后连是破僵尸 HOGP 的唯一路）。
+        echo "[$(date '+%F %T')] wake guard: undocked with no live link; running connect cycle"
+        echo "$now" >"$WAKE_GUARD_LAST_FILE"
+        do_pen_wake_cycle
+        verify_pen_awake "$undock_at"
+        return 0
+    fi
+    echo "[$(date '+%F %T')] wake guard: undocked with live link; listening for pen input (${WAKE_QUIET_SECONDS}s window)"
+    pen_input_silent "$WAKE_QUIET_SECONDS"
+    silent=$?
+    if [ "$silent" = 1 ]; then
+        age=$(pen_undock_age "$undock_at")
+        echo "[$(date '+%F %T')] wake guard: pen emitted input; awake, no wake needed (${age:-?}s after undock)"
+        return 0
+    fi
+    if [ "$silent" = 2 ]; then
+        # 判不了 ≠ 没事。v0.1.18 在这里静默跳过，正是整条守护空转的原因
+        # （见 resolve_pen_input_node 的教训）。改为**失败保险向**：宁可多走
+        # 一次 ~13 秒的唤醒循环，也不能让"判据坏了"表现为"笔坏了"。
+        # 有一次性武装 + WAKE_COOLDOWN_SECONDS 冷却兜底，不会变成风暴。
+        echo "[$(date '+%F %T')] wake guard: WARN pen input node unresolvable; treating as asleep and waking anyway"
+    fi
+    echo "$now" >"$WAKE_GUARD_LAST_FILE"
+    do_pen_wake_cycle
+    verify_pen_awake "$undock_at"
+}
+
+monitor_wake_guard() {
+    echo "[$(date '+%F %T')] wake guard monitor started (now=$WAKE_GUARD_NOW_FILE arm=$WAKE_GUARD_ARM_FILE enabled=$WAKE_GUARD_ENABLED_FILE)"
+    while [ ! -e "$CPS_DISABLED" ]; do
+        if [ -e "$WAKE_GUARD_NOW_FILE" ]; then
+            # 手动入口（action.sh wake）：显式意图，不看开关文件、也不看锁屏
+            # （用户就在跟前操作，解锁与否由他自己负责）。
+            rm -f "$WAKE_GUARD_NOW_FILE"
+            echo "[$(date '+%F %T')] wake guard: manual wake requested via action.sh"
+            do_pen_wake_cycle
+        elif [ -f "$WAKE_GUARD_ARM_FILE" ] \
+                && [ -f "$WAKE_GUARD_ENABLED_FILE" ] \
+                && [ "$(read_hall_state)" = 0 ]; then
+            # ⚠️ 这里**不做**锁屏闸门（v0.1.20 曾加过，v0.1.22 删除）。历史与依据：
+            #   • v0.1.20 加闸门的理由：原厂 CoreService 不是 direct-boot-aware，
+            #     未解锁时 OEM 投递必 rc=255，而武装是一次性的，会被白白烧掉。
+            #   • 当时的假设「FBE 解过一次后恒为 RUNNING_UNLOCKED」被当晚实测
+            #     **推翻**：这台 ROM 息屏就把 user 0 锁回 RUNNING_LOCKED，闸门
+            #     实际把每次息屏期间的唤醒守护全部挡死 —— 又一次静默空转。
+            #   • v0.1.22 起 PenHidCtl 自身 DBA 化（PenHidService 只碰蓝牙栈，
+            #     不读 CE 数据），锁屏期 run_hidctl 是**可用**的断/连通路；
+            #     OEM 半边失败由 request_oem_pen_action 照常记日志，不影响。
+            #   • 已知代价：锁屏期唤醒后 haptic REFRESH 的下游（inkdye 会话在
+            #     非 DBA 的 OEM 进程里）可能只能等解锁后自然恢复 —— 退化形态
+            #     是"笔画先回来、震动后回来"，仍远好于"整段等解锁"。
+            run_wake_guard_once
+        fi
+        sleep_sec 2
+    done
+}
+
+
 # The stock settings action updates the IPe state, but on this port HID Host
 # remains connected. Enforce an explicit settings-page Disconnect at both the
 # vendor CoreService and the actual HID profile. A 1 -> 0 transition is the
@@ -1433,6 +1846,7 @@ monitor_charging_cache &
 monitor_real_bt_state &
 
 monitor_hid_latch &
+monitor_wake_guard &
 
 # The ported IPeManager package carries the vendor Bluetooth receivers in
 # its resolver table, but their user-0 component state is disabled.  Enable

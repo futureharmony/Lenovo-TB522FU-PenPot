@@ -13,8 +13,11 @@ import android.content.Intent;
 import android.os.Build;
 import android.os.Handler;
 import android.os.IBinder;
+import android.os.SystemClock;
 import android.util.Log;
 
+import java.io.File;
+import java.io.FileOutputStream;
 import java.lang.reflect.Method;
 
 /**
@@ -34,6 +37,16 @@ public final class PenHidService extends Service {
     private Notification notification;
     private boolean stopped;
     private int startId;
+    // 执行回执：am 的 rc=0 只证明"投递成功"，调用方（service.sh）无法从
+    // logcat 可靠取证。结束前把 "<elapsedRealtime> <action> ok|fail <detail>"
+    // 写进自己的 files 目录（锁屏 DBA 态 = /data/user_de/0/...，解锁后 =
+    // /data/user/0/...，调用方两个都探测）。默认 fail：只有显式确认两条
+    // Bluetooth 调用都发出去了才置 ok —— 判不了 ≠ 成功（本项目静默失败
+    // 已踩过五次，见 docs/pen_wake_guard_silent_noop_20260921.md）。
+    private static final String RESULT_NAME = "penhid.result";
+    private String lastAction = "?";
+    private boolean resultOk;
+    private boolean resultWritten;
 
     @Override
     public void onCreate() {
@@ -68,6 +81,9 @@ public final class PenHidService extends Service {
         startId = id;
         final String action = intent == null ? null : intent.getStringExtra("action");
         final String mac = intent == null ? null : intent.getStringExtra("mac");
+        lastAction = action == null ? "?" : action;
+        resultOk = false;
+        resultWritten = false;
         Log.i(TAG, "service start action=" + action + " mac=" + mac);
         // The caller (root shell) starts this as a foreground service because
         // the ROM blocks background starts. Become a real FGS immediately so
@@ -113,25 +129,18 @@ public final class PenHidService extends Service {
                     profile = proxy;
                     boolean connect = "connect".equalsIgnoreCase(action);
                     if (connect) {
-                        invoke(proxy, "setConnectionPolicy", device, POLICY_ALLOWED);
-                        handler.postDelayed(new Runnable() {
-                            @Override
-                            public void run() {
-                                invoke(proxy, "connect", device);
-                                stopNow("connect requested");
-                            }
-                        }, 250L);
+                        // 这台 ROM 的 BluetoothHidHost **没有** 1 参
+                        // connect(BluetoothDevice) 隐藏方法（实测 "connect method
+                        // unavailable"）；把 policy 从 FORBIDDEN 切回 ALLOWED 就是
+                        // 蓝牙栈的重连触发器（实测回链），等价于原实现想做的事。
+                        resultOk = invoke(proxy, "setConnectionPolicy", device, POLICY_ALLOWED);
+                        stopNow("connect requested");
                     } else {
-                        // Drop the current HID link first, then forbid the
-                        // profile from immediately reconnecting it.
-                        invoke(proxy, "disconnect", device);
-                        handler.postDelayed(new Runnable() {
-                            @Override
-                            public void run() {
-                                invoke(proxy, "setConnectionPolicy", device, POLICY_FORBIDDEN);
-                                stopNow("disconnect requested");
-                            }
-                        }, 150L);
+                        // 同上：1 参 disconnect(BluetoothDevice) 也不存在。把 policy
+                        // 切到 FORBIDDEN 会让栈**立即踢掉** HOGP 链路并阻止自动重连
+                        // （实测 hogp connection state 2 -> 0）—— 正是断链需要的动作。
+                        resultOk = invoke(proxy, "setConnectionPolicy", device, POLICY_FORBIDDEN);
+                        stopNow("disconnect requested");
                     }
                 }
 
@@ -148,9 +157,10 @@ public final class PenHidService extends Service {
         return START_NOT_STICKY;
     }
 
-    private static void invoke(Object target, String name, Object... args) {
+    /** @return true 只表示找到了同名方法且反射调用没有抛异常（Bluetooth 结果本身异步）。 */
+    private static boolean invoke(Object target, String name, Object... args) {
         if (target == null) {
-            return;
+            return false;
         }
         for (Class<?> type = target.getClass(); type != null; type = type.getSuperclass()) {
             for (Method method : type.getDeclaredMethods()) {
@@ -161,14 +171,46 @@ public final class PenHidService extends Service {
                     method.setAccessible(true);
                     Object result = method.invoke(target, args);
                     Log.i(TAG, name + " result=" + result);
-                    return;
+                    return true;
                 } catch (Throwable error) {
                     Log.e(TAG, name + " failed", error);
-                    return;
+                    return false;
                 }
             }
         }
         Log.w(TAG, name + " method unavailable");
+        return false;
+    }
+
+    private void writeResult(String detail) {
+        resultWritten = true;
+        FileOutputStream out = null;
+        try {
+            File dir = getFilesDir();
+            if (dir == null) {
+                Log.w(TAG, "result write skipped: files dir unavailable");
+                return;
+            }
+            if (!dir.exists() && !dir.mkdirs()) {
+                Log.w(TAG, "result write skipped: cannot create " + dir);
+                return;
+            }
+            StringBuilder line = new StringBuilder();
+            line.append(SystemClock.elapsedRealtime()).append(' ').append(lastAction).append(' ')
+                    .append(resultOk ? "ok" : "fail").append(' ').append(detail).append('\n');
+            out = new FileOutputStream(new File(dir, RESULT_NAME), false);
+            out.write(line.toString().getBytes("UTF-8"));
+            Log.i(TAG, "receipt written: " + line.toString().trim());
+        } catch (Throwable error) {
+            Log.w(TAG, "result write failed", error);
+        } finally {
+            if (out != null) {
+                try {
+                    out.close();
+                } catch (Throwable ignored) {
+                }
+            }
+        }
     }
 
     private synchronized void stopNow(String reason) {
@@ -177,6 +219,10 @@ public final class PenHidService extends Service {
         }
         stopped = true;
         Log.i(TAG, reason);
+        if (!resultWritten) {
+            // 没走到显式成功路径就结束（超时/崩溃/组件不可用）一律按 fail 落回执。
+            writeResult(reason);
+        }
         if (handler != null) {
             handler.removeCallbacksAndMessages(null);
         }

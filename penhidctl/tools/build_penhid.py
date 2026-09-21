@@ -54,7 +54,7 @@ def _ks_pass() -> str:
 
 KS_PASS = _ks_pass()
 
-OUT_APK = Path(os.environ.get("ACL_OUT", str(REPO / "releases" / "PenHidCtl-tb522fu-1.1.0.apk")))
+OUT_APK = Path(os.environ.get("ACL_OUT", str(REPO / "releases" / "PenHidCtl-tb522fu-4.1.5.apk")))
 OUT_DIR = OUT_APK.parent
 
 
@@ -85,7 +85,7 @@ def main() -> None:
              "--auto-add-overlay", "--manifest", MANIFEST, "-R", tmp / "res.zip",
              "--java", tmp / "gen", "--min-sdk-version", "31",
              "--target-sdk-version", "35",
-             "--version-code", "410003", "--version-name", "4.1.3"])
+             "--version-code", "410005", "--version-name", "4.1.5"])
         (tmp / "classes").mkdir(parents=True, exist_ok=True)
         (tmp / "dex").mkdir(parents=True, exist_ok=True)
         run(["javac", "--release", "17",

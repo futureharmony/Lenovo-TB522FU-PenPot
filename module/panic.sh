@@ -43,9 +43,12 @@ for f in service.pid; do
 done
 
 # 3) 清掉一次性标记，避免下次开机沿用旧的临时状态
-#    （v0.1.17：模块不再写 tx_status，无硬件状态需要恢复）
+#    （v0.1.17：模块不再写 tx_status，无硬件状态需要恢复；
+#     v0.1.18：唤醒守护的武装/冷却/手动触发标记同属一次性状态）
 rm -f "$MODDIR/pen-hall.state" "$MODDIR/pen-capsule.last" \
-      "$MODDIR/pen-connect.last" "$MODDIR/pen-boot-ready" 2>/dev/null
+      "$MODDIR/pen-connect.last" "$MODDIR/pen-boot-ready" \
+      "$MODDIR/pen-wake-arm.state" "$MODDIR/pen-wake.last" \
+      "$MODDIR/pen-wake-now" 2>/dev/null
 
 # 5) 默认让下次开机跳过本模块（--keep 则保留）
 if [ "$KEEP" = "1" ]; then

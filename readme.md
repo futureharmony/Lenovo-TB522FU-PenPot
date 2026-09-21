@@ -124,6 +124,22 @@ tb522fu_pen_bridge`；或 Recovery 里删模块目录。详见
    按键惰性的场合。WebView 编辑器等键盘界面不受影响（无画布 → 命令被忽略 → 仍走按键注入）。
    **部署状态**：v4.6.0 已于 2026-09-20 部署到 TB522FU（含 Vector scope 回读断言与开机验证），
    接收侧通道用 root 广播实测通过（1 次广播 = 1 次撤销）；发送侧（实际捏握）待笔实测。详见 `TODO.md` P0.14。
+12. **唤醒守护从"形同虚设"修到可用（2026-09-21，v0.1.19 → v0.1.21）**：用户实测报「dock 睡死取下后
+   震动可用但写不出字」。定位到**守护一次都没执行过** —— 笔尖 evdev 节点解析的 `/proc` awk 在
+   `H: Handlers=event5 cpufreq` 这种粘连写法下永不命中，而 rc=2 又被当作"跳过"，属**静默失败**。
+   同时修掉"断而不建"（自发的 `DISCONNECT_PENCIL` 会置上断开闩锁，连不回来）与默认关闭两个问题，
+   并把 `link=0` 分支从空转改为走同一套 link cycle。**两分支均已实机验证**（睡死→自动断链重连+
+   震动握手重放；清醒→不误伤）。
+   v0.1.20 又补上**第四处同类静默空转**：原厂 `CoreService` 没有 `directBootAware`，
+   **开机到首次解锁之间** `am` 投递必然 `rc=255`，而守护会在这一瞬间把"本次离座会话的一次性
+   武装"直接烧掉 → 用户随后解锁落笔时笔仍是死的。修法是在消费武装**之前**加锁屏闸门：
+   未解锁则保持武装不消费，解锁后下一次轮询补做。
+   v0.1.21 是**第一次拿到生产样本**（21:36 用户报"有震动无笔画，过了一会正常"）后调参：
+   ① 断链→笔出笔画实测 **3.9s**，而失连保持只有 3s ⇒ 余量 0.37s，属撞运气 →
+   提到 5s（E4 区间上沿）；② 补上**循环后验证**（`cycle OK` / `WARN cycle FAILED`），
+   让"循环跑完但白跑一趟"从不可见变成可见（此前返回 0 只代表"链路回来了"，不代表笔能写）；
+   ③ 冷却跳过也不再无声。真·深睡场景仍待用户复测。详见
+   `docs/pen_wake_guard_silent_noop_20260921.md`（§12 是这次生产样本的完整时间线）。
 
 ## TB522FU 新增功能：充电守护（charge-guard.sh v2）
 - **磁吸通知**：沿用 monitor_hall_capsule（已映射到 `och1909/hall3`）。胶囊电量优先取新鲜样本，
@@ -148,6 +164,59 @@ tb522fu_pen_bridge`；或 Recovery 里删模块目录。详见
 > 详见 [`docs/cps-charger-driver-analysis.md`](docs/cps-charger-driver-analysis.md)。
 
 ## 当前状态（2026-09-18 实测）
+
+> **v0.1.22（2026-09-21）**：**锁屏期唤醒通路打通** —— 自研 priv-app `PenHidCtl`
+> 的 `PenHidService` 标上 `directBootAware`，锁屏（user 0 RUNNING_LOCKED）期 PMS
+> 不再过滤它，唤醒守护的断/连不再依赖原厂 CoreService（非 DBA，锁屏期 `am` 必
+> rc=255）。关键发现与改动：
+> ① **这台 ROM 息屏就把 user 0 锁回**（推翻 v0.1.20"仅开机首解前"的假设），
+>    v0.1.20 的锁屏闸门实际把每次息屏期间的守护全部挡死 —— 已删除；
+> ② 这台 ROM 的 BluetoothHidHost 没有 1 参 `connect()/disconnect()` 隐藏方法，
+>    **`setConnectionPolicy(FORBIDDEN/ALLOWED)` 就是踢链/回链触发器**（HOGP 2→0→2 实测）；
+> ③ `run_hidctl` 升级为带回执的已验证调用（`penhid.result`，先删后收+轮询），
+>    `am rc=0` 只代表投递成功、回执才代表做了；
+> ④ PMS 对 /system 应用按 mtime 跳过重扫的坑（缓存时间戳与 overlay 呈现 mtime 逐秒
+>    相同 ⇒ 重启仍跑旧版）：覆盖安装场景改走 `pm install -r`（UPDATED_SYSTEM_APP，
+>    保留 PRIVILEGED 与白名单授权，且根治 App 进程打不开 overlay APK 的历史崩溃）；
+> ⑤ 回链窗口 8s→25s（锁屏态实测回链 ~23s）；断链确认改双判据（镜像或蓝牙栈）；
+>    abort 时恢复 ALLOWED，否则笔会被留在 FORBIDDEN 死态。
+> **全部锁屏态实机验证通过**，含最严苛的"重启后 FBE 从未解锁"窗口（断链/回链 +
+> 回执 + 0 崩溃）。模块 `0.1.22`，PenHidCtl `4.1.5`；Hook 无改动（仍 v4.7.0）。
+> 详见 `docs/pen_wake_guard_silent_noop_20260921.md` §13。
+>
+> **v0.1.21（2026-09-21）**：唤醒守护**时序调参 + 循环后验证**，依据是 21:36 第一次真实
+> 生产样本（用户报"解锁后笔有震动无笔画，过了一会正常"）。三处：
+> ① **失连保持 3s → 5s**。实测"断链 → 笔出首个笔画"为 **3.9s**，3s 只留 0.37s 余量
+> （`21:36:44.58` 断链 → `21:36:48.5` 出笔画 → `21:36:48.87` 重连），而 3s 本就是 E4
+> 实测区间 2–5s 的**下沿** —— 一旦偏移就会退回"连上了但触控死"。
+> ② **新增循环后验证** `verify_pen_awake`：重连后看笔尖节点 12s，落 `cycle OK` /
+> `WARN cycle FAILED` / `WARN cycle UNVERIFIABLE` 三态日志。此前 `do_pen_wake_cycle`
+> 返回 0 只代表"链路回来了"，**不代表笔能写**，白跑一趟完全不可见。**只记日志不改行为**：
+> 无证据表明第二轮有用，且"验证窗口内静默"本身歧义（笔放一边不碰屏幕同样静默），
+> 先让失败可见，按真实发生率再决定要不要加重试。
+> ③ 冷却跳过不再无声（`in cooldown (Ns < 120s); skipping this undock`）。
+> 同时在正常分支与 `cycle OK` 分支打上 `${n}s after undock`，用于标定
+> `WAKE_QUIET_SECONDS=6` 是否偏短（当前唯一样本是 11s ⇒ 窗口内必然判"睡死"，
+> 守护实际退化成每次离座都断链重连；待对照组数据）。
+> 模块 `0.1.21`，`service.sh` md5 `35096ae29c37963d436a6951c240e5a9`；Hook 无改动（仍 v4.7.0）。
+>
+> **v0.1.20（2026-09-21）**：唤醒守护加**锁屏闸门**。原厂 `com.oplus.ipemanager/.btadsorb.CoreService`
+> 在 manifest 里没有 `android:directBootAware` ⇒ user 0 尚未首次解锁时 PMS 拒绝投递
+> （`am startservice --user 0` 返回 `rc=255`）。原实现会在这一瞬间把"本次离座会话的一次性武装"
+> 消费掉，导致用户解锁后笔仍是死的。现在未解锁时**保持武装不消费**，解锁后自动补做。
+> 模块 `0.1.20`，`service.sh` md5 `edc415fc96fd554ca002cbd2093dc9da`；Hook 无改动（仍 v4.7.0）。
+>
+> **v0.1.19（2026-09-21）**：**唤醒守护修复 + 默认开启。** 深睡笔取下后自动断链重连唤醒
+> （触发器=笔自身 BLE 链路完整 link-down→link-up，实验定案见
+> `docs/pen_wake_experiment_E0_E4_20260921.md`），重连后自动重放 inkdye 握手恢复书写震动
+> （Hook v4.7.0 `PenHapticGatt.refreshSession`）。`action.sh wake` 为手动入口。
+>
+> ⚠️ **v0.1.18 的守护其实一次都没执行过**：笔尖 evdev 节点解析用 `/proc/bus/input/devices`
+> 按空白分词找 `eventN`，而该文件写的是 `H: Handlers=event5 cpufreq`（第一个 handler 与
+> `Handlers=` 粘连），正则永不命中；失败（rc=2）又被当成"跳过"，**日志有、动作无**。
+> 连带两处：守护自己发的 `DISCONNECT_PENCIL` 会置上断开闩锁导致"断而不建"；且守护默认关闭。
+> 三处均已修（详情与实机验证见 `docs/pen_wake_guard_silent_noop_20260921.md`）。
+> 关闭：`sh action.sh wake-guard-off`。
 
 已实机部署并验证：**boot_completed=1、Vector 注入 system_server 成功（`system` 作用域
 修复后）、charge-guard 随开机启动、PenHidCtl 以 priv-app 装载、bootfail 计数正常归零**。
