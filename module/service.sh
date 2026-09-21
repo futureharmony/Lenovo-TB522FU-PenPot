@@ -29,13 +29,9 @@ MODE=/proc/pen_wakeup_mode
 SWITCH=/proc/pen_wakeup_switch
 UEVENT=/sys/devices/virtual/lenovo_penraw/lenovo_penraw/uevent
 # TB522FU (sun/SM8750P): och1909 hall driver exposes four channels.
-# Calibrated: pen magnetic dock supports both orientations:
-# hall3 == 0 when tip points right; hall2 == 0 when tip points left.
-# Detached reads 1 on both channels.
+# Calibrated 2026-09-18: pen magnetic dock == hall3, attached reads 0,
+# detached reads 1. hall1_1/hall1_2 idle 0, hall2 idle 1 (kbd cover side).
 PEN1_HALL=/sys/devices/virtual/hall/och1909/hall3
-PEN2_HALL=/sys/devices/virtual/hall/och1909/hall2
-PEN_TYPE=/proc/pen_type
-PANEL_BACKLIGHT=/sys/class/backlight/panel0-backlight/brightness
 CPS_GPIOCHIP=gpiochip0
 CPS_GPIODEV=/dev/gpiochip0
 CPS_GPIOSET=/system/bin/gpioset
@@ -313,10 +309,8 @@ done
 apply_pen_wake() {
     mode=$(cat "$MODE" 2>/dev/null | tr -d '\r')
     wake=$(cat "$SWITCH" 2>/dev/null | tr -d '\r')
-    ptype=$(cat "$PEN_TYPE" 2>/dev/null | tr -d '\r')
     mode_write=0
     switch_write=0
-    type_write=0
 
     # system_server cannot write these vendor proc nodes on this ROM.  The
     # Root service is the only writer, and writes each node only when it is
@@ -332,16 +326,10 @@ apply_pen_wake() {
             switch_write=1
         fi
     fi
-    if [ "$ptype" != 2 ] && [ -w "$PEN_TYPE" ]; then
-        if printf '2\n' >"$PEN_TYPE" 2>/dev/null; then
-            type_write=1
-        fi
-    fi
 
     mode=$(cat "$MODE" 2>/dev/null | tr -d '\r')
     wake=$(cat "$SWITCH" 2>/dev/null | tr -d '\r')
-    ptype=$(cat "$PEN_TYPE" 2>/dev/null | tr -d '\r')
-    echo "[$(date '+%F %T')] pen wake root apply mode=$mode switch=$wake type=$ptype wrote_mode=$mode_write wrote_switch=$switch_write wrote_type=$type_write"
+    echo "[$(date '+%F %T')] pen wake root apply mode=$mode switch=$wake wrote_mode=$mode_write wrote_switch=$switch_write"
 }
 
 # The CPS driver or vendor power manager can reset these proc switches after
@@ -351,9 +339,17 @@ monitor_pen_wake() {
     while [ ! -e "$CPS_DISABLED" ]; do
         mode=$(cat "$MODE" 2>/dev/null | tr -d '\r')
         wake=$(cat "$SWITCH" 2>/dev/null | tr -d '\r')
-        ptype=$(cat "$PEN_TYPE" 2>/dev/null | tr -d '\r')
-        if [ -n "$mode" ] && [ -n "$wake" ] && { [ "$mode" != 1 ] || { [ "$wake" != 1 ] && [ "$wake" != "Pen Wakeup SWITCH 1!" ]; } || [ "$ptype" != 2 ]; }; then
-            echo "[$(date '+%F %T')] pen wake node reset detected mode=$mode switch=$wake type=$ptype"
+        # Both proc nodes read back as a bare "1" on this kernel. The old
+        # monitor also demanded $SWITCH equal the literal string
+        # "Pen Wakeup SWITCH 1!", which never matched, so the guard fired on
+        # EVERY 30 s pass: it logged "pen wake node reset detected" while
+        # apply_pen_wake then declined to write anything (wrote_*=0). That
+        # constant false alarm buried the real disconnect signal in the log.
+        # Accept either encoding; only a genuinely disabled node is a reset.
+        if [ -n "$mode" ] && [ -n "$wake" ] \
+                && { [ "$mode" != 1 ] \
+                     || { [ "$wake" != 1 ] && [ "$wake" != "Pen Wakeup SWITCH 1!" ]; }; }; then
+            echo "[$(date '+%F %T')] pen wake node reset detected mode=$mode switch=$wake"
             apply_pen_wake
         fi
         sleep_sec 30
@@ -538,21 +534,18 @@ echo "[$(date '+%F %T')] stable LSPosed Pen Hook payload expected"
 # still come from the CPS/GATT-backed settings and uevent; this monitor only
 # repairs the physical magnetic edge.
 read_hall_state() {
-    # TB522FU (sun/SM8750P): och1909 exposes hall3 (tip-right) and hall2 (tip-left).
-    # Driver writes prefix "hall13 value = N" or "hall2 value = N".
-    # Docked in either orientation means hall3=0 or hall2=0.
-    # Undocked means both hall3=1 and hall2=1.
-    h1=1; h2=1
-    [ -r "$PEN1_HALL" ] && IFS= read -r h1 <"$PEN1_HALL"
-    [ -r "$PEN2_HALL" ] && IFS= read -r h2 <"$PEN2_HALL"
-    h1=${h1##* }; h2=${h2##* }
-    if [ "$h1" = 0 ] || [ "$h2" = 0 ]; then
-        echo 1
-    elif [ "$h1" = 1 ] && [ "$h2" = 1 ]; then
-        echo 0
-    else
-        echo -1
-    fi
+    # TB522FU: och1909 hall3. Driver writes prefix "hall13" (its own
+    # format-string bug), so file content is "hall13 value = N" (N=0 docked).
+    # The trailing-digit extraction is prefix-agnostic: fine either way.
+    # The trailing-digit extraction avoids spawning tr/awk per sample.
+    hall=
+    [ -r "$PEN1_HALL" ] && IFS= read -r hall <"$PEN1_HALL"
+    hall=${hall##* }
+    case "$hall" in
+        0) echo 1 ;; # docked (hall3 low when pen attached)
+        1) echo 0 ;; # detached
+        *) echo -1 ;;
+    esac
 }
 
 valid_level() {
@@ -1054,6 +1047,15 @@ monitor_charging_cache() {
 # four MAC octets, so match the visible last two octets of the pen address
 # against the HOGP (LE HID) profile state; HOGP state 2 is a live link.
 real_bt_connected() {
+    # 笔已自行关机的标志（pen-revive-guard.sh 维护）。见 docs/pen-sleep-death-analysis.md：
+    # 笔满电后经 ASK 包让 CPS 驱动 close tx，自己随即掉电，但蓝牙栈的 HOGP
+    # profile state 不清零 —— 那是【僵尸连接】。此判据一旦被僵尸连接占住，
+    # monitor_hall_capsule 的 `! real_bt_connected` 就恒假，吸附边沿的重连
+    # （request_pen_connect）永不执行，表现为「吸上去是死的，必须再吸一次」。
+    # 这里让 CPS 侧的确定性事实压过蓝牙栈的滞后状态。
+    case "$(settings get global lenovo_pen_powered_down 2>/dev/null | tr -d '\r')" in
+        1) return 1 ;;
+    esac
     mac=$(resolve_pen_mac)
     is_pen_mac "$mac" || return 1
     tail=${mac#*:*:*:*:}
@@ -1068,6 +1070,15 @@ real_bt_connected() {
     dumpsys bluetooth_manager 2>/dev/null \
         | tr 'A-Z' 'a-z' \
         | grep -E "$tail .*hogp connection state=2" >/dev/null 2>&1
+}
+
+# 笔是否正在线圈上真实响应（CPS 侧带内通信判据）。
+# 与 real_bt_connected() 的分工：后者读蓝牙栈，而笔突然掉电时 HOGP state
+# 会滞后保持 2（僵尸连接）；本判据读 CPS 内核驱动，与 Hall 磁场边沿同步，
+# 实测 TX 关闭时同秒归零（见 docs/pen-sleep-death-analysis.md 的 1 秒序列）。
+pen_cps_responsive() {
+    [ -n "$CPS_PS_ONLINE" ] && [ -r "$CPS_PS_ONLINE" ] || return 1
+    [ "$(tr -d '\r' <"$CPS_PS_ONLINE" 2>/dev/null)" = 1 ]
 }
 
 # 笔在用时的 120Hz 由原厂 OplusRefreshRatePolicyImpl 依据
@@ -1207,67 +1218,14 @@ monitor_real_bt_state() {
     done
 }
 
-read_screen_on() {
-    br=0
-    if [ -r "$PANEL_BACKLIGHT" ]; then
-        IFS= read -r br <"$PANEL_BACKLIGHT"
-        case "$br" in ''|*[!0-9]*) br=0 ;; esac
-    fi
-    [ "$br" -gt 0 ] && echo 1 || echo 0
-}
-
-kick_docked_pen_wake() {
-    reason="$1"
-    if [ -n "$CPS_TX_STATUS" ] && [ -w "$CPS_TX_STATUS" ]; then
-        echo 1 >"$CPS_TX_STATUS" 2>/dev/null
-        echo "[$(date '+%F %T')] docked pen wake pulse sent (reason=$reason)"
-    fi
-}
-
 monitor_hall_capsule() {
     candidate=-1
     samples=0
     boot_cycle=1
     last=$(cat "$HALL_STATE_FILE" 2>/dev/null | tr -d '\r')
     case "$last" in 0|1) ;; *) last=-1 ;; esac
-    last_screen_on=-1
-    docked_idle_sec=0
     while [ ! -e "$CPS_DISABLED" ]; do
         state=$(read_hall_state)
-        screen_on=$(read_screen_on)
-
-        # 笔在磁吸位时的休眠防护与唤醒：
-        # 1) 屏幕亮起瞬间：若笔在吸附位且无线充处于关闭(cps_wls_en:0)，立即触发一次无线充
-        #    唤醒脉冲，激活笔内部MCU与触控笔尖振荡器；
-        # 2) 屏幕常亮且笔持续在吸附位：若无线充已断电超过 150 秒，触发脉冲维持笔活跃状态，
-        #    防止充满断电+静止后笔进入深度休眠，拿起后触摸不响应。
-        if [ "$state" = 1 ]; then
-            cps_charging=$(read_cps_charging)
-            if [ "$screen_on" = 1 ]; then
-                if [ "$last_screen_on" = 0 ]; then
-                    if [ "$cps_charging" = 0 ]; then
-                        kick_docked_pen_wake "screen_on"
-                        docked_idle_sec=0
-                    fi
-                else
-                    if [ "$cps_charging" = 0 ]; then
-                        docked_idle_sec=$((docked_idle_sec + 1))
-                        if [ "$docked_idle_sec" -ge 150 ]; then
-                            kick_docked_pen_wake "docked_keepalive"
-                            docked_idle_sec=0
-                        fi
-                    else
-                        docked_idle_sec=0
-                    fi
-                fi
-            else
-                docked_idle_sec=0
-            fi
-        else
-            docked_idle_sec=0
-        fi
-        last_screen_on="$screen_on"
-
         case "$state" in
             0|1)
                 if [ "$state" = "$candidate" ]; then
@@ -1297,7 +1255,15 @@ monitor_hall_capsule() {
                             # link if it is not already up at the BT layer.
                             settings put global lenovo_pen_user_disconnect_requested 0 >/dev/null 2>&1
                             settings put global lenovo_pen_disconnect_requested 0 >/dev/null 2>&1
-                            if ! real_bt_connected; then
+                            # 吸附边沿 = 一次全新的物理会话。这里不能只看
+                            # real_bt_connected()：笔上一轮满电掉电后蓝牙栈的
+                            # HOGP state 会滞留为 2（僵尸连接），判据恒真就会
+                            # 吃掉这次重连请求 —— 表现正是「吸上去是死的，必须
+                            # 再吸一次」。补一层 CPS 判据：笔没在线圈上真实响应
+                            # 时必须重连，不管蓝牙栈怎么说。
+                            # request_pen_connect 自带 8 秒去重，Hall 抖动不会
+                            # 变成重连风暴。
+                            if ! real_bt_connected || ! pen_cps_responsive; then
                                 request_pen_connect
                             fi
                             if [ "$boot_cycle" = 1 ]; then
@@ -1314,17 +1280,16 @@ monitor_hall_capsule() {
                                 request_pen_capsule_when_ready &
                             fi
                         elif [ "$state" = 0 ] && [ "$previous" = 1 ]; then
-                            # 离开吸附位：关闭吸附胶囊，确认触控节点就绪，且蓝牙处于连接态
+                            # 离开吸附位：关闭吸附胶囊，若蓝牙未连则发起重连
                             am broadcast --user 0 --receiver-foreground \
                                 -a com.futureharmony.lenovopenbridge.action.DISMISS_PENCIL_CAPSULE \
                                 -p com.oplus.ipemanager >/dev/null 2>&1
-                            apply_pen_wake
                             if ! real_bt_connected; then
                                 request_pen_connect
                             fi
                         fi
-                        boot_cycle=0
                     fi
+                    boot_cycle=0
                 fi
                 ;;
         esac
@@ -1518,6 +1483,24 @@ if [ -f "$MODDIR/charge-guard.sh" ]; then
     ) &
 fi
 
+# 笔「链路状态守护」（pen-revive-guard.sh v2，2026-09-21 重定位）：
+#   完整因果链与五组证伪实验见 docs/pen-sleep-death-analysis.md。
+#   笔满电 -> 经带内 ASK 包下令 CPS 驱动 close tx -> 驱动关载波 ->
+#   笔失去载波自行关机 -> 蓝牙 HOGP 状态滞后（僵尸连接）-> 吸附边沿的重连
+#   被僵尸判据吃掉 -> 用户必须物理重新吸附。
+#   【软件无法唤醒已关机的笔】：写 tx_status 只产生 Analog Ping，而 Hall
+#   边沿走内核内调用（Digital Ping），笔只认后者。v1 的 TX 脉冲方案已证伪。
+# v2 因此不再写 tx_status（一个字节都不写），改为维护
+#   settings lenovo_pen_powered_down
+# 供本文件 real_bt_connected() 消费，让镜像诚实、重连恢复：
+#   touch $MODDIR/pen-revive.dryrun   只记录检测结果（不改 settings）
+#   touch $MODDIR/disable-pen-revive  整体停用
+# 注意与 charge-guard 的分工：两者都是纯观察者，都不写 tx_status。
+if [ -f "$MODDIR/pen-revive-guard.sh" ]; then
+    echo "[$(date '+%F %T')] launching pen-revive-guard"
+    sh "$MODDIR/pen-revive-guard.sh" &
+fi
+
 monitor_hid_latch &
 
 # The ported IPeManager package carries the vendor Bluetooth receivers in
@@ -1640,7 +1623,7 @@ wait_for_cps_power() {
             echo "[$(date '+%F %T')] CPS boot power skipped: pen is not magnetically docked"
             return 1
         fi
-        if { [ -r "$PEN1_HALL" ] || [ -r "$PEN2_HALL" ]; } && [ "$(read_hall_state)" = 1 ]; then
+        if [ -r "$CPS_PEN_HALL" ] && [ "$(read_hall_state)" = 1 ]; then
             start_cps_gpio
             cps_pid=$(cat "$CPS_PIDFILE" 2>/dev/null)
             case "$cps_pid" in

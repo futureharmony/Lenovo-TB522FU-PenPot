@@ -111,7 +111,26 @@
 ## 工程项
 - [ ] Hook 包名是否改名（当前沿用 com.aclaniakea.lenovopenbridge，改包名需同步 build 脚本/签名/scope）
 - [ ] 本机 LSPosed 版本与 lspd 路径同步机制验证（post-fs-data 的 lsposed-path-sync）
-- [ ] 无线 adb 不稳，调试期改 USB
+- [x] 无线 adb 不稳，调试期改 USB（2026-09-21）
+  - 结论：**根因三条，没有一条是 WiFi 本身**。
+  - ① USB + WiFi 双在线 → 裸 `adb <cmd>` 报 `error: more than one device/emulator`；
+    `build.py:device_online()` 只看 returncode，于是**静默**返回 False，第 4 步
+    scope 自检与 `--push` 被悄悄跳过（现象是「自检明明没跑，却显示构建成功」）。
+    已修：新增 `device_state()` 返回 `device|multiple|none`，双设备时打印准确诊断
+    而非 `no device connected`。
+  - ② adb server 陈旧网络视图 → `adb connect` 报 `No route to host`，而同一时刻
+    `nc -z <ip> 5555` 成功。重启 server 即解（`adb_wifi.sh` 自动重试一次）。
+  - ③ DHCP 换 IP → 不信任缓存，优先从 USB 侧读 `wlan0` 重新发现。
+  - 统一入口 `scripts/adb_wifi.sh`（`connect|status|env|off`）。
+    `eval "$(scripts/adb_wifi.sh env)"` 导出 `ANDROID_SERIAL` —— adb 原生读取该变量，
+    故 `build.py` / `pen_release.py` / `deploy_vector.sh` 等子进程**零代码改动**继承。
+  - `scripts/deploy_vector.sh` preflight 错误信息同步区分（原先双设备时误报
+    `no device; adb connect first`，把人往 WiFi 方向带偏）。
+  - 实测：WiFi 通道 pull 20.3 MB/s；第 4 步自检 PASS（scope 8/8 一致，0.2s）。
+  - 设备侧 `persist.adb.tcp.port=5555` 已设 ⇒ 重启后 adbd 直接监听，无需 USB 介入；
+    `wifi_sleep_policy=2`（WiFi 永不休眠）也已就位。
+  - 遗留：`mDeepEnabled=true`（Doze 开启）。插电时不触发，故当前无碍；拔线 + 息屏
+    长时间挂机会限网导致 adb 卡顿/掉线，届时 `su -c 'dumpsys deviceidle disable'`。
 
 ## P2.5 充电守护（新增，2026-09-18 实现）
 - [x] `module/charge-guard.sh` v2：磁吸观察 + 充满通知 + 兜底断电 + IPeManager 状态修正（已实机起进程验证启动）
@@ -120,13 +139,56 @@
 - [ ] 实机验证充满通知（吸附 + 电量 100）闭环
 - [x] 补受控实验：确认 `online` 语义 —— **随"笔是否在线圈上"变化**（吸附=1，离开=0，见 `docs/charge_log_20260918.csv` 11:34 边沿），但 **不反映是否在送电**（`cps_wls_en:0` 时仍为 1）。因此它**不能**作为「正在充电」判据；唯一判据是 `tx_status` 的 `cps_wls_en`（2026-09-18）
   - `capacity` 同理：吸附=笔的 SOC，离开=0 —— 是驱动通过带内通信解析出的笔电量，可用作交叉校验
+- [x] **`module/pen-revive-guard.sh` v1**（2026-09-21 定位 + 实机部署）—— **方案已证伪，见下条 v2**
+  - 初判根因链：笔满电 → 驱动自己关 TX（实测吸附后 15~60s）→ Lenovo 笔失去 Qi 供电
+    **自行关机** → 突然掉电不走正常 BLE disconnect → 蓝牙栈 HOGP state **不清零 = 僵尸连接**
+    → `monitor_real_bt_state` 以为一切正常，而 `request_pen_connect` 只在 Hall 物理边沿调用
+    ⇒ 断连后无人重连。**这条链本身是对的**（后经内核 ASK 包日志坐实）。
+  - 对策设想：软件等价的「重新吸附」—— 判失联后写一次 `tx_status=1` 送电唤醒笔。
+  - ❌ **证伪**：五组独立实验全部失败（详见 `docs/pen-sleep-death-analysis.md`）。写 `tx_status=1`
+    只能产生 Analog Ping，而 Hall 边沿走 `dhall_och1909 → cps_wls_charger` 的**内核内函数调用**
+    （等价于 Qi Digital Ping），笔只认后者。连 OEM 原生的 `CONNECT_PENCIL` 通路（实验 C，
+    CoreService 确实响应并上报 `charging=1`）都唤不醒它。
+- [x] **`module/pen-revive-guard.sh` v2（链路状态守护）**（2026-09-21 静态改造，**实机待验证**）
+  - 完整根因链 + 五组证伪实验 + 排查命令：`docs/pen-sleep-death-analysis.md`
+  - **删除全部 `tx_status` 写入**，一个字节都不写（继续写只是空载线圈发热）。
+  - 改为维护 `settings lenovo_pen_powered_down`：Hall 说笔在吸附位、但 CPS 侧 TX 已关闭
+    ≥ `POWERED_DOWN_AFTER_SEC`（默认 90s）⇒ 判定笔已自行关机。
+  - 解除条件**只有一个**：笔重新上电（`tx=1` 或 `online=1`）。**笔离开吸附位时不解除** ——
+    笔离座本就自行关机，保持标志才诚实；若在 detach 清标志，用户「拿起→放回」时 attach
+    边沿会看到 0，重连请求又会被僵尸连接吃掉（那正是要修的 bug）。
+  - 不用 `online` 做判据（与 TX 同秒归零，无独立区分度）；不用 HOGP（僵尸连接就是它不翻转造成的）；
+    不用 `lenovo_pen_hardware_battery_last_at`（它由本模块 `monitor_battery_cache` 在
+    `connected=1` 时周期刷新，僵尸期间会被自己喂成常青，不具备活性含义）。
+  - 开关：`pen-revive.dryrun`（存在=只记录不改 settings）/ `disable-pen-revive`（存在=停摆）。
+- [x] **`service.sh` 僵尸连接修复**（2026-09-21，配套 v2，**实机待验证**）
+  - `real_bt_connected()` 增加 `lenovo_pen_powered_down=1 → return 1`：让 CPS 侧的确定性事实
+    压过蓝牙栈的滞后状态。单点改动同时修好三处 —— `monitor_real_bt_state` 镜像变诚实、
+    `monitor_hall_capsule` 吸附边沿能触发重连、`request_pen_connect_bounded` 不再误判「已连接」。
+  - 新增 `pen_cps_responsive()` 并用于吸附边沿：`if ! real_bt_connected || ! pen_cps_responsive`
+    ⇒ 吸附是全新物理会话，笔没在线圈上真实响应就一律重连，不管蓝牙栈怎么说
+    （`request_pen_connect` 自带 8 秒去重，Hall 抖动不会变成重连风暴）。
+  - 依据：`service.sh:1667` 注释本就写明 *"the dock-attach edge reconnects it later"* ——
+    这一步此前被僵尸连接吃掉，正是「必须再吸一次」的直接机制。
+  - ⚠️ **不是本模块引入的**：`docs/p0-recon-20260918.md`（移植第一天）第 79–82 行就记到了
+    「充满 → online 归零 → 静止 23 分钟」。charge-guard v2 的 `tx_set 0` 只存在 4 小时
+    （`059e018` 11:39 → `d7e8609` 15:36），与现象无关。
+- [ ] **待验证（设备回归后）**：Hall 驱动 rebind 能否软件化「重新吸附」——
+      对 `soc:hall_detect@0` 做 unbind+bind 会让 Hall 驱动重新 probe，可能触发完整的
+      「笔来了」通知链。**风险**：失败会让 Hall 吸附检测整体失效（重启可恢复）。
+      未验证前**不要**剪进自动守护；命令见 `docs/pen-sleep-death-analysis.md`。
   - `charge_type`：吸附=Trickle、离开=Unknown，是驱动按吸附状态给的档位名，同样不代表"正在充电"
 - [x] 实机复核「充满后软件侧是否主动断电」（2026-09-18，电量 100 / 笔在磁吸上）：**有，但当前是我们守护干的，不是驱动**
   - charge-guard.log 两次「driver left TX on at full (100); forced off」分别在吸附后 **t+3s / t+6s**，即我们的守护比驱动先动手；**因此"驱动自己会不会关"至今没有被观察到**（被我们抢先了）
   - 通知层：14:56:59 触发「手写笔已充满，已停止充电」（ColorOS 丢 shell 通知，UI 走 Hook 广播）
   - ⚠️ 守护抢先动手的风险：守护用 **BLE 侧电量**（可能滞后）当判据，驱动用 **带内 `charging_soc`**（直读）。若两者不一致（BLE 仍读 100、笔实际需要补电），守护会**挡住合法补电** → 表现为"笔吸上去不充电"
 - [x] **反向工程 CPS 驱动本体**（`/vendor_dlkm/lib/modules/cps_wls_charger.ko`，2026-09-18）——确认充满截止/补充充电是**原厂驱动自带**：读 `hall_status`、带内 ASK/FSK 解析 `pen_type/mac/charging_soc/charging_status/charging_cmd`、`charging_cmd → close tx`、`error int flag → close tx`、`cps_handle_rechg_work`（补充充电）、设备树无任何策略参数。详见 `docs/cps-charger-driver-analysis.md`
-- [ ] **待补的决定性实验**：临时 `touch disable-charge-guard` 后让笔重新吸附，确认**驱动是否会在笔保持吸附时自行把 `cps_wls_en` 关掉**以及耗时。若会 → 守护的强制写 0 应当移除（只保留通知 + `ipe_pencil_charging_state` 回写）；若不会 → 守护必须保留并说明原厂逻辑缺了什么
+- [x] **决定性实验已补（2026-09-21）**：`disable-charge-guard` 状态下让笔保持吸附，确认**驱动会自己关掉 `cps_wls_en`**，且延迟极短（实测吸附后 15~60s）。
+  - **更关键的发现**：关 TX 不是驱动自己的判断，**是笔通过带内 ASK 包下的命令** ——
+    内核日志 `ask pkt data[2]:1, charging_cmd:1, close tx` + `cps_wls_boost:0`。
+    笔报满电（`charging_status:2`）后下令停充，驱动照办，笔随即因失去载波而自行关机。
+  - ⇒ 守护的强制写 0 **早已被移除**（charge-guard v3 纯观察者，见提交 `d7e8609`），
+    当前方向正确，无需回退。详见 `docs/pen-sleep-death-analysis.md`。
 - [x] 实机验证充满通知闭环：守护触发 ✅、兜底断电 ✅；确认 ColorOS 丢弃 shell 通知 → UI 展示移入 P1 Hook APK（SHOW_PENCIL_CAPSULE 广播链路已预留）
 - [ ] 实机验证恢复充电通知（电量回落到 <=95）
 - [ ] 实机验证 ipe_pencil_charging_state 在低于 100% 吸附时被修正为 1

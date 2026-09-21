@@ -22,6 +22,7 @@ INCLUDE = (
     "customize.sh",
     "module.prop",
     "panic.sh",
+    "pen-revive-guard.sh",
     "post-fs-data.sh",
     "service.sh",
     "guard_note_engine.sh",

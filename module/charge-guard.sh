@@ -45,7 +45,6 @@ LOG="$MODDIR/charge-guard.log"
 PIDFILE="$MODDIR/charge-guard.pid"
 
 HALL3=/sys/devices/virtual/hall/och1909/hall3
-HALL2=/sys/devices/virtual/hall/och1909/hall2
 POLL_SEC=${POLL_SEC:-15}
 FULL_TH=${FULL_TH:-100}
 RESUME_TH=${RESUME_TH:-95}
@@ -82,9 +81,7 @@ tx_get() {
 hall_docked() {
     h1=$(cat "$HALL3" 2>/dev/null)
     h1=${h1##* }
-    h2=$(cat "$HALL2" 2>/dev/null)
-    h2=${h2##* }
-    if [ "$h1" = "0" ] || [ "$h2" = "0" ]; then
+    if [ "$h1" = "0" ]; then
         echo 1
     else
         echo 0
