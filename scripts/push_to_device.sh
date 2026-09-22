@@ -59,10 +59,9 @@ latest_by_version() {  # $1 = glob
 
 MODULE_ZIP="$(latest_by_version "$REL/tb522fu-pen-bridge-v*.zip")"
 HOOK_APK="$(latest_by_version "$REL/PenBridge-Hook-tb522fu-v*.apk")"
-HIDCTL_APK="$(latest_by_version "$REL/PenHidCtl-tb522fu-*.apk")"
 
 ARTIFACTS=()
-for f in "$MODULE_ZIP" "$HOOK_APK" "$HIDCTL_APK"; do
+for f in "$MODULE_ZIP" "$HOOK_APK"; do
     [ -n "$f" ] && [ -f "$f" ] || { echo "artifact not found in $REL" >&2; exit 1; }
     ARTIFACTS+=("$(basename "$f")")
 done

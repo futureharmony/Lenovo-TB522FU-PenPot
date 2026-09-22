@@ -48,13 +48,6 @@ final class PenBridgeConstants {
     static final String RUN_ACTION_LEGACY = "com.aclaniakea.lenovopenbridge.RUN_ACTION";
     static final String HAPTIC_TRANSPORT = "com.futureharmony.lenovopenbridge.action.HAPTIC_TRANSPORT";
     static final String HAPTIC_TRANSPORT_LEGACY = "com.aclaniakea.lenovopenbridge.action.HAPTIC_TRANSPORT";
-    /* Wake guard (root service.sh) -> system_server. A full pen BLE
-       link-down -> link-up cycle resets the pen-side haptic session; this
-       action asks PenHapticGatt to replay the inkdye connection handshake
-       (SWITCH -> REQ_INF -> CONNECTED impact) on the live transport.
-       See docs/pen_wake_experiment_E0_E4_20260921.md §3b. */
-    static final String HAPTIC_REFRESH = "com.futureharmony.lenovopenbridge.haptic.REFRESH";
-    static final String HAPTIC_REFRESH_LEGACY = "com.aclaniakea.lenovopenbridge.haptic.REFRESH";
     static final String SINGLE = "com.oplus.ipemanager.action.PENCIL_SINGLE_CLICK";
     static final String STATUS = "com.oplus.ipemanager.action.PENCIL_STATUS_CHANGE";
     static final String WRITING_HAPTIC_ENABLED = "lenovo_pen_global_writing_haptic";

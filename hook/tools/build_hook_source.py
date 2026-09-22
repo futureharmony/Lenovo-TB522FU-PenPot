@@ -113,7 +113,7 @@ OUT_DIR = Path(os.environ.get("ACL_OUT", str(REPO / "releases")))
 #   4.6.0 -> "PenBridge-Hook-tb522fu-v4.6.0.apk", version-name 4.6.0, code 460000
 # 4.6.0: 107/108 reach the full-screen paint canvas (which answers no key event)
 #        through the CanvasPaintHooks command bridge.
-APK_VERSION = os.environ.get("ACL_VERSION", "4.7.0")
+APK_VERSION = os.environ.get("ACL_VERSION", "4.8.0")
 _MAJOR, _MINOR, _PATCH = (int(p) for p in APK_VERSION.split("."))
 VERSION_CODE = f"{_MAJOR}{_MINOR}{_PATCH:04d}"
 OUT_APK = OUT_DIR / f"PenBridge-Hook-tb522fu-v{APK_VERSION}.apk"

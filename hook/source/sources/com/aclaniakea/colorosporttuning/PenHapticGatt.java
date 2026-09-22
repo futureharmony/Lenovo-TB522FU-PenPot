@@ -44,9 +44,8 @@ final class PenHapticGatt {
     private static final UUID SWITCH = uuid("0000000e-000f-11e1-9ab4-0002a5d5c51b");
     private static final UUID CCC = uuid("00002902-0000-1000-8000-00805f9b34fb");
     /* inkdye 连接握手的收尾波形 playImpact(WAVE_FORM_ID_CONNECTED=2)：
-       [wave=2, level=5, rep=0, cut=0]。唤醒重放（refreshSession）用它。 */
+       [wave=2, level=5, rep=0, cut=0]。 */
     private static final byte[] CONNECTED_WAVEFORM = {2, 5, 1, 0, 0, 0};
-    private static boolean pendingRefresh;
     private static final ArrayDeque<Write> queue = new ArrayDeque<>();
     private static final Handler handler = new Handler(Looper.getMainLooper());
     private static String address = "";
@@ -284,29 +283,7 @@ final class PenHapticGatt {
         continuousPayload = null;
         activeWritingLevel = 4;
         pendingImpact = null;
-        pendingRefresh = false;
         resetTransport();
-    }
-
-    /* 唤醒（笔自身 BLE 链路完整 link-down -> link-up）会重置笔端震动会话，
-       而系统侧没有任何人重放 inkdye 的连接握手 —— 症状是之后所有 GATT 写入
-       仍然 ACK（rc=0）但笔不播（docs/pen_wake_experiment_E0_E4_20260921.md
-       §3b，2026-09-21 19:11 经探针重放验证、19:19 用户实测确认）。
-       在现有传输（或 ensure 重建后的新传输）上重放 SWITCH -> REQ_INF ->
-       CONNECTED 波形即可恢复。 */
-    static synchronized void refreshSession(Context context, String str) {
-        ensure(context, str);
-        if (ready) {
-            replayHandshake();
-        } else {
-            pendingRefresh = true;
-        }
-    }
-
-    private static void replayHandshake() {
-        enqueue(switcher, new byte[]{1});
-        enqueue(request, new byte[]{1});
-        enqueue(impact, CONNECTED_WAVEFORM);
     }
 
     /* JADX INFO: Access modifiers changed from: private */
@@ -478,10 +455,6 @@ final class PenHapticGatt {
                         }
                         if (PenHapticGatt.continuous && PenHapticGatt.continuousPayload != null && PenHapticGatt.con != null) {
                             PenHapticGatt.enqueue(PenHapticGatt.con, PenHapticGatt.continuousPayload);
-                        }
-                        if (PenHapticGatt.pendingRefresh) {
-                            boolean unused9 = PenHapticGatt.pendingRefresh = false;
-                            PenHapticGatt.enqueue(PenHapticGatt.impact, PenHapticGatt.CONNECTED_WAVEFORM);
                         }
                         PenHapticGatt.drain();
                     }

@@ -5,6 +5,87 @@
 > **框架是 Vector（JingMatrix，`zygisk_vector`），不是 LSPosed。** 安装与验证步骤见
 > [`docs/install-vector-route.md`](docs/install-vector-route.md)。
 
+## v0.1.24 架构重构（2026-09-22）：service.sh 拆库 + 收掉手写重复
+
+- [x] **动机**：v0.1.23 减法后 `service.sh` 仍有 1464 行，且**基础设施全靠手写重复** ——
+      43 处 `settings get global X 2>/dev/null | tr -d '\r'`、38 处 `settings put global X v >/dev/null 2>&1`、
+      51 处 `echo "[$(date '+%F %T')] ..."`。这些管道与重定向不是业务逻辑，只是访问
+      SettingsProvider 的语法噪音，占了 131 个调用点。
+- [x] **拆分**：新增 `module/lib/` 七个库（`core` / `pen_id` / `pen_hw` / `pen_link` / `pen_ui` /
+      `boot` / `monitors`），`service.sh` **1464 → 289 行**，只留配置区、单例锁、加载与调用编排、
+      启动尾巴和历史留档。**仅搬位置，不改字**：用行区间机械切片，不手抄。
+- [x] **抽 helper 消重**：`log`/`log_err`（51）、`get_global`（42）、`put_global`（38）、
+      `put_global_diff`（3 处读-比-写收口）；另新增 `is_uint` / `norm_bool`。
+      ⚠️ 严格只替换**日志与 settings 读写**，绝不触碰被 `$()` 捕获的返回值 `echo`
+      ⇒ `lib/pen_hw.sh` 最终**零 `log` 调用**，`log_err` 只出现在 `pen_id.sh` 那个被捕获的
+      `resolve_pen_mac` 里。
+- [x] **等价性对账（脚本断言，非目测）**：函数定义 45 → 54（+9 helper/提函数）**零丢失零重复**；
+      settings 字面量键 **24/24 一致**；`am broadcast` action **3/3 一致**；单文件 `sh -n` 与
+      `cat lib/*.sh service.sh | sh -n` 合并校验双通过；离线真实 source 加载后 **52 个符号全部就位**，
+      且命令替换结果不被日志污染。lib 层零顶层执行语句、零 `$0` 依赖，
+      `exit` 仅剩 `core.sh::sleep_sec` 那处已知兜底。
+- [x] **构建白名单根治老坑**：`build_root.py` 的 `INCLUDE` 现在支持**目录条目**，`lib/` 以目录
+      形式声明、构建时自动展开（只收直系 `*.sh`，排序保证 zip 条目顺序稳定）。
+      以后新增库文件**不会再因漏加白名单而静默缺失**。
+- [x] **修掉两处历史笔误**（非本次引入）：`service.sh` 头注释写「仅适用于 SM8650Q / pineapple」
+      与实际门禁 `*SM8750P*/*sun*` 矛盾；监视器启动处注释说「helper 已在上方解析完毕」，
+      拆库后改为「lib 已全部 source 完毕」。
+- [x] **实机重启验证通过（2026-09-22 09:04）**：模块 0.1.24 + Hook 4.8.0；`service.sh` 289 行、
+      `lib/` 7 个文件齐全；进程树 7 个 shell（重生循环 + 主体 + 5 监视子壳，无孤儿）；
+      日志 `not found`/`syntax error`/`No such file`/`Permission denied` 零命中；
+      `system_server stylus hooks installed` 在；笔 `link_connected=1 battery=100 oem_control_ready=1`；
+      `action.sh status` 面板渲染正常。
+- [x] **部署踩坑留档**：`ksud module install` 是「暂存 + 重启生效」两步 —— 装完立刻看
+      `/data/adb/modules/<id>/` **仍是旧版**（只有 `module.prop` 被改写 + 一个 0 字节 `update` 标记，
+      新构建新增的 `lib/` 在那里根本不存在）。判据应看 `/data/adb/modules_update/<id>/`。
+      另：本机 shell 是 zsh，不做无引号变量分词，`S="-s <serial>"; adb $S shell` 会报
+      误导性的 `adb: -s requires an argument`，需显式写全或用 zsh 数组。
+
+## v0.1.23 减法重构（2026-09-21 深夜）：深睡唤醒能力整段下线
+
+- [x] **决策**：不再尝试让深睡笔自动唤醒 —— **原厂固件本身就没这个能力**（v0.1.17 取证已证
+      「充满断电 → 笔深休眠 → 重新吸附唤醒」是官方完整行为链）。我们是在给不存在的能力补补丁。
+- [x] **当晚三层实测（结论写进 service.sh 的「深睡唤醒守护：已整段移除」注释块）**：
+      1. **Profile/GATT 层 —— 无效**。`run_hidctl disconnect`（`setConnectionPolicy(FORBIDDEN)`）
+         23:04 实测 HOGP 2→0 但 ACL handle 仍是 0x0002；OEM `DISCONNECT_PENCIL` 23:16 实测只有
+         `LE HID Closed` + `ACL Ignore connection from`。根因：笔的 ACL 上挂着 5 个持有者，其中
+         `hid(49)`/`BatteryService(59)` 属 `com.android.bluetooth` 内部系统 profile，App 层无从释放
+         ⇒ ACL 永不断开，笔固件感知不到"链路没了"所以不醒。
+      2. **单条 ACL 层 —— 本机硬件不可达**。本板 QTI 用户态 H4 架构，HAL
+         （`android.hardware.bluetooth@aidl-service-qti`）独占 `/dev/ttyHS0`，kernel 未注册 hci 设备
+         （无 `/dev/hci*`、无 AF_BLUETOOTH HCI socket、无 hcitool/hciconfig/btmon、无 python）。
+         强写 ttyHS0 会打乱 HAL 的 H4 帧同步，比整机重启蓝牙更糟，**故未实施**。
+      3. **整片蓝牙适配器 —— 有效但全局**。23:20 实测 `svc bluetooth disable/enable` 后 ACL handle
+         0x0002→0x0001（真断真建），笔完全恢复（用户确认书写/震动/按键回来）。代价是连累平板上
+         **所有**蓝牙设备闪断，拿不到"只重连笔"的效果 ⇒ 代价与收益不成比例。
+- [x] **删除范围**：
+      - KernelSU：`service.sh` 中 `do_pen_wake_cycle` / `run_wake_guard_once` / `monitor_wake_guard` /
+        `verify_pen_awake` / `pen_undock_age` / `resolve_pen_input_node` / `pen_input_silent` /
+        `trigger_haptic_refresh` / `run_hidctl` / `hidctl_result_file` /
+        `grant_hidctl_bluetooth_permissions` / `hide_hidctl_launcher` / `retry_hidctl_setup`，
+        连同 WAKE_* 变量与 penhidctl 三个常量；`action.sh` 的 `wake`/`wake-guard-on`/`wake-guard-off`；
+        `customize.sh` 的 penhidctl 安装分支；`build_root.py` 白名单两行。**service.sh 1940 → 1466 行。**
+      - priv-app：`penhidctl/` 源码目录、`tools/build_penhid.py`、`module/system/priv-app/aclpenhid/`、
+        `privapp-permissions-com.aclaniakea.penhidctl.xml` 全部移除；`scripts/push_to_device.sh` 去掉该产物。
+      - Hook：`PenBridgeConstants` 的 `HAPTIC_REFRESH(_LEGACY)`、`SystemStylusHooks.registerHapticRefresh`
+        及其接收器与 ready 标志、`PenHapticGatt.refreshSession`/`replayHandshake`/`pendingRefresh`/
+        `CONNECTED_WAVEFORM` 与回调里的消费分支。
+- [x] **保留**（不属于深睡唤醒，属正常链路管理）：`real_bt_connected`/`bt_stack_hogp_live`、
+      吸附边沿的 `request_pen_connect`、用户在设置页点断开的 `request_pen_disconnect` 与
+      `monitor_hid_latch`、状态镜像、磁吸胶囊、电量与充电监控、boot guard、panic、inkdye 切换。
+      ⚠️ `request_pen_connect_bounded` 原本只是"HID 重试"包装，删 HID 后已无意义 → 一并删除，
+      `monitor_hid_latch` 的调用点改回 `request_pen_connect`。
+- [x] **实机重启验证通过**：模块 0.1.23 + Hook 4.8.0；`system_server stylus hooks installed`（00:01:57，
+      pid 2305 内 338 条本方日志）；penhidctl 已卸载且 overlay 目录消失；模块目录无 wake 状态文件；
+      service.sh 进程从 8 个降到 7 个（少一个 `monitor_wake_guard`）；启动日志无报错。
+- [x] **作用域清理**：设备 scope 表里有一条历史遗留的 `android/0`（实际 9 条 vs 真源 8 条）。
+      UI 里看到的「Android System」对应包名 `android`，而 system_server 的 Xposed 伪包名是
+      `system`（一直在表里、一直在生效）。用 `scope rm` 外科式删除，回读 8/8 与
+      `hook/source/resources/META-INF/xposed/scope.list` 逐条一致。
+      ⚠️ **踩坑：`vector-cli scope ls` 的参数是模块包名，不是被 Hook 的包名** ——
+      传 `system`/`android` 都返回 `No records found.`，极易误判为作用域丢失。
+- [ ] **待用户实写确认**：笔的书写/震动/按键在正常场景（非深睡）下均可用。
+
 ## v0.1.17 减法重构（2026-09-21）：移除官方系统没有的逻辑
 - [x] **依据**：`docs/pen_official_rom_verdict_20260921.md` 五层取证（.ko/dtbo/HAL/官方笔框架/笔固件）证明
       「充满断电 → 笔深休眠 → 重新吸附唤醒」是官方驱动+笔固件的完整行为链，官方系统层
@@ -20,7 +101,8 @@
       7. uninstall/panic/post-fs-data 中的 `tx_status` 写入与守护 pid 清理；action.sh 的守护启停/日志段；
          customize.sh 的对应 ui_print 与 set_perm；build_root.py 白名单两行。
 - [x] **保留**（移植桥接必需 / 官方行为等价物）：开机与吸附边沿 `CONNECT_PENCIL`、设置页断开/连接对账、
-      磁吸胶囊、电量/充电/Hall/蓝牙状态镜像（**只读**，喂 ColorOS UI）、PenHidCtl priv-app、Hook、
+      磁吸胶囊、电量/充电/Hall/蓝牙状态镜像（**只读**，喂 ColorOS UI）、Hook、
+      ~~PenHidCtl priv-app~~（**已于 v0.1.23 随唤醒一同下线**）、
       keylayout overlay、boot guard、panic、inkdye 切换、note engine 钉版守卫（移植崩溃修复，非笔电源逻辑）。
 - [x] service.sh 2163 → 1513 行；版本 0.1.17 / 117；zip `releases/tb522fu-pen-bridge-v0.1.17.zip`
       （md5 786933fa194eb7a667cb98c792a81bf8）。

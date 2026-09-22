@@ -5,9 +5,7 @@ ui_print "- 开机按已绑定手写笔地址直接调用原厂 CoreService BLE 
 ui_print "- 设置页断开同时执行原厂 CoreService、GATT/HID 实际断开"
 ui_print "- 统一 Hall/CPS/BLE 硬件充电状态与 ColorOS 设置页热切换"
 ui_print "- 已移除自定义 CPS 内核模块，避免异常重启"
-ui_print "- 自定义 HID 实际断开/连接与真实 Hall 磁吸弹窗"
-ui_print "- HID 控制器仅通过后台服务调用，无桌面启动器图标"
-ui_print "- 启动后授予 HID 服务 Bluetooth Connect/Scan 运行时权限"
+ui_print "- 真实 Hall 磁吸弹窗由本模块直接驱动"
 ui_print "- 磁吸仅控制弹窗与充电状态显示，蓝牙连接不依赖 Hall"
 ui_print "- 支持切换到其他已绑定蓝牙地址的手写笔"
 ui_print "- 设备空间手写笔存在状态仅跟随真实蓝牙连接"
@@ -22,19 +20,8 @@ ui_print "- 切换指令：sh action.sh enable|disable|toggle（默认 disable�
 ui_print "- 启动自保：连续 3 次开机失败将自动停用本模块"
 ui_print "- 一键救援：sh panic.sh（恢复状态并停用模块）"
 ui_print "- 卸载本模块会无条件恢复 inkdye，并自动卸载配套 Hook APK"
-ui_print "- 唤醒守护默认开启：深睡笔离座自动做一次 BLE 重连唤醒并重放震动握手"
-ui_print "- 关闭唤醒守护：KSU/Magisk 管理器「执行」按钮 → sh action.sh wake-guard-off"
-
-# --- 唤醒守护默认开启（v0.1.19）------------------------------------------
-# 深睡笔离座后自动做一次 BLE link-down -> link-up，唤醒笔的触控子系统，并重放
-# inkdye 震动握手。这是"dock 充到满电 -> 笔深睡 -> 拿下来写不出"的唯一软件解
-# （docs/pen_wake_experiment_E0_E4_20260921.md §3/§3b）。
-# 开关语义：`pen-wake-guard.state` **存在 = 开启**（action.sh wake-guard-on/off
-# 维护）。这里装一次即等于用户选择开启；之后 `action.sh wake-guard-off` 把它删掉
-# 就是持久关闭——只有重装模块才会回到默认开启。
-# v0.1.18 起该功能存在但**默认关闭**，而 v0.1.17 又删掉了原先的无条件硬重连，
-# 结果"睡死笔"场景在默认安装下完全无人接管。默认打开以免再次出现这种静默失效。
-touch "$MODPATH/pen-wake-guard.state"
+ui_print "- 睡死的笔请重新吸附一次：官方固件自身就是这样唤醒的（v0.1.23 起"
+ui_print "  不再尝试软件唤醒，见 service.sh「深睡唤醒守护：已整段移除」）"
 
 # Clean legacy paths
 rm -rf "$MODPATH/system/priv-app/lenovopenbridge" \
@@ -53,31 +40,12 @@ if [ -f "$MODPATH/hook/PenBridge-Hook.apk" ]; then
     fi
 fi
 
-# 注意目录名是 aclpenhid（历史上曾误写 penhidctl，导致下面的存在性检查永远
-# 为假、提示静默缺失——APK 本身由 build_root.py 的 INCLUDE 白名单打包，不受影响）。
-HIDCTL_APK="$MODPATH/system/priv-app/aclpenhid/PenHidCtl.apk"
-if [ -f "$HIDCTL_APK" ]; then
-    # Keep this APK in the module's priv-app overlay. Installing it with
-    # `pm install` here would turn it into /data/app and lose the privileged
-    # Bluetooth Host permissions before the next boot package scan.
-    ui_print "- HID 实际连接控制器已写入 priv-app，将随系统启动加载"
-    # --- overlay 更新陷阱与 /data 更新路径（v0.1.22 实测）--------------------
-    # 仅更新 overlay 里的 APK 有一个坑：PMS 对 /system 应用按"文件 mtime 是否
-    # 变化"决定要不要重扫，而 KSU 呈现给 /system 的 mtime 与 packages.xml 里
-    # 缓存的时间戳可能逐秒相同 → 重启后 PMS 仍跑旧版（实测 4.1.3 压着 4.1.4）。
-    # 若 PMS 已认识这个包（覆盖安装场景），用 `pm install -r` 装成
-    # UPDATED_SYSTEM_APP：立即可见、保留 PRIVILEGED 与 privapp 白名单授权
-    # （实测 BLUETOOTH_PRIVILEGED granted=true），还顺带绕开 overlay 对
-    # App 进程 mount namespace 不可见的历史崩溃（docs N1）。全新安装场景
-    # （PMS 还不认识该包）不做 pm install——那会变成非特权的 /data 应用。
-    if [ -n "$(pm path com.aclaniakea.penhidctl 2>/dev/null)" ]; then
-        if pm install -r "$HIDCTL_APK" >/dev/null 2>&1; then
-            ui_print "- HID 控制器已作为系统应用更新即时生效"
-        else
-            ui_print "! HID 控制器 pm install 失败，退回随下次重启的 overlay 扫描"
-        fi
-    fi
-fi
+# Clean stale PenHidCtl state left by older builds. v0.1.23 removed the
+# deep-sleep wake guard together with its helper priv-app.
+rm -rf "$MODPATH/system/priv-app/aclpenhid" 2>/dev/null
+rm -f "$MODPATH/system/etc/permissions/privapp-permissions-com.aclaniakea.penhidctl.xml" 2>/dev/null
+rm -f "$MODPATH/pen-wake-guard.state" "$MODPATH/pen-wake-arm.state" \
+      "$MODPATH/pen-wake.last" "$MODPATH/pen-wake-now" 2>/dev/null
 
 set_perm_recursive "$MODPATH" 0 0 0755 0644
 set_perm "$MODPATH/service.sh" 0 0 0755

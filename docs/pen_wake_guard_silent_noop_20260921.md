@@ -523,3 +523,69 @@ Vector 作用域 8/8（含 `system`）、进程树 1 循环 + 1 主体 + 6 监�
 2. **`trusted=false` 期间（22:40 样本）**：离座后 Hall trust 标志为假，属正常离座形态，
    唤醒守护的 cooldown 判定正常工作。
 3. WAKE_QUIET_SECONDS=6 的标定问题（§12.5）不变，仍等对照组数据。
+
+---
+
+## 14. 第六种静默失败：唤醒循环自锁（闩锁竞态，2026-09-21 22:39 生产样本）
+
+### 14.1 症状
+
+用户拿一支**睡死**的笔，从 dock 取下、解锁后，**完全无响应**——不能书写、
+不能震动、按键无响应。日志显示唤醒守护**确实触发了**、断链也成功了，但最后
+CONNECT 被静默拦截。
+
+### 14.2 完整时间线（22:36 开机 → 22:43）
+
+| 时刻 | 事件 | 问题 |
+|---|---|---|
+| 22:36:07 | 开机，笔在 dock（`docked=1 connected=1`） | 正常 |
+| 22:36:32 | 锁屏态，`CONNECT_PENCIL` 失败 `unlocked=0` | 已知限制 |
+| 22:39:46 | **笔取下**（`docked=0`），蓝牙已断（`connected=0`） | 睡死形态 b |
+| 22:39:47 | 唤醒守护触发，`do_pen_wake_cycle` 开始 | ✓ 正确启动 |
+| 22:39:48-49 | `DISCONNECT_PENCIL` → `HID disconnect ok` | 正常 |
+| 22:39:50 | `link was already down`，清闩锁，hold 5s | 正常 |
+| 22:39:53-54 | **又一次** `DISCONNECT_PENCIL` → `HID disconnect ok` | ⚠️ 重复断开 |
+| 22:39:55 | **`pen connect skipped: Settings disconnect latch is set`** | ❌ **致命拦截** |
+| 22:40:13 | 笔放回 dock，`docked=1`，链路才恢复 | 靠重新吸附才恢复 |
+
+### 14.3 根因：断链动作的副作用自锁
+
+`do_pen_wake_cycle` 断链原本调 `request_pen_disconnect()`，它 = OEM
+`DISCONNECT_PENCIL` action + `run_hidctl disconnect`。而 **OEM action 会通过
+Hook（`IpeManagerHooks.onStartCommand`，第 120-121 行）把
+`lenovo_pen_disconnect_requested=1`、`lenovo_pen_user_disconnect_requested=1`**。
+
+随后 `do_pen_wake_cycle` 用 `settings put ... 0` 清闩锁，但 **`am startservice`
+是异步投递**——`onStartCommand` 钩子常在 service.sh 清闩锁**之后**才执行，把
+闩锁写回 1。于是后续的 `request_pen_connect`（内部检查闩锁=0 才放行）被**自己
+刚设下的闩锁**拦截，静默返回。
+
+连环效应：`monitor_hid_latch`（监视 `lenovo_pen_disconnect_requested` 边沿）看到
+第一次断链置的闩锁 1，又触发第二次 `request_pen_disconnect`（22:39:53），再次置
+闩锁——形成"断开→置锁→再断开→再置锁"的自锁循环，CONNECT 永远没机会执行。
+
+本质：**唤醒循环用「会置闩锁」的 OEM 断链动作断链，又用「要求闩锁=0」的同名
+闩锁放行连接，两个副作用在异步投递下必然竞态。**
+
+### 14.4 修复
+
+`do_pen_wake_cycle` 断链从 `request_pen_disconnect` 改为 **`run_hidctl disconnect`**
+（纯 `setConnectionPolicy(FORBIDDEN)`，实测 HOGP 2→0 立即踢链，**不碰闩锁**）：
+
+- 从源头消除「唤醒循环置闩锁」这一副作用；
+- `monitor_hid_latch` 不再看到闩锁边沿，不会触发第二次断开；
+- `request_pen_connect` 不再被自己设的闩锁拦截。
+
+同时修正过时日志文案 `link did not come back within 8s` → `${WAKE_LINK_BACK_SECONDS}s`
+（实际窗口是 25）。
+
+### 14.5 实机验证（23:01，手动 wake 对照）
+
+| 阶段 | 修复前（22:39） | 修复后（23:01） |
+|---|---|---|
+| 断链 | `OEM DISCONNECT_PENCIL requested`（置闩锁） | `HID disconnect ok`（`run_hidctl disconnect`，无 OEM action） |
+| 二次断开 | `OEM DISCONNECT_PENCIL requested`（monitor_hid_latch 边沿触发） | **无**（不置闩锁，无边沿） |
+| CONNECT | `pen connect skipped: Settings disconnect latch is set`（被拦） | `OEM CONNECT_PENCIL requested` → `HID connect ok` |
+| 结果 | 连不上，靠重新吸附恢复 | `link restored after 0s; replaying haptic handshake` 完整闭环 |
+
+真实睡死笔场景（息屏后取笔）仍需用户下次实际操作确认；代码层竞态已消除。

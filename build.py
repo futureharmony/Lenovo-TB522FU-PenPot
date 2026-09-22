@@ -337,7 +337,7 @@ def main() -> None:
     # Step 5: Push to device (optional)
     # Delegate to scripts/push_to_device.sh instead of pushing here: that script
     # owns the destination (/sdcard/Download/tb522fu-pen-bridge/), pushes the
-    # per-file .md5.txt sidecars and the PenHidCtl APK too. Keeping a second
+    # per-file .md5.txt sidecars. Keeping a second
     # push implementation here meant two destinations and no checksums.
     if args.push:
         if not (online and adb):

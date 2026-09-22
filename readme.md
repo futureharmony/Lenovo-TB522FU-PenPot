@@ -5,14 +5,31 @@
 ## 结构
 
 ```
-module/       KernelSU/Magisk Root 模块（含 charge-guard 充电守护）
+module/       KernelSU/Magisk Root 模块
+  service.sh    主入口（约 290 行）：配置区 → 加载 lib → 生命周期编排
+  lib/          按职责拆分的库，纯函数定义，由 service.sh 以 `.` 加载
+                core       日志 / settings 读写 / 不 fork 的等待
+                pen_id     笔 MAC 规范化与绑定记录发现
+                pen_hw     Hall / 电量 / 充电 / CPS 只读真值
+                pen_link   OEM 连接动作与链路真值判据
+                pen_ui     状态镜像与磁吸胶囊发布
+                boot       启动期需重试到确认生效的动作
+                monitors   五条常驻监视循环（永不返回，由主文件 & 启动）
+  bin/penlog.sh 日志裁剪 helper（条数 + 字节双上限，同 inode 就地回写）
+  action.sh     管理器「执行」按钮的控制台（状态 / 日志 / 开关）
+  customize.sh  安装时动作（inkdye / Hook APK / 权限 / 旧路径清理）
 hook/         Xposed Hook 源码（com.futureharmony.lenovopenbridge）
-penhidctl/    priv-app HID 控制器源码
 scripts/      设备侦察/推送辅助脚本
 docs/         分析与验证记录
 fix-module/   显示基线（refresh_rate_config）等的独立 fix 模块
-releases/     构建产物（模块 zip / Hook APK / PenHidCtl APK）
+releases/     构建产物（模块 zip / Hook APK）
 ```
+
+> **改 `service.sh` 前先读这一条**：函数定义全在 `lib/` 下，主文件只负责配置与
+> 调用顺序。`source` 必须早于任何 `monitor_* &` —— 子 shell 在 fork 那一刻复制父
+> 进程的符号表，晚 source 会让监视循环**静默** `command not found`（不报错、不退出，
+> 只是循环体里什么都不发生）。`lib/` 在构建白名单里以**目录**形式声明，新增文件会
+> 自动打包，但手工 `cp` 单文件到设备调试时别忘了 `lib/` 整个目录。
 
 ## 路线与框架事实
 
@@ -165,6 +182,39 @@ tb522fu_pen_bridge`；或 Recovery 里删模块目录。详见
 
 ## 当前状态（2026-09-18 实测）
 
+> **v0.1.24（2026-09-22）：`service.sh` 架构重构（纯结构调整，行为等价）。**
+> 单文件 1464 行按职责拆成 `module/lib/` 七个库，主文件降到 289 行，只保留配置区、
+> 单例锁、加载与调用编排、启动尾巴和历史留档。同一批改动收掉了长期堆积的语法噪音：
+> `log`/`log_err` 51 处、`get_global` 42 处、`put_global` 38 处、`put_global_diff`
+> 3 处读-比-写 —— 原先这些管道与重定向在业务判断里占了大量视觉空间。
+> **等价性对账**：settings 键 24 个、`am broadcast` action 3 个、45 个函数定义
+> 与重构前逐条一致，无丢失、无重复定义；`sh -n` 单文件与合并校验双通过。
+> 构建侧顺带把 `lib/` 改成**目录形式**声明进白名单，以后新增库文件自动打包，
+> 杜绝「忘了加白名单 → zip 永久缺文件 → 重装后静默失效」这个老坑。
+>
+> **v0.1.23（2026-09-21 深夜）：深睡唤醒能力整段下线，代码回简。**
+> 不再尝试把深睡的笔用软件叫醒 —— 这是**原厂固件本身就没实现**的能力，官方语义
+> 就是「充满断电 → 笔深休眠 → 重新吸附唤醒」。当晚的三层实测结论（保留在
+> `module/service.sh` 的「深睡唤醒守护：已整段移除」注释块里）：
+> ① **Profile/GATT 层无效**：`run_hidctl disconnect` 与 OEM `DISCONNECT_PENCIL` 都只让
+>    HOGP 掉到 0，**ACL handle 始终没变**（23:04/23:16 实测）。根因是 ACL 上的 5 个
+>    持有者里 `hid(49)`/`BatteryService(59)` 属于 `com.android.bluetooth` 内部，
+>    App 层无从释放 ⇒ 笔固件感知不到"链路没了"，不醒；
+> ② **单条 ACL 断开在这台机器上硬件不可达**：本板是 QTI 用户态 H4 架构，HAL 独占
+>    `/dev/ttyHS0`，kernel 未注册 hci 设备（无 `/dev/hci*`、无 hcitool/hciconfig），
+>    强写该 tty 只会打乱 HAL 的 H4 帧同步；
+> ③ **只有重启整片蓝牙有效**（23:20 实测 ACL handle 换号、笔恢复），但它是全局 API，
+>    连累平板上所有蓝牙设备 —— 拿不到"只重连笔"，代价与收益不成比例。
+> **删除范围**：KernelSU 侧唤醒守护全套函数与变量、priv-app `PenHidCtl`（源码与
+> 装载物全部移除）、Hook 侧的 `HAPTIC_REFRESH` 握手重放环路。`service.sh` 由
+> 1940 行降到 1466 行。**保留**：吸附边沿连接、设置页断开、状态镜像、磁吸胶囊、
+> 电量与充电监控等正常链路管理一律不动。
+> 睡死的笔 → **重新吸附一次**。模块已实机重启验证（0.1.23 + Hook 4.8.0，
+> `system_server stylus hooks installed` 判据在，作用域 8/8 与真源一致）。
+>
+> ~~**v0.1.22（2026-09-21）：锁屏期唤醒通路打通**~~ **【已被 v0.1.23 废弃】**
+> 以下 v0.1.19–v0.1.22 的唤醒相关工作随本次减法下线，仅作历史决策留档。
+>
 > **v0.1.22（2026-09-21）**：**锁屏期唤醒通路打通** —— 自研 priv-app `PenHidCtl`
 > 的 `PenHidService` 标上 `directBootAware`，锁屏（user 0 RUNNING_LOCKED）期 PMS
 > 不再过滤它，唤醒守护的断/连不再依赖原厂 CoreService（非 DBA，锁屏期 `am` 必

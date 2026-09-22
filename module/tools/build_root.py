@@ -24,12 +24,36 @@ INCLUDE = (
     "post-fs-data.sh",
     "service.sh",
     "guard_note_engine.sh",
+    # 目录条目：构建时自动展开为目录下所有 *.sh（按文件名排序）。
+    # service.sh 通过 `. "$MODDIR/lib/x.sh"` 加载这些文件；把它们做成目录
+    # 而不是逐个列举，是因为「新增 lib 文件却忘了加白名单」是一个不会报错
+    # 的失效 —— 手工 cp 到设备时一切正常，但 zip 里永久缺该文件，直到下次
+    # 重装模块才以 command not found 的形式暴露。
+    "lib",
     "engine/libSuniaEngine.16.7.2.fixed.so",
-    "system/etc/permissions/privapp-permissions-com.aclaniakea.penhidctl.xml",
-    "system/priv-app/aclpenhid/PenHidCtl.apk",
     "system/usr/keylayout/Vendor_17ef_Product_622e.kl",
     "uninstall.sh",
 )
+
+
+def expand_includes(module_dir: Path) -> list[str]:
+    """把 INCLUDE 里的目录条目展开成具体的文件清单。
+
+    目录只收直系 *.sh（跳过隐藏文件与子目录），排序保证 zip 条目顺序稳定 ——
+    否则同样的源码在不同文件系统上会产出内容相同但顺序不同的 zip。
+    """
+    names: list[str] = []
+    for name in INCLUDE:
+        path = module_dir / name
+        if path.is_dir():
+            names.extend(
+                f"{name}/{child.name}"
+                for child in sorted(path.iterdir(), key=lambda p: p.name)
+                if child.is_file() and child.suffix == ".sh" and not child.name.startswith(".")
+            )
+        else:
+            names.append(name)
+    return names
 
 def find_latest_hook_apk(repo: Path) -> Path:
     """Newest Hook APK by VERSION order.
@@ -45,13 +69,14 @@ def find_latest_hook_apk(repo: Path) -> Path:
 
 def build(module_dir: Path, output: Path) -> None:
     repo = module_dir.parents[0]  # tb522fu-pen-port layout: module/ at repo root
-    missing = [name for name in INCLUDE if not (module_dir / name).is_file()]
+    includes = expand_includes(module_dir)
+    missing = [name for name in includes if not (module_dir / name).is_file()]
     hook_apk = find_latest_hook_apk(repo)
     if missing:
         raise FileNotFoundError("missing module files: " + ", ".join(missing))
     output.parent.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        for name in INCLUDE:
+        for name in includes:
             path = module_dir / name
             info = zipfile.ZipInfo(name)
             info.compress_type = zipfile.ZIP_DEFLATED

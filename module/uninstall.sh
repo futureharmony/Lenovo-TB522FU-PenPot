@@ -16,8 +16,10 @@ INKDYE_PKG=com.inkdye.lenovopentocoloros
 pm enable "$INKDYE_PKG" >/dev/null 2>&1 || \
     echo "WARN: failed to re-enable $INKDYE_PKG; run manually: pm enable $INKDYE_PKG" >&2
 rm -f "$MODDIR/inkdye-enabled.state" "$MODDIR/inkdye-disabled.state"
+# v0.1.23 起深睡唤醒守护已删除，卸载时清掉历史遗留的状态文件即可。
 rm -f "$MODDIR/pen-wake-guard.state" "$MODDIR/pen-wake-arm.state" \
-      "$MODDIR/pen-wake.last" "$MODDIR/pen-wake-now" 2>/dev/null
+      "$MODDIR/pen-wake.last" "$MODDIR/pen-wake-now" \
+      "$MODDIR/pen-hid-permissions.ready" "$MODDIR/pen-hid-launcher.hidden" 2>/dev/null
 
 # --- 清掉自保状态：失败计数与 disable 标记 ---
 # 否则重新安装时会带着旧的失败计数，可能一开机就被 boot guard 熔断。
@@ -28,7 +30,7 @@ rm -f "$MODDIR/disable" 2>/dev/null
 pm uninstall com.futureharmony.lenovopenbridge >/dev/null 2>&1
 pm uninstall com.aclaniakea.lenovopenbridge >/dev/null 2>&1
 
-# --- 移除 HID 控制器（含 /data 上的 UPDATED_SYSTEM_APP 更新层）---
-# v0.1.22 起 penhidctl 的更新走 `pm install -r`，会在 /data 留一层更新；
-# 模块卸载后 overlay 消失，若不卸包，PMS 会指向已不存在的 priv-app 路径。
+# --- 移除 HID 控制器 PenHidCtl（随 v0.1.23 深睡唤醒一起下线）---
+# 该包可能以 priv-app overlay 或 `pm install -r` 的 UPDATED_SYSTEM_APP 形式存在，
+# 两处都要卸，否则 PMS 会指向已不存在的 priv-app 路径。
 pm uninstall com.aclaniakea.penhidctl >/dev/null 2>&1

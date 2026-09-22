@@ -49,7 +49,6 @@ final class SystemStylusHooks {
     private static boolean hallReadFailed;
     private static boolean hallObserverRegistered;
     private static boolean hapticControlReady;
-    private static boolean hapticRefreshReady;
     private static boolean hidConnectPending;
     private static boolean initialized;
     private static Object inputMonitor;
@@ -948,7 +947,6 @@ final class SystemStylusHooks {
             }
             registerTouchscreen(context);
             registerHapticControl(context);
-            registerHapticRefresh(context);
             registerStateSync(context);
             registerBridgeSettingsWriter(context);
             registerDebugActionRunner(context);
@@ -1949,43 +1947,6 @@ final class SystemStylusHooks {
             }
         } catch (Throwable th) {
             HookUtils.log("touchscreen receiver: " + th);
-        }
-    }
-
-    /* 唤醒守护（root service.sh）的握手重放入口。root 侧无法直接操作 GATT，
-       广播进 system_server 后转交 PenHapticGatt.refreshSession：在存活（或
-       重建后）的传输上重放 inkdye 握手。与 registerHapticControl 同款注册
-       形态（RECEIVER_EXPORTED，root am broadcast 可达）。 */
-    private static synchronized void registerHapticRefresh(final Context context) {
-        if (hapticRefreshReady) {
-            return;
-        }
-        try {
-            BroadcastReceiver broadcastReceiver = new BroadcastReceiver() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks.9
-                @Override // android.content.BroadcastReceiver
-                public void onReceive(Context context2, Intent intent) {
-                    if (intent == null || (!PenBridgeConstants.HAPTIC_REFRESH.equals(intent.getAction())
-                            && !PenBridgeConstants.HAPTIC_REFRESH_LEGACY.equals(intent.getAction()))) {
-                        return;
-                    }
-                    try {
-                        PenHapticGatt.refreshSession(context, HookUtils.state(context).address);
-                        HookUtils.log("haptic session refresh: inkdye handshake replay requested (post-wake)");
-                    } catch (Throwable th) {
-                        HookUtils.log("haptic session refresh: " + th);
-                    }
-                }
-            };
-            IntentFilter intentFilter = new IntentFilter(PenBridgeConstants.HAPTIC_REFRESH);
-            intentFilter.addAction(PenBridgeConstants.HAPTIC_REFRESH_LEGACY);
-            if (Build.VERSION.SDK_INT >= 33) {
-                context.registerReceiver(broadcastReceiver, intentFilter, 2);
-            } else {
-                context.registerReceiver(broadcastReceiver, intentFilter);
-            }
-            hapticRefreshReady = true;
-        } catch (Throwable th) {
-            HookUtils.log("haptic refresh receiver: " + th);
         }
     }
 

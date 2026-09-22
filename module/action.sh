@@ -199,33 +199,6 @@ case "$1" in
         do_soft_reboot
         exit 0
         ;;
-    wake|wake-pen)
-        # 手动唤醒：断链 -> 确认断 -> 失连 3s -> 重连 -> 握手重放。
-        # 实际执行体在 service.sh 的 monitor_wake_guard（touch 触发文件即可，
-        # 不重复实现，两条入口走同一条代码路径）。
-        touch "$MODDIR/pen-wake-now" 2>/dev/null
-        echo ""
-        echo "【唤醒请求已发出】断链→重连→握手重放约需 10 秒"
-        echo "  结果查看: sh $0 log （搜 wake guard）"
-        echo ""
-        exit 0
-        ;;
-    wake-guard-on)
-        touch "$MODDIR/pen-wake-guard.state" 2>/dev/null
-        echo ""
-        echo "【唤醒守护已开启】(v0.1.19 起安装即默认开启)"
-        echo "  行为: 离座后链路在线但笔 ${WAKE_QUIET_SECONDS:-6}s 无输入 → 自动断链重连唤醒"
-        echo "  说明: 每次吸附会话最多尝试一轮; 重连后自动重放震动握手"
-        echo ""
-        exit 0
-        ;;
-    wake-guard-off)
-        rm -f "$MODDIR/pen-wake-guard.state" "$MODDIR/pen-wake-arm.state" 2>/dev/null
-        echo ""
-        echo "【唤醒守护已关闭】恢复官方行为: 深睡笔取下需重新吸附唤醒"
-        echo ""
-        exit 0
-        ;;
     log|logs)
         do_logs
         exit 0
@@ -340,9 +313,9 @@ echo "【快捷操作说明】"
 echo "  • 只看日志     : sh $0 log (本页尾部即最近日志，也可只看日志段)"
 echo "  • 裁剪日志     : sh $0 clearlogs (保留最近 5 行，不删文件)"
 echo "  • 切换启用/禁用 : sh $0 toggle (免重启即刻生效)"
-echo "  • 快速软重启   : sh $0 reboot (约5秒重载系统框架)"
-echo "  • 手动唤醒笔   : sh $0 wake (断链重连+握手重放，约10秒)"
-echo "  • 唤醒守护开关 : sh $0 wake-guard-on / wake-guard-off (默认开启)"
+  echo "  • 快速软重启   : sh $0 reboot (约5秒重载系统框架)"
+  echo "  • 睡死的笔     : 重新吸附一次即可恢复（官方固件自身的唤醒方式；"
+  echo "                   v0.1.23 起本模块不再尝试软件唤醒）"
 echo "  • 手势热配置   : 设置 -> 设备空间 -> 触控笔卡片"
 echo "=============================================="
 echo ""
