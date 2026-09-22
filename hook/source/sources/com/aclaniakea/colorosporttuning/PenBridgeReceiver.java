@@ -17,6 +17,10 @@ public final class PenBridgeReceiver extends BroadcastReceiver {
     static final String ACTION_HAPTIC_TRANSPORT_LEGACY = PenBridgeConstants.HAPTIC_TRANSPORT_LEGACY;
     private static volatile long lastBondedAt = 0;
     private static volatile String lastBondedMac = "";
+    // 2026-09-22：ColorOS 状态广播去重（见 broadcastColorOs 内的说明）。
+    private static volatile String lastStateSignature = "";
+    private static volatile long lastStateSignatureAt = 0L;
+    private static final long STATE_BROADCAST_MIN_INTERVAL_MS = 1500L;
 
     static void dispatch(Context context, Intent intent) {
         new PenBridgeReceiver().onReceive(context, intent);
@@ -319,9 +323,22 @@ public final class PenBridgeReceiver extends BroadcastReceiver {
             intent3.putExtra("source", str);
             intent3.putExtra("hardware_battery", zHardwareBattery);
             intent3.putExtra("hardware_identity_known", penState.address != null && penState.address.matches("(?i)([0-9a-f]{2}:){5}[0-9a-f]{2}"));
-            try {
-                context.sendBroadcast(new Intent(intent3).setPackage("com.oplus.ipemanager"));
-            } catch (Throwable unused2) {
+            // 2026-09-22：状态没变就别重发。以前每一路事件（含内核 CPS 每 ~0.8 秒
+            // 一条的 PEN_FRAMEWORK uevent）都会重发这条广播，实测 26 秒 264 次
+            // broadcastColorOs；IPeManager 收到就刷设备卡/胶囊，是弹窗风暴的放大器。
+            // 现在同一状态签名 1.5 秒内只发一次（仍会周期性刷新，不会饿死 UI）。
+            String strSignature = penState.connectState() + "|" + penState.battery + "|"
+                    + penState.charging + "|" + (penState.connected ? 1 : 0) + "|" + iPhysicalDocked2;
+            long lNow = SystemClock.uptimeMillis();
+            boolean zSameState = strSignature.equals(lastStateSignature)
+                    && (lNow - lastStateSignatureAt) < STATE_BROADCAST_MIN_INTERVAL_MS;
+            lastStateSignature = strSignature;
+            lastStateSignatureAt = lNow;
+            if (!zSameState) {
+                try {
+                    context.sendBroadcast(new Intent(intent3).setPackage("com.oplus.ipemanager"));
+                } catch (Throwable unused2) {
+                }
             }
         }
         try {

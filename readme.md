@@ -182,6 +182,17 @@ tb522fu_pen_bridge`；或 Recovery 里删模块目录。详见
 
 ## 当前状态（2026-09-18 实测）
 
+> **v0.1.25（2026-09-22）：根除磁吸充电胶囊广播风暴 + 状态键对账自愈。**
+> 三条补丁合力掐掉「笔一吸附就无限弹充电提示 / 吸附后仍一直弹」的反馈回路：
+> ① `HookUtils.setPhysicalDocked` 与 `markOemCharging`/`clearOemCharging` 改为**只在值真变化时写**
+>    `Settings.Global` —— `putInt` 即使值没变也会通知 `ContentObserver`，正是自持回路的燃料；
+> ② `PenBridgeReceiver.broadcastColorOs` 对 ColorOS 状态广播做**去重限流**（同一状态签名 1.5s 内只发一次），
+>    实测把 26s/264 次广播压到正常周期刷新；
+> ③ `SystemStylusHooks.showDockCapsule` 最后一道闸：**同一磁吸边沿 6 秒内只允许自动弹一次**。
+> 另补 `monitors.sh` 每 5s 与原始 Hall 对账 `lenovo_pen_physical_docked`，自愈外部写者写歪的死值
+> （实测事故：hall=0 而该键卡在 1，笔 UI 长期显示「吸附/充电」）。
+> 实测：胶囊弹出 26s 内由 **19 次降到 1 次**。正常场景书写已确认可用（见 TODO.md）。
+>
 > **v0.1.24（2026-09-22）：`service.sh` 架构重构（纯结构调整，行为等价）。**
 > 单文件 1464 行按职责拆成 `module/lib/` 七个库，主文件降到 289 行，只保留配置区、
 > 单例锁、加载与调用编排、启动尾巴和历史留档。同一批改动收掉了长期堆积的语法噪音：
