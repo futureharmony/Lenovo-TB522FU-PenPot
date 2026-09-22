@@ -198,12 +198,37 @@ monitor_hall_capsule() {
     candidate=-1
     samples=0
     boot_cycle=1
+    reconcile_ticks=0
     last=$(cat "$HALL_STATE_FILE" 2>/dev/null | tr -d '\r')
     case "$last" in 0|1) ;; *) last=-1 ;; esac
     while [ ! -e "$CPS_DISABLED" ]; do
         state=$(read_hall_state)
         case "$state" in
             0|1)
+                # --- 低频对账（每 5 秒）：镜像被外部写者写歪时自愈 ---
+                # 2026-09-22 实测事故：hall3=1（**未**吸附）而
+                # lenovo_pen_physical_docked 卡在 1，ColorOS 笔 UI 因此长期显示
+                # 「吸附 / 充电」，而模块自己的 pen-hall.state 早已是 0。
+                # 原因：这个键有两个写者，且**各自只在各自触发点写**——
+                #   ① 本文件的 publish_hall_state()（Hall 边沿 / 充电跳变时）
+                #   ② HookUtils.setPhysicalDocked()（Hook 收到 OEM/桥接事件时）
+                # 没有任何一方做对账 ⇒ 一旦某一方在另一方不发布的时刻写歪，
+                # 这个值就**永久歪下去**（实测写入后 30 秒无变化、手改 0 后也不被改回）。
+                # 这里每 5 秒与**原始 Hall** 比对一次并纠正。
+                # 特意只修这一个键：不走 publish_hall_state（那会重刷
+                # ipe_pencil_battery_level，monitor_battery_cache 的注释说明过
+                # 每 10 秒重注入电量会让 IPeManager 清状态并重启 UI/BT 工作），
+                # 也不触发胶囊。
+                reconcile_ticks=$((reconcile_ticks + 1))
+                if [ "$reconcile_ticks" -ge 5 ]; then
+                    reconcile_ticks=0
+                    published=$(get_global lenovo_pen_physical_docked)
+                    case "$published" in 0|1) ;; *) published=-1 ;; esac
+                    if [ "$published" != "$state" ]; then
+                        put_global lenovo_pen_physical_docked "$state"
+                        log "physical_docked reconciled: $published -> $state (raw hall)"
+                    fi
+                fi
                 if [ "$state" = "$candidate" ]; then
                     samples=$((samples + 1))
                 else

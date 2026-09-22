@@ -279,13 +279,24 @@ final class HookUtils {
             return;
         }
         try {
+            int iTarget = z ? 1 : 0;
             int iPhysicalDocked = physicalDocked(context);
-            Settings.Global.putInt(context.getContentResolver(), "lenovo_pen_physical_docked", z ? 1 : 0);
-            if (iPhysicalDocked != (z ? 1 : 0)) {
-                invalidateOemCharging(context);
-                Settings.Global.putInt(context.getContentResolver(), "ipe_pencil_charging_state", 0);
-                setIpePreferenceInt(context, "pencil_sp_charging_state", 0);
+            // 2026-09-22 修复「笔一吸附就无限弹充电胶囊」：
+            // 本键在 system_server 与 com.oplus.ipemanager 两个进程里共有 4 条写入
+            // 路径（publishPhysicalEdge / IpeManagerHooks.handoffColorOsState /
+            // IpeManagerHooks.notifySettingsPage），全都是「读到什么就写回什么」。
+            // Settings.Global.putInt 即使值没变也会通知 ContentObserver，而
+            // SystemStylusHooks.registerHallObserver 一收到通知就跑 applyPenHall()
+            // ——后者会 (1) 弹磁吸胶囊 (2) 重发 ColorOS 广播 (3) 再写一次本键。
+            // 于是形成自持回路：实测 26 秒内 264 次 broadcastColorOs / 124 次
+            // applyPenHall / 19 次胶囊弹出。值没变就没有「变化」可发布。
+            if (iPhysicalDocked == iTarget) {
+                return;
             }
+            Settings.Global.putInt(context.getContentResolver(), "lenovo_pen_physical_docked", iTarget);
+            invalidateOemCharging(context);
+            Settings.Global.putInt(context.getContentResolver(), "ipe_pencil_charging_state", 0);
+            setIpePreferenceInt(context, "pencil_sp_charging_state", 0);
         } catch (Throwable unused) {
         }
     }
@@ -296,13 +307,22 @@ final class HookUtils {
         }
         try {
             int i3 = 1;
-            Settings.Global.putInt(context.getContentResolver(), "lenovo_pen_oem_charge_valid", 1);
-            Settings.Global.putInt(context.getContentResolver(), "lenovo_pen_oem_charge_raw", i & 255);
+            int iRaw = i & 255;
             ContentResolver contentResolver = context.getContentResolver();
             if (i2 == 0) {
                 i3 = 0;
             }
-            Settings.Global.putInt(contentResolver, "lenovo_pen_oem_charge_state", i3);
+            // 2026-09-22：三个键各自只在真变化时写。原先无条件 putInt，即使值没变
+            // 也会给观察者发通知，是「吸附后一直弹胶囊」那条反馈回路的主要燃料。
+            if (Settings.Global.getInt(contentResolver, "lenovo_pen_oem_charge_valid", 0) != 1) {
+                Settings.Global.putInt(contentResolver, "lenovo_pen_oem_charge_valid", 1);
+            }
+            if (Settings.Global.getInt(contentResolver, "lenovo_pen_oem_charge_raw", -1) != iRaw) {
+                Settings.Global.putInt(contentResolver, "lenovo_pen_oem_charge_raw", iRaw);
+            }
+            if (Settings.Global.getInt(contentResolver, "lenovo_pen_oem_charge_state", -1) != i3) {
+                Settings.Global.putInt(contentResolver, "lenovo_pen_oem_charge_state", i3);
+            }
         } catch (Throwable unused) {
         }
     }
@@ -330,8 +350,15 @@ final class HookUtils {
             return;
         }
         try {
-            Settings.Global.putInt(context.getContentResolver(), "lenovo_pen_oem_charge_valid", 0);
-            Settings.Global.putInt(context.getContentResolver(), "ipe_pencil_charging_state", 0);
+            ContentResolver contentResolver = context.getContentResolver();
+            // 2026-09-22：同 markOemCharging —— 只在真变化时写，避免无谓的
+            // Settings 通知（那是胶囊反馈回路的燃料）。
+            if (Settings.Global.getInt(contentResolver, "lenovo_pen_oem_charge_valid", 0) != 0) {
+                Settings.Global.putInt(contentResolver, "lenovo_pen_oem_charge_valid", 0);
+            }
+            if (Settings.Global.getInt(contentResolver, "ipe_pencil_charging_state", -1) != 0) {
+                Settings.Global.putInt(contentResolver, "ipe_pencil_charging_state", 0);
+            }
             setIpePreferenceInt(context, "pencil_sp_charging_state", 0);
         } catch (Throwable unused) {
         }

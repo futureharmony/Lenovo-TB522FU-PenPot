@@ -81,6 +81,13 @@ final class SystemStylusHooks {
     private static Handler pollHandler;
     private static boolean screenOn = true;
     private static int lastPenHall = -1;
+    // 2026-09-22：磁吸胶囊硬限流。胶囊是「吸附边沿」的即时反馈，一个边沿只该弹一次；
+    // 但 applyPenHall() 会被 ContentObserver 反复驱动（见 HookUtils.setPhysicalDocked
+    // 的注释：那是一条约 5Hz 的自持回路），每驱动一次就 showDockCapsule 一次，
+    // 表现成「笔一放上去就一直弹充电提示」。这里做最后一道闸：同一个边沿 6 秒内
+    // 只允许自动弹一次（i>0 是自身重试，不在此限）。
+    private static volatile long lastDockCapsuleAt;
+    private static final long DOCK_CAPSULE_MIN_INTERVAL_MS = 6000L;
     private static int hallCandidate = -1;
     private static final HashSet<Integer> nvtDeviceIds = new HashSet<>();
     private static final Runnable STOP_WRITING = new Runnable() { // from class: com.aclaniakea.colorosporttuning.SystemStylusHooks$$ExternalSyntheticLambda15
@@ -1628,6 +1635,14 @@ final class SystemStylusHooks {
     public static void showDockCapsule(final Context context, final int i) {
         if (lastPenHall != 0) {
             return;
+        }
+        if (i == 0) {
+            long lNow = SystemClock.uptimeMillis();
+            if (lNow - lastDockCapsuleAt < DOCK_CAPSULE_MIN_INTERVAL_MS) {
+                HookUtils.log("magnetic capsule suppressed (rate limit)");
+                return;
+            }
+            lastDockCapsuleAt = lNow;
         }
         int iBatteryForCapsule = HookUtils.batteryForCapsule(context);
         if (iBatteryForCapsule >= 0) {
