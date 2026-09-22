@@ -5,6 +5,15 @@
 > **框架是 Vector（JingMatrix，`zygisk_vector`），不是 LSPosed。** 安装与验证步骤见
 > [`docs/install-vector-route.md`](docs/install-vector-route.md)。
 
+## Bug-fix: xposed_scope 遗漏 `android`（system_server）（2026-09-22）
+
+- [x] **问题**：`arrays.xml` 的 `xposed_scope` 只有 `system`（SystemUI）而**缺少 `android`**
+      （system_server / framework）。LSPosed / Vector 的推荐作用域直接读此数组，用户按推荐
+      勾选后 `system_server` 不会被注入 → `SystemStylusHooks.installAsync()` 整套系统级
+      手写笔 Hook（按键拦截、UEvent 桥、触控条、手势分发等）全部静默失效。
+- [x] **修复**：在 `hook/source/resources/res/values/arrays.xml` 的 `<array name="xposed_scope">`
+      首位加入 `<item>android</item>`。（2026-09-22）
+
 ## v0.1.24 架构重构（2026-09-22）：service.sh 拆库 + 收掉手写重复
 
 - [x] **动机**：v0.1.23 减法后 `service.sh` 仍有 1464 行，且**基础设施全靠手写重复** ——
