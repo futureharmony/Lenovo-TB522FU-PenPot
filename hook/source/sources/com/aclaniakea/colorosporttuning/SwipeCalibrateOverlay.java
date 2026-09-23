@@ -38,10 +38,16 @@ import java.util.List;
  * the gesture — which is indistinguishable from "the feature does not work". The fix cannot be
  * guessed from outside, so the user records one real swipe per direction.</p>
  *
- * <p><b>Never popped implicitly.</b> This surface is opened only by an explicit 「自定义范围」
- * action — either the second page of the first-trigger chooser, or device center → 翻页功能触发方式
- * → app → 自定义「下一页 / 上一页」滑动范围. Picking a strategy runs the stored/default range
- * straight away, so an ordinary page turn is never interrupted by a full-screen window.</p>
+ * <p><b>Never popped implicitly, and never from the device center.</b> This surface is opened only
+ * by an explicit 「自定义滑动范围」 action, and since 2026-09-23 the only such action is on the
+ * second page of the first-trigger chooser (see {@code PageTurnConfig#showRangePage}) — i.e. only
+ * from inside the app being calibrated. The device center's per-app page shows the four strategies
+ * for review / change / clear and nothing else; re-recording from there would capture a trajectory
+ * over the panel instead of the target app, which after the pass-through change below is
+ * meaningless. Picking a strategy runs the stored/default range straight away, so an ordinary page
+ * turn is never interrupted by a full-screen window. (The result card of an already-open recorder
+ * still offers 重新记录 / 恢复默认范围 — that is inside the same recording session, with the target
+ * app still underneath, which is exactly where it belongs.)</p>
  *
  * <p><b>Touch pass-through (2026-09-23, the point of this revision).</b> While recording, the
  * full-screen window carries {@code FLAG_NOT_TOUCHABLE | FLAG_NOT_FOCUSABLE |
