@@ -70,6 +70,50 @@ build-tools 必须 `35.0.0`），`versionName=4.8.6 / versionCode=480006`。
   `adb shell settings delete global lenovo_pen_pageturn_map` 后重新配置一次。
 - 设备中心那栏的布局对齐仍需真机核对（本机无法复现面板渲染）。
 
+## P0.14 轨迹校准改为显式「自定义范围」（Hook 4.8.7，未装机自测）
+
+**需求**（用户 2026-09-23）：
+1. 部分 App 里模拟滑动失效，是因为**默认滑动的起始位置不在可滚动区域内**（评论区上方只剩视频区、
+   分栏布局里只有一栏可滚、固定头图下的轮播……）。需要让用户录一次自己的轨迹，之后该 App 按此回放。
+2. **但校准层不许自动弹**：只有用户主动点「自定义范围」才出现，且 UI 必须与 ColorOS 一致。
+
+**结论（这一版把上一版的「自动弹」整段推翻）**：4.8.1–4.8.6 里选完「垂直 / 水平模拟」会**立刻弹**
+全屏校准层（先看默认范围动画 → 确认执行 / 点自定义记录）。用户否决了这个交互 —— 一次普通翻页不该
+被全屏窗口打断。4.8.7 起：
+
+- **选择策略后直接执行**（有记录用记录，无记录用默认比例路径），`SwipeCalibrateOverlay` 不再被
+  隐式拉起。改动点：`PageTurnConfig.showPrompt()` 的 `onPick` 去掉 `startCalibration(...)` 分支，
+  只剩 `perform(ctx, pkg, next, strategy)`。
+- **唯一入口 = 设备中心 → 翻页功能触发方式 → 某个 App →「自定义「下一页」/「上一页」滑动范围」**
+  （`PageTurnConfig.showChangeDialog`）。该行描述直出当前状态：
+  `当前：默认范围 · 点按后滑一次即可记录` / `当前：自定义 · 向上滑动 · 268ms · 点按可重录`；
+  另有「恢复默认滑动范围」行（两个方向任一有记录时才出现）。
+  面板走 `PAGETURN_CONFIG` 广播 → system_server 用 system uid 开 overlay 窗口（面板自己开不了）。
+- **`SwipeCalibrateOverlay` 重写为「记录 → 结果」两态**（原 `PHASE_PREVIEW` 删除）：
+  初始即 `PHASE_RECORD`；录完落盘转 `PHASE_RESULT`，循环播放刚保存的轨迹供确认，行变为
+  「重新记录 / 恢复默认范围 / 完成」。**完成只关闭，不执行任何翻页** —— 这是设置，不是动作。
+  返回键一律 `finish()`（已保存的照旧保存）。`ACTION_CANCEL` 不再关闭面板，只清点并提示重试。
+- 记录时把**当前生效的范围**用虚线淡线 + 两个空心圈画在底层（`drawReference`），用户能看出自己的新
+  轨迹相对旧范围偏了多少；`dimAmount` 0.45 → **0.30**，好让背后的 App / 面板看得见，便于瞄准起始点。
+- 卡片本体 `setClickable(true)`，避免记录时点到卡片也被算进轨迹。
+- 若校准时的前台不是目标 App（在设备中心里校准的常见情形），卡片多一行提示：
+  「当前不在「XX」内，坐标按屏幕比例记录 —— 请按该应用中可滚动内容的实际位置滑动」。
+  （`awayHint()`，黑名单判定：ipemanager / systemui / launcher / android。）
+- **ColorOS 化**：`pressable()` 由「纯色按压底」改为 **bounded `RippleDrawable`**（圆角遮罩裁剪，
+  并保留 StateListDrawable 回退）；卡片圆角 26 → 28dp；列表行 15 → 16sp、行高 60 → 62dp；
+  新增 `sheetHandle()`（36×4dp 拖拽提示条，仅视觉）；调色板新增 `ripple` / `handle` 两色，
+  浅 `#00A863` / 深 `#43D17F` accent 不变。
+
+**构建**：`ANDROID_SDK=/tmp/android-sdk ACL_VERSION=4.8.7 python3 hook/tools/build_hook_source.py`
+→ `versionName=4.8.7 / versionCode=480007`，0 error；dex 校验含 `SwipeCalibrateOverlay`(+$1..$7/$Surface/
+$Listener/$TrailView)、`sheetHandle`、`drawReference`、`strategyRows`、`anyCalibration`。
+APK `releases/PenBridge-Hook-tb522fu-v4.8.7.apk`（sha256 `d824a787…4169c3`）。
+
+**遗留**：
+- 设备 USB 掉线，**未装机自测**；本轮全部为编译期 + dex 校验，UI 观感需真机确认。
+- 「自定义范围」一旦从设备中心进入，滑动的屏幕是面板而不是目标 App（只能靠比例换算 + 提示语引导）。
+  若实测难瞄准，再加一条「先跳到该 App 再校准」的入口（`getLaunchIntentForPackage` + 延时开窗）。
+
 ## Bug-fix: xposed_scope 遗漏 `android`（system_server）（2026-09-22）
 
 - [x] **问题**：`arrays.xml` 的 `xposed_scope` 只有 `system`（SystemUI）而**缺少 `android`**

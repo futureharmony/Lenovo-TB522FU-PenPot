@@ -64,6 +64,12 @@ import java.util.HashSet;
  * shows up but has no selectable options". A fully self-drawn card (explicit background, text
  * colours, rounded corners, press states, night/light aware) removes every dependency on the
  * host theme and renders correctly from the system context.</p>
+ *
+ * <p><b>4.8.7 flow change:</b> picking 模拟滑动 no longer pops the full-screen recorder. The
+ * recorder is a deliberate, user-invoked action ("自定义范围") reachable from the device center
+ * (see {@link #showChangeDialog}), so an ordinary page turn executes immediately and is never
+ * interrupted. Styles follow the ColorOS dialog language: accent-tinted text buttons, 16sp list
+ * rows with secondary 12sp descriptions, ripple press feedback, 28dp card radius.</p>
  */
 public final class PageTurnConfig {
     private static final String TAG = "PageTurnConfig";
@@ -201,6 +207,267 @@ public final class PageTurnConfig {
             case STRATEGY_KEY_LR: return OPTION_NAMES[3];
             default: return "未配置";
         }
+    }
+
+    /** "垂直模拟 · 已自定义范围" — one line of list-row detail, ColorOS style. */
+    private static String strategySummary(Context ctx, String pkg, int strategy) {
+        if (strategy < 0) return "未配置";
+        String base = label(ctx, strategy);
+        if (!isSwipeStrategy(strategy)) return base;
+        boolean n = hasCalibration(ctx, pkg, true);
+        boolean pv = hasCalibration(ctx, pkg, false);
+        if (n && pv) return base + " · 已自定义范围";
+        if (n || pv) return base + " · 部分自定义";
+        return base + " · 默认范围";
+    }
+
+    // ==================================================================
+    // Swipe trajectory calibration (per app, per direction)
+    //
+    // Some apps only accept a swipe that starts inside one particular region
+    // (the video area above a comment bar, the scrollable column of a split
+    // layout, a carousel below a fixed header, ...). The ratio-based default
+    // swipe then lands outside the scrollable area and the app ignores it —
+    // indistinguishable from "the feature is broken". The user can therefore
+    // record one real swipe per direction; the recorded polyline is replayed
+    // verbatim, normalised to 0..1 with per-point timing so that both the path
+    // AND the velocity profile (which is what a fling detector actually looks
+    // at) survive the round trip.
+    //
+    // Stored in a SEPARATE Settings.Global key so that lenovo_pen_pageturn_map
+    // keeps its {pkg: intStrategy} shape and old values stay readable.
+    // ==================================================================
+
+    /** Settings.Global key holding {"<pkg>|<dir>": {orient, pts, dur, w, h}}. */
+    static final String SWIPE_KEY = "lenovo_pen_pageturn_swipe";
+
+    /** Nominal duration of the ratio-based default path (16 steps x 16 ms). */
+    public static final int DEFAULT_DURATION_MS = 256;
+
+    static final String DIR_NEXT = "next";
+    static final String DIR_PREV = "prev";
+
+    /** True for the two strategies that inject a motion gesture (0 and 1). */
+    public static boolean isSwipeStrategy(int strategy) {
+        return strategy == STRATEGY_HORIZONTAL || strategy == STRATEGY_VERTICAL;
+    }
+
+    /**
+     * {widthPixels, heightPixels} of the display. This is the coordinate space every
+     * normalised swipe value is expressed in, and it is deliberately the single source
+     * used by BOTH the recorder (SwipeCalibrateOverlay) and the replay (swipeInternal),
+     * so a recorded path can never be interpreted in a different space.
+     */
+    static int[] screenSize(Context ctx) {
+        android.util.DisplayMetrics dm = ctx.getResources().getDisplayMetrics();
+        int w = dm.widthPixels;
+        int h = dm.heightPixels;
+        if (w <= 0 || h <= 0) {
+            w = 3840;
+            h = 2560;
+        }
+        return new int[]{w, h};
+    }
+
+    /**
+     * The built-in path for a mode/direction as {{x1,y1,0},{x2,y2,DEFAULT_DURATION_MS}},
+     * normalised. Same numbers the pre-calibration implementation used, so an app with no
+     * recorded trajectory keeps the exact behaviour that was verified on device.
+     */
+    static float[][] defaultPath(boolean vertical, boolean next) {
+        float x1, y1, x2, y2;
+        if (vertical) {
+            // next (下一页) = swipe up (bottom -> top); prev = swipe down.
+            float x = 0.50f;
+            x1 = x;
+            x2 = x;
+            y1 = next ? 0.75f : 0.25f;
+            y2 = next ? 0.25f : 0.75f;
+        } else {
+            // next = swipe left (right -> left); prev = swipe right.
+            float y = 0.50f;
+            y1 = y;
+            y2 = y;
+            x1 = next ? 0.75f : 0.25f;
+            x2 = next ? 0.25f : 0.75f;
+        }
+        return new float[][]{{x1, y1, 0f}, {x2, y2, (float) DEFAULT_DURATION_MS}};
+    }
+
+    private static String swipeKey(String pkg, boolean next) {
+        return pkg + "|" + (next ? DIR_NEXT : DIR_PREV);
+    }
+
+    private static JSONObject readSwipeMap(Context ctx) {
+        try {
+            String s = Settings.Global.getString(ctx.getContentResolver(), SWIPE_KEY);
+            if (s != null && !s.isEmpty()) return new JSONObject(s);
+        } catch (Throwable ignored) { }
+        return new JSONObject();
+    }
+
+    private static void writeSwipeMap(Context ctx, JSONObject map) {
+        try {
+            Settings.Global.putString(ctx.getContentResolver(), SWIPE_KEY,
+                    map.length() == 0 ? "" : map.toString());
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": writeSwipeMap: " + th);
+        }
+    }
+
+    /**
+     * Recorded trajectory for (pkg, direction) as {{x,y,tMs},...} normalised to
+     * {@link #screenSize}, or null when there is none.
+     *
+     * <p>A trajectory recorded in a different orientation is refused rather than
+     * silently reused: the normalised values would point at a different part of the
+     * screen after a rotation, which is worse than falling back to the default.</p>
+     */
+    static float[][] getCalibration(Context ctx, String pkg, boolean next) {
+        try {
+            if (pkg == null || pkg.isEmpty()) return null;
+            JSONObject e = readSwipeMap(ctx).optJSONObject(swipeKey(pkg, next));
+            if (e == null) return null;
+            int orient = e.optInt("orient", -1);
+            int cur = ctx.getResources().getConfiguration().orientation;
+            if (orient > 0 && cur > 0 && orient != cur) {
+                HookUtils.log(TAG + ": calibration " + pkg + " dir=" + (next ? DIR_NEXT : DIR_PREV)
+                        + " ignored, recorded in orientation " + orient + " (now " + cur + ")");
+                return null;
+            }
+            org.json.JSONArray pts = e.optJSONArray("pts");
+            if (pts == null || pts.length() < 2) return null;
+            float[][] out = new float[pts.length()][];
+            for (int i = 0; i < pts.length(); i++) {
+                org.json.JSONArray q = pts.optJSONArray(i);
+                if (q == null || q.length() < 2) return null;
+                out[i] = new float[]{(float) q.optDouble(0, 0.0),
+                        (float) q.optDouble(1, 0.0), (float) q.optDouble(2, 0.0)};
+            }
+            return out;
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": getCalibration: " + th);
+            return null;
+        }
+    }
+
+    static boolean hasCalibration(Context ctx, String pkg, boolean next) {
+        return getCalibration(ctx, pkg, next) != null;
+    }
+
+    /** Human description of a recorded path, e.g. "向上滑动 · 268ms". */
+    static String describeCalibration(float[][] pts) {
+        if (pts == null || pts.length < 2) return "无";
+        float[] a = pts[0];
+        float[] b = pts[pts.length - 1];
+        float dx = b[0] - a[0];
+        float dy = b[1] - a[1];
+        String dir;
+        if (Math.abs(dy) >= Math.abs(dx)) dir = dy < 0 ? "向上" : "向下";
+        else dir = dx < 0 ? "向左" : "向右";
+        return dir + "滑动 · " + Math.round(b[2]) + "ms";
+    }
+
+    /** Unconditional direct write of a recorded trajectory (system uid). */
+    static void persistCalibration(Context ctx, String pkg, boolean next, float[][] pts, int orient) {
+        try {
+            if (pkg == null || pkg.isEmpty() || pts == null || pts.length < 2) return;
+            org.json.JSONArray arr = new org.json.JSONArray();
+            for (float[] pt : pts) {
+                org.json.JSONArray q = new org.json.JSONArray();
+                q.put(round4(pt[0]));
+                q.put(round4(pt[1]));
+                q.put(Math.round(pt.length > 2 ? pt[2] : 0f));
+                arr.put(q);
+            }
+            int[] sz = screenSize(ctx);
+            JSONObject e = new JSONObject();
+            e.put("orient", orient > 0 ? orient : ctx.getResources().getConfiguration().orientation);
+            e.put("pts", arr);
+            e.put("dur", Math.round(pts[pts.length - 1][2]));
+            e.put("w", sz[0]);
+            e.put("h", sz[1]);
+
+            JSONObject m = readSwipeMap(ctx);
+            m.put(swipeKey(pkg, next), e);
+            writeSwipeMap(ctx, m);
+            HookUtils.log(TAG + ": persistCalibration " + pkg + " dir=" + (next ? DIR_NEXT : DIR_PREV)
+                    + " pts=" + pts.length + " " + describeCalibration(pts)
+                    + " space=" + sz[0] + "x" + sz[1]);
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": persistCalibration: " + th);
+        }
+    }
+
+    static void persistClearCalibration(Context ctx, String pkg, boolean next) {
+        try {
+            if (pkg == null || pkg.isEmpty()) return;
+            JSONObject m = readSwipeMap(ctx);
+            m.remove(swipeKey(pkg, next));
+            writeSwipeMap(ctx, m);
+            HookUtils.log(TAG + ": clearCalibration " + pkg + " dir=" + (next ? DIR_NEXT : DIR_PREV));
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": persistClearCalibration: " + th);
+        }
+    }
+
+    /**
+     * Persist a trajectory. The only caller is the calibration overlay, which is always
+     * created by {@code system_server}, so the direct write is the correct (and only) path --
+     * no broadcast, hence no loop and no serialisation of the point array.
+     */
+    static void saveCalibration(Context ctx, String pkg, boolean next, float[][] pts, int orient) {
+        persistCalibration(ctx, pkg, next, pts, orient);
+    }
+
+    static void clearCalibration(Context ctx, String pkg, boolean next) {
+        if (isSystemContext(ctx)) {
+            persistClearCalibration(ctx, pkg, next);
+        } else {
+            requestCalibrateOp(ctx, pkg, next, "clear_calib");
+        }
+    }
+
+    private static double round4(float v) {
+        return Math.round(v * 10000.0) / 10000.0;
+    }
+
+    private static void requestCalibrateOp(Context ctx, String pkg, boolean next, String op) {
+        // Direct write first (the ColorOS panel host is privileged and its write is honoured),
+        // then announce it so system_server re-applies it under its own uid.
+        try {
+            if ("clear_calib".equals(op)) persistClearCalibration(ctx, pkg, next);
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": requestCalibrateOp direct: " + th);
+        }
+        try {
+            Intent i = new Intent(PenBridgeConstants.PAGETURN_CONFIG);
+            i.putExtra("op", op);
+            i.putExtra("pkg", pkg);
+            i.putExtra("dir", next ? DIR_NEXT : DIR_PREV);
+            ctx.sendBroadcast(i);
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": requestCalibrateOp: " + th);
+        }
+    }
+
+    /** Ask system_server to pop the calibration overlay for (pkg, direction). */
+    public static void requestCalibration(Context ctx, String pkg, boolean next) {
+        requestCalibrateOp(ctx, pkg, next, "calibrate");
+    }
+
+    /** Show the calibration overlay. Only safe under the system uid (overlay window). */
+    static void startCalibration(final Context ctx, final String pkg, final boolean next,
+                                final SwipeCalibrateOverlay.Listener onDone) {
+        sMain.post(new Runnable() {
+            @Override public void run() {
+                try {
+                    SwipeCalibrateOverlay.show(ctx, pkg, next, onDone);
+                } catch (Throwable th) {
+                    HookUtils.log(TAG + ": startCalibration: " + th);
+                }
+            }
+        });
     }
 
     // ==================================================================
@@ -347,11 +614,12 @@ public final class PageTurnConfig {
     // ==================================================================
     // Execution
     // ==================================================================
-    public static void perform(Context ctx, boolean next, int strategy) {
+    /** @param pkg the app the trigger is attributed to; may be null (no calibration then). */
+    public static void perform(Context ctx, String pkg, boolean next, int strategy) {
         try {
             switch (strategy) {
                 case STRATEGY_VERTICAL:
-                    StylusActionDispatcher.injectVerticalSwipe(ctx, next);
+                    dispatchSwipe(ctx, pkg, next, true);
                     break;
                 case STRATEGY_KEY_UD:
                     StylusActionDispatcher.injectKey(next ? KeyEvent.KEYCODE_PAGE_DOWN : KeyEvent.KEYCODE_PAGE_UP);
@@ -361,7 +629,7 @@ public final class PageTurnConfig {
                     break;
                 case STRATEGY_HORIZONTAL:
                 default:
-                    StylusActionDispatcher.injectSwipe(ctx, next);
+                    dispatchSwipe(ctx, pkg, next, false);
                     break;
             }
         } catch (Throwable th) {
@@ -369,8 +637,28 @@ public final class PageTurnConfig {
         }
     }
 
+    /**
+     * Swipe, using the user's recorded trajectory when one exists for this app and
+     * direction, otherwise the built-in ratio path.
+     */
+    private static void dispatchSwipe(Context ctx, String pkg, boolean next, boolean vertical) {
+        float[][] recorded = getCalibration(ctx, pkg, next);
+        if (recorded != null) {
+            HookUtils.log(TAG + ": replay recorded trajectory pkg=" + pkg
+                    + " dir=" + (next ? DIR_NEXT : DIR_PREV) + " " + describeCalibration(recorded));
+            StylusActionDispatcher.injectSwipePath(ctx, recorded);
+        } else {
+            StylusActionDispatcher.injectSwipe(ctx, vertical, next);
+        }
+    }
+
     /** Called from StylusActionDispatcher.pageTurn: resolve strategy, prompt if needed. */
     public static void performWithPrompt(Context ctx, boolean next) {
+        // A modal calibration is on screen: the user's next gesture belongs to it.
+        if (SwipeCalibrateOverlay.isVisible()) {
+            HookUtils.log(TAG + ": trigger ignored, calibration overlay is up");
+            return;
+        }
         final List<String> cands = foregroundCandidates(ctx);
         // Only the two real detectors (top task / resumed events) are trusted for the
         // "already configured" lookup. L3 is the legacy daily-bucket heuristic that used to
@@ -382,7 +670,7 @@ public final class PageTurnConfig {
             int s = getStrategy(ctx, p);
             if (s >= 0) {
                 HookUtils.log(TAG + ": perform pkg=" + p + " strategy=" + s);
-                perform(ctx, next, s);
+                perform(ctx, p, next, s);
                 return;
             }
         }
@@ -391,7 +679,7 @@ public final class PageTurnConfig {
             // Nothing sensible to key a prompt on. Keep the legacy behaviour and do NOT
             // prompt: a prompt without a real target poisons the map with a bogus key.
             HookUtils.log(TAG + ": no usable foreground candidate, fallback horizontal");
-            perform(ctx, next, STRATEGY_HORIZONTAL);
+            perform(ctx, null, next, STRATEGY_HORIZONTAL);
             return;
         }
         HookUtils.log(TAG + ": prompt pkg=" + target + " candidates=" + cands);
@@ -422,11 +710,16 @@ public final class PageTurnConfig {
                             new ChoiceListener() {
                                 @Override public void onPick(int strategy) {
                                     try {
-                                        if (strategy >= 0) {
-                                            setStrategy(ctx, pkg, strategy);
-                                            perform(ctx, next, strategy);
-                                            HookUtils.log(TAG + ": prompt choice " + pkg + " -> " + strategy);
-                                        }
+                                        if (strategy < 0) return;
+                                        setStrategy(ctx, pkg, strategy);
+                                        HookUtils.log(TAG + ": prompt choice " + pkg + " -> " + strategy);
+                                        // 4.8.7: no automatic calibration surface any more.
+                                        // Picking 模拟滑动 runs the stored (or default) range
+                                        // straight away. The full-screen recorder is only ever
+                                        // opened by an EXPLICIT 「自定义范围」 action in the device
+                                        // center (see showChangeDialog), so a normal page turn is
+                                        // never interrupted by a full-screen overlay.
+                                        perform(ctx, pkg, next, strategy);
                                     } catch (Throwable th) {
                                         HookUtils.log(TAG + ": prompt pick: " + th);
                                     }
@@ -466,7 +759,9 @@ public final class PageTurnConfig {
                     if (cfg.isEmpty()) {
                         TextView hint = new TextView(ctx);
                         hint.setText("首次在某个应用中触发「上一页 / 下一页」时会自动弹出选择，"
-                                + "选定后即可在此查看与修改。");
+                                + "选定后即可在此查看与修改。\n\n"
+                                + "若模拟滑动在该应用里没反应，说明默认滑动的起点不在它的可滚动区域内 ——"
+                                + "进入对应应用后选「自定义「上一页 / 下一页」滑动范围」，按你的习惯滑一次即可。");
                         hint.setTextSize(13);
                         hint.setTextColor(p.body);
                         hint.setLineSpacing(dp(ctx, 4), 1f);
@@ -517,27 +812,117 @@ public final class PageTurnConfig {
         });
     }
 
+    private static String calibrationDesc(Context ctx, String pkg, boolean next) {
+        float[][] pts = getCalibration(ctx, pkg, next);
+        if (pts == null) return "当前：默认范围 · 点按后滑一次即可记录";
+        return "当前：自定义 · " + describeCalibration(pts) + " · 点按可重录";
+    }
+
+    private static boolean anyCalibration(Context ctx, String pkg) {
+        return hasCalibration(ctx, pkg, true) || hasCalibration(ctx, pkg, false);
+    }
+
+    /**
+     * Per-app editor. Self-drawn (not {@link #showChoice}) because it carries extra
+     * calibration rows for the swipe strategies, and those rows need a handle on the dialog
+     * to dismiss it before requesting the overlay.
+     *
+     * <p>The 自定义滑动范围 rows are the <b>only</b> entry point of {@link SwipeCalibrateOverlay}
+     * since 4.8.7 — nothing pops that full-screen surface implicitly any more.</p>
+     */
     private static void showChangeDialog(final Context ctx, final String pkg) {
         try {
-            int cur = getStrategy(ctx, pkg);
-            showChoice(ctx, pkg,
-                    "翻页触发方式",
-                    "为该应用选择翻页模拟方式：",
-                    cur, true,
-                    new ChoiceListener() {
-                        @Override public void onPick(int strategy) {
-                            setStrategy(ctx, pkg, strategy);
-                            // The write travels to system_server over a broadcast; give it a
-                            // moment before re-reading so the reopened list shows the new value.
-                            sMain.postDelayed(new Runnable() {
-                                @Override public void run() { showConfigDialog(ctx); }
-                            }, 250);
+            final int cur = getStrategy(ctx, pkg);
+            final Palette p = Palette.of(ctx);
+            final Dialog dlg = new Dialog(ctx);
+            dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
+
+            LinearLayout root = card(ctx, p);
+            root.addView(headerView(ctx, p, pkg, "翻页触发方式", "为该应用选择翻页模拟方式："));
+            root.addView(strategyRows(ctx, p, pkg, cur, dlg));
+
+            if (isSwipeStrategy(cur)) {
+                root.addView(divider(ctx, p));
+                root.addView(optionRow(ctx, p, "自定义「下一页」滑动范围",
+                        calibrationDesc(ctx, pkg, true), false,
+                        new Runnable() {
+                            @Override public void run() {
+                                dlg.dismiss();
+                                requestCalibration(ctx, pkg, true);
+                            }
+                        }));
+                root.addView(optionRow(ctx, p, "自定义「上一页」滑动范围",
+                        calibrationDesc(ctx, pkg, false), false,
+                        new Runnable() {
+                            @Override public void run() {
+                                dlg.dismiss();
+                                requestCalibration(ctx, pkg, false);
+                            }
+                        }));
+                if (anyCalibration(ctx, pkg)) {
+                    root.addView(optionRow(ctx, p, "恢复默认滑动范围",
+                            "清除本应用两个方向的自定义轨迹", false,
+                            new Runnable() {
+                                @Override public void run() {
+                                    dlg.dismiss();
+                                    clearCalibration(ctx, pkg, true);
+                                    clearCalibration(ctx, pkg, false);
+                                    reopenConfigSoon(ctx);
+                                }
+                            }));
+                }
+            }
+
+            root.addView(divider(ctx, p));
+            root.addView(optionRow(ctx, p, "清除该应用配置", "下次触发时重新询问", false,
+                    new Runnable() {
+                        @Override public void run() {
+                            dlg.dismiss();
+                            clearCalibration(ctx, pkg, true);
+                            clearCalibration(ctx, pkg, false);
+                            setStrategy(ctx, pkg, PICK_CLEAR);
+                            reopenConfigSoon(ctx);
                         }
-                    },
-                    null);
+                    }));
+            root.addView(actionButton(ctx, p, "取消", new Runnable() {
+                @Override public void run() { dlg.dismiss(); }
+            }));
+
+            dlg.setContentView(root);
+            styleAndShow(ctx, dlg);
         } catch (Throwable th) {
             HookUtils.log(TAG + ": showChangeDialog: " + th);
         }
+    }
+
+    /** The four strategy rows, reused by both the one-time chooser and the editor. */
+    private static View strategyRows(Context ctx, Palette p, final String pkg, int cur,
+                                     final Dialog dlg) {
+        LinearLayout box = new LinearLayout(ctx);
+        box.setOrientation(LinearLayout.VERTICAL);
+        for (int i = 0; i < OPTION_NAMES.length; i++) {
+            final int idx = i;
+            if (i > 0) box.addView(thinSpace(ctx));
+            box.addView(optionRow(ctx, p, OPTION_NAMES[i], OPTION_DESCS[i], i == cur,
+                    new Runnable() {
+                        @Override public void run() {
+                            dlg.dismiss();
+                            setStrategy(ctx, pkg, idx);
+                            reopenConfigSoon(ctx);
+                        }
+                    }));
+        }
+        return box;
+    }
+
+    /**
+     * The write may travel to system_server over a broadcast, so give it a moment before
+     * re-reading -- otherwise the reopened list would still show the previous value.
+     */
+    private static void reopenConfigSoon(final Context ctx) {
+        sMain.postDelayed(new Runnable() {
+            @Override public void run() { showConfigDialog(ctx); }
+        }, 250);
     }
 
     // ==================================================================
@@ -637,15 +1022,34 @@ public final class PageTurnConfig {
     // ==================================================================
     // View builders
     // ==================================================================
-    private static LinearLayout card(Context ctx, Palette p) {
+    static LinearLayout card(Context ctx, Palette p) {
         LinearLayout c = new LinearLayout(ctx);
         c.setOrientation(LinearLayout.VERTICAL);
         GradientDrawable bg = new GradientDrawable();
         bg.setColor(p.card);
-        bg.setCornerRadius(dp(ctx, 26));
+        bg.setCornerRadius(dp(ctx, 28));
         c.setBackground(bg);
-        c.setPadding(dp(ctx, 20), dp(ctx, 18), dp(ctx, 20), dp(ctx, 8));
+        c.setPadding(dp(ctx, 20), dp(ctx, 16), dp(ctx, 20), dp(ctx, 8));
         return c;
+    }
+
+    /**
+     * ColorOS bottom-sheet grabber (36x4dp pill). Only visual; the sheet itself is not
+     * drag-dismissable because it is an overlay window we own, but the affordance is what
+     * makes the card read as a ColorOS sheet rather than a floating box.
+     */
+    static View sheetHandle(Context ctx, Palette p) {
+        LinearLayout wrap = new LinearLayout(ctx);
+        wrap.setOrientation(LinearLayout.HORIZONTAL);
+        wrap.setGravity(Gravity.CENTER_HORIZONTAL);
+        wrap.setPadding(0, 0, 0, dp(ctx, 10));
+        View bar = new View(ctx);
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(p.handle);
+        g.setCornerRadius(dp(ctx, 2));
+        bar.setBackground(g);
+        wrap.addView(bar, new LinearLayout.LayoutParams(dp(ctx, 36), dp(ctx, 4)));
+        return wrap;
     }
 
     private static View headerView(Context ctx, Palette p, String pkg, String title, String sub) {
@@ -671,7 +1075,7 @@ public final class PageTurnConfig {
         return h;
     }
 
-    private static TextView titleView(Context ctx, Palette p, String text) {
+    static TextView titleView(Context ctx, Palette p, String text) {
         TextView t = new TextView(ctx);
         t.setText(text);
         t.setTextSize(18);
@@ -680,7 +1084,7 @@ public final class PageTurnConfig {
         return t;
     }
 
-    private static TextView subtitleView(Context ctx, Palette p, String text) {
+    static TextView subtitleView(Context ctx, Palette p, String text) {
         TextView t = new TextView(ctx);
         t.setText(text);
         t.setTextSize(13);
@@ -690,14 +1094,14 @@ public final class PageTurnConfig {
         return t;
     }
 
-    private static View optionRow(Context ctx, Palette p, String name, String desc,
+    static View optionRow(Context ctx, Palette p, String name, String desc,
                                   boolean selected, final Runnable onClick) {
         LinearLayout row = new LinearLayout(ctx);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
-        row.setMinimumHeight(dp(ctx, 60));
+        row.setMinimumHeight(dp(ctx, 62));
         row.setPadding(dp(ctx, 14), dp(ctx, 10), dp(ctx, 14), dp(ctx, 10));
-        row.setBackground(pressable(ctx, p.press, 16));
+        row.setBackground(pressable(ctx, p.ripple, 16));
         row.setClickable(true);
         row.setFocusable(true);
 
@@ -711,7 +1115,7 @@ public final class PageTurnConfig {
         texts.setOrientation(LinearLayout.VERTICAL);
         TextView n = new TextView(ctx);
         n.setText(name);
-        n.setTextSize(15);
+        n.setTextSize(16);
         n.setTextColor(p.title);
         n.setTypeface(null, selected ? Typeface.BOLD : Typeface.NORMAL);
         texts.addView(n);
@@ -738,7 +1142,7 @@ public final class PageTurnConfig {
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setMinimumHeight(dp(ctx, 58));
         row.setPadding(dp(ctx, 4), dp(ctx, 10), dp(ctx, 4), dp(ctx, 10));
-        row.setBackground(pressable(ctx, p.press, 14));
+        row.setBackground(pressable(ctx, p.ripple, 14));
         row.setClickable(true);
         row.setFocusable(true);
 
@@ -757,7 +1161,7 @@ public final class PageTurnConfig {
         n.setTextColor(p.title);
         texts.addView(n);
         TextView s = new TextView(ctx);
-        s.setText(strategy < 0 ? "未配置" : label(ctx, strategy));
+        s.setText(strategySummary(ctx, pkg, strategy));
         s.setTextSize(12);
         s.setTextColor(p.body);
         s.setPadding(0, dp(ctx, 2), 0, 0);
@@ -776,15 +1180,15 @@ public final class PageTurnConfig {
         return row;
     }
 
-    private static View actionButton(Context ctx, Palette p, String text, final Runnable onClick) {
+    static View actionButton(Context ctx, Palette p, String text, final Runnable onClick) {
         TextView b = new TextView(ctx);
         b.setText(text);
         b.setTextSize(15);
         b.setTypeface(null, Typeface.BOLD);
         b.setTextColor(p.accent);
         b.setGravity(Gravity.CENTER);
-        b.setPadding(0, dp(ctx, 14), 0, dp(ctx, 14));
-        b.setBackground(pressable(ctx, p.press, 14));
+        b.setPadding(0, dp(ctx, 15), 0, dp(ctx, 15));
+        b.setBackground(pressable(ctx, p.ripple, 14));
         b.setClickable(true);
         b.setFocusable(true);
         b.setOnClickListener(new View.OnClickListener() {
@@ -793,7 +1197,7 @@ public final class PageTurnConfig {
         return b;
     }
 
-    private static View divider(Context ctx, Palette p) {
+    static View divider(Context ctx, Palette p) {
         View v = new View(ctx);
         v.setBackgroundColor(p.divider);
         LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
@@ -831,18 +1235,33 @@ public final class PageTurnConfig {
         return g;
     }
 
-    private static Drawable pressable(Context ctx, int pressColor, float radiusDp) {
-        GradientDrawable pressed = new GradientDrawable();
-        pressed.setColor(pressColor);
-        pressed.setCornerRadius(dp(ctx, radiusDp));
-        GradientDrawable normal = new GradientDrawable();
-        normal.setColor(Color.TRANSPARENT);
-        normal.setCornerRadius(dp(ctx, radiusDp));
-        StateListDrawable sld = new StateListDrawable();
-        sld.addState(new int[]{android.R.attr.state_pressed}, pressed);
-        sld.addState(new int[]{android.R.attr.state_focused}, pressed);
-        sld.addState(new int[0], normal);
-        return sld;
+    /**
+     * ColorOS-style press feedback: a bounded ripple clipped to the row's own rounded
+     * rectangle (ColorOS never paints a full square highlight on a list row). RippleDrawable
+     * is available on every API this module runs on, but the state-list fallback is kept so a
+     * factory failure can never leave a row without any visual response.
+     */
+    private static Drawable pressable(Context ctx, int rippleColor, float radiusDp) {
+        float r = dp(ctx, radiusDp);
+        GradientDrawable content = new GradientDrawable();
+        content.setColor(Color.TRANSPARENT);
+        content.setCornerRadius(r);
+        try {
+            GradientDrawable mask = new GradientDrawable();
+            mask.setColor(Color.WHITE);
+            mask.setCornerRadius(r);
+            return new android.graphics.drawable.RippleDrawable(
+                    android.content.res.ColorStateList.valueOf(rippleColor), content, mask);
+        } catch (Throwable th) {
+            GradientDrawable pressed = new GradientDrawable();
+            pressed.setColor(rippleColor);
+            pressed.setCornerRadius(r);
+            StateListDrawable sld = new StateListDrawable();
+            sld.addState(new int[]{android.R.attr.state_pressed}, pressed);
+            sld.addState(new int[]{android.R.attr.state_focused}, pressed);
+            sld.addState(new int[0], content);
+            return sld;
+        }
     }
 
     // ==================================================================
@@ -867,7 +1286,7 @@ public final class PageTurnConfig {
         }
     }
 
-    private static int dp(Context ctx, float v) {
+    static int dp(Context ctx, float v) {
         return Math.round(v * ctx.getResources().getDisplayMetrics().density);
     }
 
@@ -880,26 +1299,28 @@ public final class PageTurnConfig {
     }
 
     /** Night / light aware palette, ColorOS-flavoured (green accent). */
-    private static final class Palette {
-        final int card, title, body, press, divider, accent, idle;
+    static final class Palette {
+        final int card, title, body, ripple, divider, accent, idle, handle;
 
         private Palette(boolean night) {
             if (night) {
-                card    = 0xFF2A2A2E;
-                title   = 0xFFF2F2F5;
-                body    = 0xFF9DA0A8;
-                press   = 0x1FFFFFFF;
-                divider = 0x1AFFFFFF;
+                card    = 0xFF2F3033;
+                title   = 0xFFF2F3F5;
+                body    = 0xFF9B9FA8;
+                ripple  = 0x1FFFFFFF;
+                divider = 0x14FFFFFF;
                 accent  = 0xFF43D17F;
                 idle    = 0x40FFFFFF;
+                handle  = 0x33FFFFFF;
             } else {
                 card    = 0xFFFFFFFF;
                 title   = 0xFF191A1F;
-                body    = 0xFF7C818C;
-                press   = 0x0D000000;
+                body    = 0xFF878B94;
+                ripple  = 0x0F000000;
                 divider = 0x12000000;
                 accent  = 0xFF00A863;
                 idle    = 0x30000000;
+                handle  = 0x33000000;
             }
         }
 

@@ -47,8 +47,17 @@ final class PenBridgeConstants {
     /* Per-app page-turn trigger strategy. ipemanager (device-center panel) sends this
        to ask system_server to persist a choice (system uid write survives reboot; an
        app-process Settings.Global write does not, see TODO 1018). system_server also
-       writes directly when the runtime prompt resolves. Extra: "pkg" (String),
-       "strategy" (int, <0 = clear). */
+       writes directly when the runtime prompt resolves.
+
+       Extras:
+         "pkg"      (String)  target package -- required.
+         "strategy" (int)     <0 = clear; used when "op" is absent.
+         "op"       (String)  optional action:
+                                "calibrate"   -> pop the full-screen swipe-calibration
+                                                 overlay (overlay windows need the system
+                                                 uid, so the panel cannot do it itself);
+                                "clear_calib" -> drop the recorded trajectory.
+         "dir"      (String)  "next" / "prev" for the calibration ops. */
     static final String PAGETURN_CONFIG = "com.futureharmony.lenovopenbridge.PAGETURN_CONFIG";
     static final String RUN_ACTION = "com.futureharmony.lenovopenbridge.RUN_ACTION";
     static final String RUN_ACTION_LEGACY = "com.aclaniakea.lenovopenbridge.RUN_ACTION";

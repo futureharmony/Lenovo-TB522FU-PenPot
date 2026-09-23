@@ -1913,8 +1913,24 @@ final class SystemStylusHooks {
                 public void onReceive(Context ctx, Intent intent) {
                     try {
                         String pkg = intent.getStringExtra("pkg");
-                        int strategy = intent.getIntExtra("strategy", -1);
                         if (pkg == null || pkg.isEmpty()) return;
+                        String op = intent.getStringExtra("op");
+                        // Default (no "op") = persist a strategy. The pen panel also uses this
+                        // channel to ask for a trajectory calibration, which must run here
+                        // because the overlay window needs the system uid.
+                        if ("calibrate".equals(op)) {
+                            boolean next = !PageTurnConfig.DIR_PREV.equals(intent.getStringExtra("dir"));
+                            HookUtils.log("pageturn calibrate request: " + pkg + " dir="
+                                    + (next ? PageTurnConfig.DIR_NEXT : PageTurnConfig.DIR_PREV));
+                            PageTurnConfig.startCalibration(ctx, pkg, next, null);
+                            return;
+                        }
+                        if ("clear_calib".equals(op)) {
+                            boolean next = !PageTurnConfig.DIR_PREV.equals(intent.getStringExtra("dir"));
+                            PageTurnConfig.persistClearCalibration(ctx, pkg, next);
+                            return;
+                        }
+                        int strategy = intent.getIntExtra("strategy", -1);
                         // Unconditional direct write: this receiver always runs under the
                         // persisting uid, and never re-broadcasts (no loop possible).
                         PageTurnConfig.persist(ctx, pkg, strategy);

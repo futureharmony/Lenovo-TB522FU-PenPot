@@ -225,8 +225,11 @@ public final class StylusActionDispatcher {
         expectInjected(ok, "action=" + action + " x=" + x + " y=" + y);
     }
 
-    /** Fire a swipe off the main thread (WAIT_FOR_FINISH blocks until the app consumes). */
-    private static void swipeAsync(final Context context, final boolean vertical, final boolean next) {
+    /** Fire a swipe off the main thread (WAIT_FOR_FINISH blocks until the app consumes).
+     *  @param path a recorded trajectory {{xNorm,yNorm,tMs},...}, or null for the built-in
+     *              ratio path. */
+    private static void swipeAsync(final Context context, final boolean vertical,
+                                   final boolean next, final float[][] path) {
         synchronized (sInjectLock) {
             if (sInjecting) {
                 HookUtils.log(TAG + ": swipe skipped, previous gesture still in flight");
@@ -237,7 +240,7 @@ public final class StylusActionDispatcher {
         Thread t = new Thread(new Runnable() {
             @Override public void run() {
                 try {
-                    swipeInternal(context, vertical, next);
+                    swipeInternal(context, vertical, next, path);
                 } catch (Throwable th) {
                     HookUtils.log(TAG + ": swipe failed: " + th);
                 } finally {
@@ -248,62 +251,79 @@ public final class StylusActionDispatcher {
         t.start();
     }
 
-    private static void swipeInternal(Context context, boolean vertical, boolean next)
-            throws Exception {
-        android.util.DisplayMetrics dm = context.getResources().getDisplayMetrics();
-        int w = dm.widthPixels;
-        int h = dm.heightPixels;
-        if (w <= 0 || h <= 0) {
-            w = 3840;
-            h = 2560;
-        }
+    private static void swipeInternal(Context context, boolean vertical, boolean next,
+                                      float[][] path) throws Exception {
+        // One source of truth for the coordinate space: the same normalised space the
+        // calibration overlay records in (PageTurnConfig.screenSize).
+        int[] size = PageTurnConfig.screenSize(context);
+        final int w = size[0];
+        final int h = size[1];
 
-        float x1, y1, x2, y2;
-        if (vertical) {
-            // Next page: swipe up (bottom -> top); Prev page: swipe down (top -> bottom).
-            float x = w * 0.50f;
-            x1 = x;
-            x2 = x;
-            y1 = next ? (h * 0.75f) : (h * 0.25f);
-            y2 = next ? (h * 0.25f) : (h * 0.75f);
-        } else {
-            // Next page: swipe right -> left; Prev page: left -> right.
-            float y = h * 0.50f;
-            y1 = y;
-            y2 = y;
-            x1 = next ? (w * 0.75f) : (w * 0.25f);
-            x2 = next ? (w * 0.25f) : (w * 0.75f);
-        }
+        final boolean recorded = path != null && path.length >= 2;
+        final float[][] pts = recorded ? path : PageTurnConfig.defaultPath(vertical, next);
 
         int deviceId = touchDeviceId();
         Object im = Class.forName("android.hardware.input.InputManager")
                 .getMethod("getInstance").invoke(null);
         Method inject = im.getClass().getMethod("injectInputEvent", InputEvent.class, Integer.TYPE);
 
-        final int steps = 16;
-        final long stepMs = 16; // ~256 ms total: a human-paced flick with real timestamps
         long downTime = SystemClock.uptimeMillis();
+        float x1 = pts[0][0] * w;
+        float y1 = pts[0][1] * h;
+        float x2 = pts[pts.length - 1][0] * w;
+        float y2 = pts[pts.length - 1][1] * h;
+        long prevT = Math.round(pts[0].length > 2 ? pts[0][2] : 0f);
+
         injectMotion(inject, im, deviceId, downTime, MotionEvent.ACTION_DOWN, x1, y1);
-        for (int i = 1; i <= steps; i++) {
+
+        if (recorded) {
+            // Replay the user's own trajectory verbatim, segment by segment, sleeping the
+            // recorded per-point delta so the velocity profile matches the original gesture.
+            for (int i = 1; i < pts.length; i++) {
+                long t = Math.round(pts[i].length > 2 ? pts[i][2] : prevT + 16f);
+                long wait = t - prevT;
+                if (wait > 0) Thread.sleep(Math.min(wait, 250L));
+                prevT = t;
+                int action = (i == pts.length - 1) ? MotionEvent.ACTION_UP : MotionEvent.ACTION_MOVE;
+                injectMotion(inject, im, deviceId, downTime, action,
+                        pts[i][0] * w, pts[i][1] * h);
+            }
+        } else {
+            // Built-in path: interpolate the two end points over DEFAULT_DURATION_MS in 16
+            // equal steps -- the exact shape and timing verified on device.
+            final int steps = 16;
+            final long stepMs = Math.max(1L, PageTurnConfig.DEFAULT_DURATION_MS / steps);
+            for (int i = 1; i <= steps; i++) {
+                Thread.sleep(stepMs);
+                float f = (float) i / steps;
+                injectMotion(inject, im, deviceId, downTime, MotionEvent.ACTION_MOVE,
+                        x1 + (x2 - x1) * f, y1 + (y2 - y1) * f);
+            }
             Thread.sleep(stepMs);
-            float f = (float) i / steps;
-            injectMotion(inject, im, deviceId, downTime, MotionEvent.ACTION_MOVE,
-                    x1 + (x2 - x1) * f, y1 + (y2 - y1) * f);
+            injectMotion(inject, im, deviceId, downTime, MotionEvent.ACTION_UP, x2, y2);
         }
-        Thread.sleep(stepMs);
-        injectMotion(inject, im, deviceId, downTime, MotionEvent.ACTION_UP, x2, y2);
 
         HookUtils.log(TAG + ": injected " + (vertical ? "vertical" : "horizontal")
                 + " swipe next=" + next + " dev=" + deviceId
+                + (recorded ? " recorded" : " default")
                 + " (" + x1 + "," + y1 + ") -> (" + x2 + "," + y2 + ")");
     }
 
     public static void injectSwipe(Context context, boolean next) {
-        swipeAsync(context, false, next);
+        swipeAsync(context, false, next, null);
+    }
+
+    public static void injectSwipe(Context context, boolean vertical, boolean next) {
+        swipeAsync(context, vertical, next, null);
     }
 
     public static void injectVerticalSwipe(Context context, boolean next) {
-        swipeAsync(context, true, next);
+        swipeAsync(context, true, next, null);
+    }
+
+    /** Replay a calibrated trajectory ({{xNorm,yNorm,tMs},...}) instead of the built-in path. */
+    public static void injectSwipePath(Context context, float[][] pts) {
+        swipeAsync(context, true, true, pts);
     }
 
     public static void undo(Context context) {
