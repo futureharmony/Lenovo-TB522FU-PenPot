@@ -157,6 +157,61 @@ APK `releases/PenBridge-Hook-tb522fu-v4.8.7.apk`（sha256 `d824a787…4169c3`）
 **未做（等用户定）**：把「从设备中心点自定义范围」改成**先 `getLaunchIntentForPackage(pkg)` 拉起目标 App、
 延时 ~900ms 再开窗** —— 这是真正解决「盲瞄」的做法，且不必迁进程。属交互变更，未擅自改。
 
+## P0.16 四选一里没有通往校准层的路（4.8.7 砍过头）+ 面板弹窗 WindowLeaked（Hook 4.8.9）
+
+**用户复现（2026-09-23 17:39，`com.brave.browser` 首次触发）**：「弹出了设置框，四个选项没问题，
+但是点击模拟上下/左右，不会有自定义的弹窗弹出，也无法设置自定义滚动轨迹」。
+
+**定位（日志铁证，不是推测）**：
+```
+17:39:48.307 PageTurnConfig: prompt pkg=com.brave.browser candidates=[com.brave.browser]
+17:39:49.959 PageTurnConfig: persist com.brave.browser -> 1
+17:39:49.959 PageTurnConfig: prompt choice com.brave.browser -> 1
+17:39:51.311 PageTurnConfig: perform pkg=com.brave.browser strategy=1
+```
+`prompt choice` 之后**直接** `perform`，全程**没有一条 `PenSwipeCalib`**。即：4.8.7 把
+`onPick` 里的 `startCalibration(...)` 整段删掉后，**四选一这条路彻底不通往校准层**；唯一入口只剩
+「设备中心 → 翻页功能触发方式 → App → 自定义…滑动范围」。而面板那条路还有第二个坑：校准行
+`if (isSwipeStrategy(cur))` 才出现，**未配置策略的 App 打开面板只看得到四个策略行**，用户极易
+判定「根本没法录轨迹」。4.8.7 的反向过度修正在此——用户原话「只有点自定义范围才弹校准层」指的是
+**别自动弹全屏层**，不是「把四选一里那条路删掉」。
+
+**修法（4.8.9）——加一页小的，全屏层仍然只在显式点击后才出现**：
+- 四选一点中**模拟**类策略时，不再直接 `perform`，而是弹**第二页小卡片**
+  （`showRangePage`）：标题「「下一页」的滑动范围」+ 两行
+  「用默认范围（内置比例路径 · 直接返回也是这个）」/「自定义滑动范围（按你习惯的方式上滑一次…）」，
+  另有「取消」（**什么都不做**）。
+- 「自定义滑动范围」→ `startCalibration(..., listener)`，录完 `onDone` 再 `perform` —— 全屏层
+  依旧只在这一次显式点击后出现，普通翻页不会被它打断。
+- **返回键 = 用默认范围**，按需求原文「② 如果用户确认或直接返回，就按照默认的滑动范围执行」：
+  翻页请求本来就已发出，这一页只问「怎么滑」。副标题里写明「直接返回也是这个」，不让它变成暗雷。
+- KeyEvent 类策略**不问**（没有范围可校准）；`getCalibration(pkg,next) != null` 时也不问
+  （已有轨迹，直接用）。
+- 并发保护：`sRangePageUp` 为真期间 `performWithPrompt` 直接忽略笔触发（策略此时已落盘，
+  否则会在用户还没答完时就用默认路径执行）；第二页显示期间把 pkg 重新塞回 `sPrompting`。
+
+**顺带修一个用户没报的真 bug（同一次日志捞出来的）**：
+```
+17:27:41.317 E WindowManager: android.view.WindowLeaked: Activity
+  com.oplus.ipemanager.btadsorb.pencilPanel.activity.PencilPanelActivity has leaked window
+  com.android.internal.policy.DecorView{…}[PencilPanelActivity] that was originally added here
+  … at android.app.Dialog.show(Dialog.java:370)
+     at com.aclaniakea.colorosporttuning.PageTurnConfig.styleAndShow(PageTurnConfig.java:1016)
+     at PageTurnConfig$3.run(PageTurnConfig.java:807)
+```
+我们在**不属于自己的 OEM Activity**（`PencilPanelActivity`）上挂弹窗，`reopenConfigSoon` 的
+250ms 定时器到点时面板可能**已经关了** ⇒ 弹窗无主、窗口泄漏。修法两条：
+1. `reopenConfigSoon` 先查 `hostGone(ctx)`（`isFinishing() || isDestroyed()`）再 show；
+2. 新增 `HostLifetime implements Application.ActivityLifecycleCallbacks`，由 `bindToHostLifetime`
+   在 `styleAndShow` 里挂上（仅当 `activityOf(ctx) != null`；system_server 路径天然 no-op），
+   宿主 `onActivityDestroyed` 时 `dismiss()` 我们的弹窗并自我注销；弹窗自行关闭时（`!isShowing()`）
+   在下一次生命周期回调里回收，避免回调堆积。
+
+**构建**：`ACL_VERSION=4.8.9` → `versionName=4.8.9 / versionCode=480009`，0 error；dexdump 校验
+283 个类定义中 xposed/UEventObserver **0 个**（旧 skill 的 `strings` 计数判据会误报 2，已修）；
+dex 含 `showRangePage`/`sRangePageUp`/`HostLifetime`/`bindToHostLifetime`/`hostGone`。
+**已装机 + 重启生效**（设备 17:43:56 boot，`pageturn config receiver registered`）。
+
 ## Bug-fix: xposed_scope 遗漏 `android`（system_server）（2026-09-22）
 
 - [x] **问题**：`arrays.xml` 的 `xposed_scope` 只有 `system`（SystemUI）而**缺少 `android`**

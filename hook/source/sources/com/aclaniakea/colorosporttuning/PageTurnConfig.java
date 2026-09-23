@@ -2,6 +2,7 @@ package com.aclaniakea.colorosporttuning;
 
 import android.app.Activity;
 import android.app.ActivityManager;
+import android.app.Application;
 import android.app.Dialog;
 import android.app.usage.UsageEvents;
 import android.app.usage.UsageStats;
@@ -18,6 +19,7 @@ import android.graphics.drawable.Drawable;
 import android.graphics.drawable.GradientDrawable;
 import android.graphics.drawable.LayerDrawable;
 import android.graphics.drawable.StateListDrawable;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.provider.Settings;
@@ -87,6 +89,14 @@ public final class PageTurnConfig {
 
     private static final Handler sMain = new Handler(Looper.getMainLooper());
     private static final Set<String> sPrompting = new HashSet<>();
+
+    /**
+     * True while the second page of the first-trigger chooser (「用默认范围 / 自定义滑动范围」) is
+     * on screen. Pen triggers are ignored for its duration: the strategy is already persisted at
+     * that point, so a trigger would silently execute the default path while the user is still
+     * answering the question.
+     */
+    private static boolean sRangePageUp;
 
     private static final String[] OPTION_NAMES = {
             "水平模拟", "垂直模拟", "KeyEvent 上下", "KeyEvent 左右"
@@ -659,6 +669,12 @@ public final class PageTurnConfig {
             HookUtils.log(TAG + ": trigger ignored, calibration overlay is up");
             return;
         }
+        // The range question is still open (strategy already persisted, default not chosen):
+        // running it now would answer on the user's behalf.
+        if (sRangePageUp) {
+            HookUtils.log(TAG + ": trigger ignored, range page is up");
+            return;
+        }
         final List<String> cands = foregroundCandidates(ctx);
         // Only the two real detectors (top task / resumed events) are trusted for the
         // "already configured" lookup. L3 is the legacy daily-bucket heuristic that used to
@@ -713,12 +729,28 @@ public final class PageTurnConfig {
                                         if (strategy < 0) return;
                                         setStrategy(ctx, pkg, strategy);
                                         HookUtils.log(TAG + ": prompt choice " + pkg + " -> " + strategy);
-                                        // 4.8.7: no automatic calibration surface any more.
-                                        // Picking 模拟滑动 runs the stored (or default) range
-                                        // straight away. The full-screen recorder is only ever
-                                        // opened by an EXPLICIT 「自定义范围」 action in the device
-                                        // center (see showChangeDialog), so a normal page turn is
-                                        // never interrupted by a full-screen overlay.
+                                        // 4.8.9: picking a 模拟 strategy asks ONE follow-up question
+                                        // (「用默认范围」/「自定义滑动范围」) instead of running the
+                                        // default silently. Rationale: this chooser is the only
+                                        // moment the user is looking at this app's page-turn
+                                        // settings, and the default ratio path is exactly what
+                                        // fails in feeds whose scrollable column starts elsewhere
+                                        // — with no route to the recorder from here, the only way
+                                        // to calibrate was to leave the app and dig through the
+                                        // device center. The follow-up is still NOT the recorder:
+                                        // the full-screen surface opens only on the explicit
+                                        // 自定义滑动范围 tap (or from the device center).
+                                        //
+                                        // KeyEvent strategies never ask: there is no range.
+                                        if (isSwipeStrategy(strategy)
+                                                && getCalibration(ctx, pkg, next) == null) {
+                                            // showChoice already dismissed and ran its onDismiss (which
+                                            // released sPrompting); hold the app again so a pen
+                                            // trigger cannot slip in behind the second page.
+                                            synchronized (sPrompting) { sPrompting.add(pkg); }
+                                            showRangePage(ctx, pkg, next, strategy);
+                                            return;
+                                        }
                                         perform(ctx, pkg, next, strategy);
                                     } catch (Throwable th) {
                                         HookUtils.log(TAG + ": prompt pick: " + th);
@@ -741,6 +773,95 @@ public final class PageTurnConfig {
     // ==================================================================
     // Device-center management dialog (review / change / clear per app)
     // ==================================================================
+    /**
+     * Follow-up to the strategy chooser for 模拟滑动: 「用默认范围」 or 「自定义滑动范围」.
+     *
+     * <p>Deliberately a <b>small card</b>, not {@link SwipeCalibrateOverlay}. 4.8.6 popped the
+     * full-screen recorder at this point and it was rejected as an interruption of an ordinary
+     * page turn; 4.8.7 over-corrected by removing the follow-up entirely, which left the recorder
+     * reachable only from the device center — reported by the user on 2026-09-23 right after
+     * picking 垂直模拟 in a fresh app ("不会有自定义的弹窗弹出，也无法设置自定义滚动轨迹"). This
+     * page keeps calibration reachable at the moment of choosing while the full-screen surface
+     * stays strictly opt-in.</p>
+     *
+     * <p>Backing out runs the default range, per the original requirement ("确认或直接返回，就按照
+     * 默认的滑动范围执行") — the page turn was already requested, this page only asks <i>how</i>.
+     * The subtitle states it, so the back key is not a surprise. 取消, by contrast, does nothing.</p>
+     */
+    private static void showRangePage(final Context ctx, final String pkg, final boolean next,
+                                      final int strategy) {
+        if (sRangePageUp) return;
+        sRangePageUp = true;
+        try {
+            final Palette p = Palette.of(ctx);
+            final Dialog dlg = new Dialog(ctx);
+            dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
+
+            final boolean vertical = strategy != STRATEGY_HORIZONTAL;
+            final String mode = vertical ? (next ? "上滑" : "下滑") : (next ? "左滑" : "右滑");
+
+            LinearLayout root = card(ctx, p);
+            root.addView(headerView(ctx, p, pkg,
+                    "「" + (next ? "下一页" : "上一页") + "」的滑动范围",
+                    label(ctx, strategy) + " · 起点用内置的，还是自己滑一次？"));
+
+            root.addView(optionRow(ctx, p, "用默认范围",
+                    "内置比例路径 · 直接返回也是这个", true,
+                    new Runnable() {
+                        @Override public void run() {
+                            dlg.dismiss();
+                            perform(ctx, pkg, next, strategy);
+                        }
+                    }));
+
+            root.addView(optionRow(ctx, p, "自定义滑动范围",
+                    "按你习惯的方式「" + mode + "」一次，之后该应用照此轨迹执行", false,
+                    new Runnable() {
+                        @Override public void run() {
+                            dlg.dismiss();
+                            startCalibration(ctx, pkg, next, new SwipeCalibrateOverlay.Listener() {
+                                @Override public void onDone() { perform(ctx, pkg, next, strategy); }
+                            });
+                        }
+                    }));
+
+            root.addView(divider(ctx, p));
+            root.addView(actionButton(ctx, p, "取消", new Runnable() {
+                @Override public void run() { dlg.dismiss(); }
+            }));
+
+            // Back = 用默认范围. Dialog.dispatchKeyEvent consults the OnKeyListener before its own
+            // back-to-cancel path, so the two cannot both fire.
+            dlg.setOnKeyListener(new DialogInterface.OnKeyListener() {
+                @Override public boolean onKey(DialogInterface d, int code, KeyEvent e) {
+                    if (code != KeyEvent.KEYCODE_BACK) return false;
+                    if (e.getAction() == KeyEvent.ACTION_UP) {
+                        dlg.dismiss();
+                        perform(ctx, pkg, next, strategy);
+                    }
+                    return true;
+                }
+            });
+            dlg.setOnDismissListener(new DialogInterface.OnDismissListener() {
+                @Override public void onDismiss(DialogInterface d) {
+                    sRangePageUp = false;
+                    synchronized (sPrompting) { sPrompting.remove(pkg); }
+                    HookUtils.log(TAG + ": range page closed pkg=" + pkg);
+                }
+            });
+
+            dlg.setContentView(root);
+            styleAndShow(ctx, dlg);
+            HookUtils.log(TAG + ": range page pkg=" + pkg + " dir=" + (next ? DIR_NEXT : DIR_PREV)
+                    + " strategy=" + strategy);
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": showRangePage: " + th);
+            sRangePageUp = false;
+            synchronized (sPrompting) { sPrompting.remove(pkg); }
+            perform(ctx, pkg, next, strategy);
+        }
+    }
+
     public static void showConfigDialog(final Context ctx) {
         sMain.post(new Runnable() {
             @Override public void run() {
@@ -918,11 +1039,99 @@ public final class PageTurnConfig {
     /**
      * The write may travel to system_server over a broadcast, so give it a moment before
      * re-reading -- otherwise the reopened list would still show the previous value.
+     *
+     * <p>Guarded against a dead host: reopening a dialog from a {@code PencilPanelActivity} that
+     * is already finishing is what produced
+     * {@code E WindowManager: android.view.WindowLeaked: Activity …PencilPanelActivity has leaked
+     * window … at PageTurnConfig.styleAndShow(PageTurnConfig.java:1016)} (device log, 2026-09-23
+     * 17:27:41). The host can go away between the tap and this 250 ms timer — the user closes the
+     * panel right after a change — so check before showing, not after.</p>
      */
     private static void reopenConfigSoon(final Context ctx) {
         sMain.postDelayed(new Runnable() {
-            @Override public void run() { showConfigDialog(ctx); }
+            @Override public void run() {
+                if (hostGone(ctx)) {
+                    HookUtils.log(TAG + ": host activity gone, skip reopen");
+                    return;
+                }
+                showConfigDialog(ctx);
+            }
         }, 250);
+    }
+
+    /** True when the activity we were opened from is finishing or already destroyed. */
+    private static boolean hostGone(Context ctx) {
+        try {
+            Activity a = activityOf(ctx);
+            return a != null && (a.isFinishing() || a.isDestroyed());
+        } catch (Throwable th) {
+            return false;
+        }
+    }
+
+    /**
+     * Ties a dialog's lifetime to the OEM activity whose context it was built with.
+     *
+     * <p>Panel dialogs hang off {@code PencilPanelActivity}, an activity we do not own. Nothing in
+     * that activity dismisses our windows on its way out, so if it is destroyed while one of our
+     * dialogs is up the window is leaked ({@code WindowLeaked}, seen in the field). When the
+     * context is system_server's there is no activity to outlive and this is a no-op.</p>
+     */
+    private static void bindToHostLifetime(Context ctx, Dialog dlg) {
+        try {
+            final Activity host = activityOf(ctx);
+            if (host == null) return;
+            final Application app = host.getApplication();
+            if (app == null) return;
+            app.registerActivityLifecycleCallbacks(new HostLifetime(app, host, dlg));
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": bindToHostLifetime: " + th);
+        }
+    }
+
+    /** One per panel dialog; drops itself on the host's destroy or the dialog's close. */
+    private static final class HostLifetime implements Application.ActivityLifecycleCallbacks {
+        private final Application app;
+        private final Activity host;
+        private final Dialog dlg;
+        private boolean released;
+
+        HostLifetime(Application app, Activity host, Dialog dlg) {
+            this.app = app;
+            this.host = host;
+            this.dlg = dlg;
+        }
+
+        private void release() {
+            if (released) return;
+            released = true;
+            try {
+                app.unregisterActivityLifecycleCallbacks(this);
+            } catch (Throwable ignored) { }
+        }
+
+        /** The dialog closed on its own: stop watching, nothing left to dismiss. */
+        private void reapIfClosed() {
+            try {
+                if (!dlg.isShowing()) release();
+            } catch (Throwable ignored) { }
+        }
+
+        @Override public void onActivityCreated(Activity a, Bundle b) { reapIfClosed(); }
+        @Override public void onActivityStarted(Activity a) { reapIfClosed(); }
+        @Override public void onActivityResumed(Activity a) { reapIfClosed(); }
+        @Override public void onActivityPaused(Activity a) { reapIfClosed(); }
+        @Override public void onActivityStopped(Activity a) { reapIfClosed(); }
+        @Override public void onActivitySaveInstanceState(Activity a, Bundle b) { reapIfClosed(); }
+
+        @Override public void onActivityDestroyed(Activity a) {
+            if (a != host) { reapIfClosed(); return; }
+            release();
+            try {
+                if (dlg.isShowing()) dlg.dismiss();
+                HookUtils.log(TAG + ": host destroyed, closed our dialog");
+            } catch (Throwable ignored) { }
+        }
     }
 
     // ==================================================================
@@ -1012,6 +1221,7 @@ public final class PageTurnConfig {
         }
         dlg.setCancelable(true);
         dlg.setCanceledOnTouchOutside(true);
+        bindToHostLifetime(ctx, dlg);
         try {
             dlg.show();
         } catch (Throwable th) {
