@@ -466,18 +466,98 @@ public final class PageTurnConfig {
         requestCalibrateOp(ctx, pkg, next, "calibrate");
     }
 
-    /** Show the calibration overlay. Only safe under the system uid (overlay window). */
+    /**
+     * Bring the target app to the front, then open the recorder on top of it.
+     *
+     * <p>The recorder lets the calibrated gesture through to whatever is underneath it, so
+     * "which app is underneath" is not cosmetic: recording over the device-center panel would
+     * capture a trajectory the target app will never receive. That panel is the host of this
+     * entry point, not the app being configured, so the app has to be launched first. A launch is
+     * not instantaneous, so the foreground is polled rather than slept on, with a bounded give-up
+     * so a package without a launcher activity cannot stall the flow.</p>
+     */
     static void startCalibration(final Context ctx, final String pkg, final boolean next,
                                 final SwipeCalibrateOverlay.Listener onDone) {
         sMain.post(new Runnable() {
             @Override public void run() {
                 try {
-                    SwipeCalibrateOverlay.show(ctx, pkg, next, onDone);
+                    bringToFront(ctx, pkg, next, onDone, AWAIT_TRIES);
                 } catch (Throwable th) {
                     HookUtils.log(TAG + ": startCalibration: " + th);
+                    showCalibration(ctx, pkg, next, onDone);
                 }
             }
         });
+    }
+
+    /** ~3 s of patience, in {@link #AWAIT_STEP_MS} steps. */
+    private static final int AWAIT_TRIES = 14;
+    private static final long AWAIT_STEP_MS = 220L;
+
+    private static void bringToFront(final Context ctx, final String pkg, final boolean next,
+                                     final SwipeCalibrateOverlay.Listener onDone, final int tries) {
+        String fg = null;
+        try {
+            fg = getForegroundPackage(ctx);
+        } catch (Throwable th) {
+            // Best effort: a detector failure must not block the recorder.
+        }
+        if (pkg.equals(fg)) {
+            HookUtils.log(TAG + ": calibrate, app already in front: " + pkg);
+            showCalibration(ctx, pkg, next, onDone);
+            return;
+        }
+        if (tries == AWAIT_TRIES) {
+            boolean launched = false;
+            try {
+                Intent i = ctx.getPackageManager().getLaunchIntentForPackage(pkg);
+                if (i != null) {
+                    i.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+                    launchContext(ctx).startActivity(i);
+                    launched = true;
+                } else {
+                    HookUtils.log(TAG + ": no launcher activity for " + pkg);
+                }
+            } catch (Throwable th) {
+                HookUtils.log(TAG + ": cannot launch " + pkg + ": " + th);
+            }
+            if (!launched) {
+                showCalibration(ctx, pkg, next, onDone);
+                return;
+            }
+            HookUtils.log(TAG + ": launched " + pkg + " before calibrating");
+        }
+        if (tries <= 0) {
+            HookUtils.log(TAG + ": " + pkg + " never came to the front, calibrating anyway");
+            showCalibration(ctx, pkg, next, onDone);
+            return;
+        }
+        sMain.postDelayed(new Runnable() {
+            @Override public void run() {
+                bringToFront(ctx, pkg, next, onDone, tries - 1);
+            }
+        }, AWAIT_STEP_MS);
+    }
+
+    private static void showCalibration(Context ctx, String pkg, boolean next,
+                                       SwipeCalibrateOverlay.Listener onDone) {
+        try {
+            SwipeCalibrateOverlay.show(ctx, pkg, next, onDone);
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": showCalibration: " + th);
+        }
+    }
+
+    /**
+     * The calibration request arrives in system_server, where {@code startActivity} on the plain
+     * system context works but logs "Calling a method in the system process without a qualified
+     * user" and leans on an implicit current-user fallback. Qualifying the context would need
+     * {@code createContextAsUser} / {@code getUser} / {@code UserHandle.of}, none of which are in
+     * the public SDK — not worth hidden-API plumbing for a log line, so the call stays as is.
+     * Measured: the target app is resumed ~250 ms after the request.
+     */
+    private static Context launchContext(Context ctx) {
+        return ctx;
     }
 
     // ==================================================================
@@ -819,9 +899,13 @@ public final class PageTurnConfig {
                     new Runnable() {
                         @Override public void run() {
                             dlg.dismiss();
-                            startCalibration(ctx, pkg, next, new SwipeCalibrateOverlay.Listener() {
-                                @Override public void onDone() { perform(ctx, pkg, next, strategy); }
-                            });
+                            // Hand the job to system_server rather than opening the recorder
+                            // right here. The recorder is a system-uid facility: it needs a
+                            // gesture monitor (uid must be SYSTEM_UID or SHELL_UID) and it
+                            // launches the target app. This panel is com.oplus.ipemanager, a
+                            // normal app uid, so a recorder started here could never see the
+                            // touch stream and would silently fall back to blocking capture.
+                            requestCalibration(ctx, pkg, next);
                         }
                     }));
 
@@ -1451,7 +1535,7 @@ public final class PageTurnConfig {
      * is available on every API this module runs on, but the state-list fallback is kept so a
      * factory failure can never leave a row without any visual response.
      */
-    private static Drawable pressable(Context ctx, int rippleColor, float radiusDp) {
+    static Drawable pressable(Context ctx, int rippleColor, float radiusDp) {
         float r = dp(ctx, radiusDp);
         GradientDrawable content = new GradientDrawable();
         content.setColor(Color.TRANSPARENT);
@@ -1488,7 +1572,7 @@ public final class PageTurnConfig {
         }
     }
 
-    private static Drawable appIcon(Context ctx, String pkg) {
+    static Drawable appIcon(Context ctx, String pkg) {
         try {
             return ctx.getPackageManager().getApplicationIcon(pkg);
         } catch (Throwable th) {
@@ -1510,7 +1594,7 @@ public final class PageTurnConfig {
 
     /** Night / light aware palette, ColorOS-flavoured (green accent). */
     static final class Palette {
-        final int card, title, body, ripple, divider, accent, idle, handle;
+        final int card, title, body, ripple, divider, accent, idle, handle, warn;
 
         private Palette(boolean night) {
             if (night) {
@@ -1522,6 +1606,9 @@ public final class PageTurnConfig {
                 accent  = 0xFF43D17F;
                 idle    = 0x40FFFFFF;
                 handle  = 0x33FFFFFF;
+                // Reserved for "this is not the app you think it is" (see the recorder's chip
+                // and hint): deliberately not the accent, that one reads as a success.
+                warn    = 0xFFF08A5D;
             } else {
                 card    = 0xFFFFFFFF;
                 title   = 0xFF191A1F;
@@ -1531,6 +1618,7 @@ public final class PageTurnConfig {
                 accent  = 0xFF00A863;
                 idle    = 0x30000000;
                 handle  = 0x33000000;
+                warn    = 0xFFC25A16;
             }
         }
 

@@ -212,6 +212,65 @@ APK `releases/PenBridge-Hook-tb522fu-v4.8.7.apk`（sha256 `d824a787…4169c3`）
 dex 含 `showRangePage`/`sRangePageUp`/`HostLifetime`/`bindToHostLifetime`/`hostGone`。
 **已装机 + 重启生效**（设备 17:43:56 boot，`pageturn config receiver registered`）。
 
+## P0.17 校准改为「透传录制」：不吞输入，只看一份副本（Hook 4.9.0 → 4.9.1）
+
+**需求**（用户 2026-09-23）：自定义滑动范围时，滑动事件要**从 overlay 透传给下层 App**，让用户
+在录制时看到目标应用的真实表现；同时 overlay **左上角展示当前下层 App 信息**。
+
+**问题定性**：原校准层是全屏**可触摸**窗口，录制时下层 App 被冻住 —— 用户对着一块不动的屏幕
+瞄准，录到的轨迹描述的是 App 从没见过的一次滑动。「滑了没反应」因此无法区分是轨迹不对还是
+功能坏了。
+
+**两件事，缺一不可**：
+1. **不吞**：录制态窗口 flags 改为 `FLAG_NOT_TOUCHABLE | FLAG_NOT_FOCUSABLE |
+   FLAG_NOT_TOUCH_MODAL`，且**去掉 `FLAG_DIM_BEHIND`**（把 App 调暗是同一个谎的另一种形式）。
+   `NOT_TOUCH_MODAL` 不是可选项 —— modal 窗口会把可触摸区域之外的事件**吸收**而非下传。
+2. **照记**：新增 `TouchSpy.java`，用 **gesture monitor**（`InputManager.monitorGestureInput`）
+   拿到事件流的**只读副本**，App 照常收到并响应原始事件；轨迹与时间戳从副本取样。窗口没变
+   touchable，所以这**不是「转发/注入」**（注入会被最上层窗口再吃一次，且绕不开死循环）。
+
+**实机踩到的三个硬事实（全部有日志/代码证据）**：
+1. **`monitorGestureInput` 的返回类型变了** —— Android 15 / ColorOS 返回
+   `android.view.InputMonitor` **包装对象**，不是 `InputChannel`。4.9.0 直接把返回值当 channel 用，
+   于是 `PenTouchSpy: unexpected channel type class android.view.InputMonitor` →
+   `no monitor channel available, recorder stays blocking`：**日志一片健康，功能静默降级**。
+   修法：防御式解包 `getInputChannel()` → 字段 `mInputChannel` → 才放弃；解包出的 wrapper 要留着，
+   `close()` 它才是注销 monitor（且它自己会 dispose channel，别重复释放）。
+2. **这个 API 是 system-uid 专属**（`callingUid == SYSTEM_UID || SHELL_UID`）。实测
+   `com.oplus.ipemanager` 跑在 **u0_a121**（普通 app uid）⇒ **从面板进程起的录制永远拿不到 spy**。
+   因此把「自定义范围」全部改成广播交给 system_server 开窗（`showRangePage` 不再本地
+   `startCalibration`），并把「先拉起目标 App」也放在那边做。路由收敛成单入口：
+   `startCalibration` 只被 `SystemStylusHooks` 调用，面板两处只发 `requestCalibration`。
+3. **必须在目标 App 里录**：透传意味着「下层是谁」不再是装饰 —— 在设备中心面板上录会得到一条
+   目标 App 永远收不到的轨迹。所以点「自定义滑动范围」先 `getLaunchIntentForPackage` +
+   `FLAG_ACTIVITY_NEW_TASK` 拉起目标 App，再**轮询前台**（220ms × 14 ≈ 3s，有界，失败照常开窗）。
+
+**UI**：录制态没有卡片（窗口不可触摸，卡片上的按钮也点不到），改为画布提示（两行，带阴影保证
+在任何 App 上都可读）+ 左上角**独立小窗** App 芯片（图标 / 名称 / 包名，浮层上点击 = 取消）。
+芯片必须另起一个窗口：**一个窗口没法靠 flag 做到「部分区域透传、部分区域可交互」**。前台不是目标
+App 时芯片转 warn 色并显示「≠ 目标「X」」，画布首行也照实说当前前台是谁。
+
+**语义修正**：透传时那次滑动**已经作用于 App**，所以「完成」绝不能重放（否则翻两页）。规则收敛到
+`finish()` 一处：`listener != null && !passThrough` 才执行欠下的翻页；blocking 降级时照旧执行。
+顺带把「安全网关闭」与「用户关闭」分开（`autoClose(reason)` 不执行欠账）—— 息屏/看门狗触发时
+注入手势是用户没要求过的动作（4.8.9 实测有过这条日志）。
+
+**构建与验证（4.9.1，2026-09-23 18:02 装机 + 重启）**：
+- 新增 `hook/source/stubs/android/view/{InputChannel,InputEventReceiver}.java`（**编译期 stub**，
+  `android.jar` 里没有这两个类）+ `build_hook_source.py` 的 `_provided_prefixes` 增加两条 ⇒
+  产物里这两个类定义 **0 个**（dexdump 292 类），反射字符串
+  `monitorGestureInput` / `monitorInput` / `getInputChannel` / `mInputChannel` 都在 dex 里。
+- 实测日志（`am broadcast ... --es op calibrate --es pkg com.android.settings`）：
+  `monitorGestureInput via client -> channel (InputMonitor)` → `spy armed` →
+  `recording started ... passthrough=true`，随后**一次真实手指滑动被录下并落盘**
+  （`persistCalibration ... pts=32 向右滑动 · 882ms space=3840x2560`）→ `result ... custom=true`
+  → `closing ... why=user`，**整个过程没有出现 `injected ... swipe`**（透传模式不重放，符合设计）。
+- 用户随后自测也走了同一条新链路（`recording started for com.oplus.wirelesssettings
+  ... passthrough=true`，来自 app 进程经广播到 system_server）⇒ 路由改造在真机成立。
+- **未做**：录制态的观感（芯片 / 画布提示 / 虚线参考范围）与「下层 App 真的跟着滚」这最后一步
+  需要人眼确认 —— 我在设备侧时它是锁屏/息屏状态，没有可看的画面，也不该去动用户的锁屏。
+- 中间产物 4.9.0（返回类型 bug 版）已删，不提交。
+
 ## Bug-fix: xposed_scope 遗漏 `android`（system_server）（2026-09-22）
 
 - [x] **问题**：`arrays.xml` 的 `xposed_scope` 只有 `system`（SystemUI）而**缺少 `android`**

@@ -1919,10 +1919,30 @@ final class SystemStylusHooks {
                         // channel to ask for a trajectory calibration, which must run here
                         // because the overlay window needs the system uid.
                         if ("calibrate".equals(op)) {
-                            boolean next = !PageTurnConfig.DIR_PREV.equals(intent.getStringExtra("dir"));
-                            HookUtils.log("pageturn calibrate request: " + pkg + " dir="
+                            final String calPkg = pkg;
+                            final boolean next = !PageTurnConfig.DIR_PREV.equals(intent.getStringExtra("dir"));
+                            HookUtils.log("pageturn calibrate request: " + calPkg + " dir="
                                     + (next ? PageTurnConfig.DIR_NEXT : PageTurnConfig.DIR_PREV));
-                            PageTurnConfig.startCalibration(ctx, pkg, next, null);
+                            // Runs here on purpose: this receiver is registered in system_server,
+                            // the only uid that gets a gesture monitor (used to observe the
+                            // calibrated swipe without blocking it) and the only one that may
+                            // start another app on the user's behalf.
+                            PageTurnConfig.startCalibration(ctx, calPkg, next,
+                                    new SwipeCalibrateOverlay.Listener() {
+                                @Override public void onDone() {
+                                    // Only reached when the recorder had to block the gesture
+                                    // (no monitor channel available): the app never saw the
+                                    // swipe, so it still owes a page turn. In pass-through mode
+                                    // the recorder skips this — the app already reacted.
+                                    try {
+                                        int s = PageTurnConfig.getStrategy(ctx, calPkg);
+                                        if (s < 0) s = PageTurnConfig.STRATEGY_VERTICAL;
+                                        PageTurnConfig.perform(ctx, calPkg, next, s);
+                                    } catch (Throwable th) {
+                                        HookUtils.log("pageturn calibrate onDone: " + th);
+                                    }
+                                }
+                            });
                             return;
                         }
                         if ("clear_calib".equals(op)) {

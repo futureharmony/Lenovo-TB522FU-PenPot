@@ -186,11 +186,20 @@ def main() -> None:
             [str(p) for p in sorted(COMPILE_STUBS.rglob("*.java"))])
         d8_cmd = ([D8] if not R8_JAR.is_file()
                   else ["java", "-cp", R8_JAR, "com.android.tools.r8.D8"])
-        # Xposed API and the UEventObserver stub are provided at runtime by
-        # LSPosed / the framework. They must never be baked into classes.dex,
+        # Xposed API and the framework's hidden classes (UEventObserver, and the input
+        # channel pair TouchSpy observes gestures with) are provided at runtime by
+        # LSPosed / the boot classpath. They must never be baked into classes.dex,
         # otherwise LSPosed refuses to load the module ("The Xposed API
-        # classes are compiled into the module's APK").
-        _provided_prefixes = ("android/os/UEventObserver", "de/robv/android/xposed/")
+        # classes are compiled into the module's APK"), and a stale copy of a
+        # framework class would shadow the real one for every class below it.
+        _provided_prefixes = (
+            "android/os/UEventObserver",
+            "de/robv/android/xposed/",
+            # hook/source/stubs/android/view/*.java -- neither is in android.jar, both
+            # exist in the boot classpath. See TouchSpy.
+            "android/view/InputChannel",
+            "android/view/InputEventReceiver",
+        )
         _class_files = []
         for p in sorted((tmp / "classes").rglob("*.class")):
             rel = str(p.relative_to(tmp / "classes"))
