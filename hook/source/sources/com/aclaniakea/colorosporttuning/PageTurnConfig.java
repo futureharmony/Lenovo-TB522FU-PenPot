@@ -68,10 +68,13 @@ import java.util.HashSet;
  * host theme and renders correctly from the system context.</p>
  *
  * <p><b>4.8.7 flow change:</b> picking 模拟滑动 no longer pops the full-screen recorder. The
- * recorder is a deliberate, user-invoked action ("自定义范围") reachable from the device center
- * (see {@link #showChangeDialog}), so an ordinary page turn executes immediately and is never
- * interrupted. Styles follow the ColorOS dialog language: accent-tinted text buttons, 16sp list
- * rows with secondary 12sp descriptions, ripple press feedback, 28dp card radius.</p>
+ * recorder is a deliberate, user-invoked action reachable only from the in-app first-trigger flow
+ * (chooser → {@link #showRangePage} → 「自定义滑动范围」), so an ordinary page turn executes
+ * immediately and is never interrupted. The device center's per-app page shows the same four
+ * strategies for review / change / clear and nothing else (2026-09-23); see
+ * {@link #showChangeDialog} for why re-recording must happen inside the target app. Styles follow
+ * the ColorOS dialog language: accent-tinted text buttons, 16sp list rows with secondary 12sp
+ * descriptions, ripple press feedback, 28dp card radius.</p>
  */
 public final class PageTurnConfig {
     private static final String TAG = "PageTurnConfig";
@@ -966,7 +969,8 @@ public final class PageTurnConfig {
                         hint.setText("首次在某个应用中触发「上一页 / 下一页」时会自动弹出选择，"
                                 + "选定后即可在此查看与修改。\n\n"
                                 + "若模拟滑动在该应用里没反应，说明默认滑动的起点不在它的可滚动区域内 ——"
-                                + "进入对应应用后选「自定义「上一页 / 下一页」滑动范围」，按你的习惯滑一次即可。");
+                                + "在该应用里触发「上一页 / 下一页」、选一种「模拟」时点「自定义滑动范围」，"
+                                + "按你的习惯滑一次即可（轨迹必须在该应用内录制，这里只负责选择方式）。");
                         hint.setTextSize(13);
                         hint.setTextColor(p.body);
                         hint.setLineSpacing(dp(ctx, 4), 1f);
@@ -1017,10 +1021,16 @@ public final class PageTurnConfig {
         });
     }
 
-    private static String calibrationDesc(Context ctx, String pkg, boolean next) {
-        float[][] pts = getCalibration(ctx, pkg, next);
-        if (pts == null) return "当前：默认范围 · 点按后滑一次即可记录";
-        return "当前：自定义 · " + describeCalibration(pts) + " · 点按可重录";
+    private static String calibrationDetail(Context ctx, String pkg) {
+        StringBuilder sb = new StringBuilder();
+        for (boolean next : new boolean[]{true, false}) {
+            float[][] pts = getCalibration(ctx, pkg, next);
+            if (pts == null) continue;
+            if (sb.length() > 0) sb.append("、");
+            sb.append("「").append(next ? "下一页" : "上一页").append("」")
+              .append(describeCalibration(pts));
+        }
+        return sb.toString();
     }
 
     private static boolean anyCalibration(Context ctx, String pkg) {
@@ -1028,58 +1038,47 @@ public final class PageTurnConfig {
     }
 
     /**
-     * Per-app editor. Self-drawn (not {@link #showChoice}) because it carries extra
-     * calibration rows for the swipe strategies, and those rows need a handle on the dialog
-     * to dismiss it before requesting the overlay.
+     * Per-app editor. Four strategy rows — the same four the first-trigger chooser shows, in the
+     * same order with the same descriptions — plus a clear action.
      *
-     * <p>The 自定义滑动范围 rows are the <b>only</b> entry point of {@link SwipeCalibrateOverlay}
-     * since 4.8.7 — nothing pops that full-screen surface implicitly any more.</p>
+     * <p><b>No calibration rows here (2026-09-23, by request).</b> Re-recording a trajectory is an
+     * in-app gesture: it needs the target app underneath (the recorder passes touches through) and
+     * the user has to be looking at the thing they are aiming at. Offering it from the device
+     * center produced exactly the failure the recorder exists to fix — aiming at a trajectory from
+     * inside a different app's panel. So the device center only <i>selects a strategy</i>; the
+     * recorder is reached exclusively from the first-trigger flow inside the app
+     * ({@link #showRangePage} → 「自定义滑动范围」).</p>
+     *
+     * <p><b>Locked rows.</b> Once the app owns a custom trajectory, 水平模拟 / 垂直模拟 are
+     * disabled: a recorded path was captured on one axis, and switching the axis would replay it
+     * with the wrong start point and the wrong direction — the class of failure this whole feature
+     * exists to remove. The lock is explicit and states its way out: clear the app's config, then
+     * re-trigger inside the app and pick 「自定义滑动范围」. The KeyEvent strategies stay
+     * selectable — they inject no gesture, so no trajectory is involved.</p>
      */
     private static void showChangeDialog(final Context ctx, final String pkg) {
         try {
             final int cur = getStrategy(ctx, pkg);
+            final boolean locked = anyCalibration(ctx, pkg);
             final Palette p = Palette.of(ctx);
             final Dialog dlg = new Dialog(ctx);
             dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
 
             LinearLayout root = card(ctx, p);
-            root.addView(headerView(ctx, p, pkg, "翻页触发方式", "为该应用选择翻页模拟方式："));
-            root.addView(strategyRows(ctx, p, pkg, cur, dlg));
+            root.addView(headerView(ctx, p, pkg, "翻页触发方式",
+                    locked ? "当前：" + label(ctx, cur) + " · 已自定义滑动轨迹"
+                           : "为该应用选择翻页模拟方式："));
+            root.addView(strategyRows(ctx, p, pkg, cur, dlg, locked));
 
-            if (isSwipeStrategy(cur)) {
+            if (locked) {
                 root.addView(divider(ctx, p));
-                root.addView(optionRow(ctx, p, "自定义「下一页」滑动范围",
-                        calibrationDesc(ctx, pkg, true), false,
-                        new Runnable() {
-                            @Override public void run() {
-                                dlg.dismiss();
-                                requestCalibration(ctx, pkg, true);
-                            }
-                        }));
-                root.addView(optionRow(ctx, p, "自定义「上一页」滑动范围",
-                        calibrationDesc(ctx, pkg, false), false,
-                        new Runnable() {
-                            @Override public void run() {
-                                dlg.dismiss();
-                                requestCalibration(ctx, pkg, false);
-                            }
-                        }));
-                if (anyCalibration(ctx, pkg)) {
-                    root.addView(optionRow(ctx, p, "恢复默认滑动范围",
-                            "清除本应用两个方向的自定义轨迹", false,
-                            new Runnable() {
-                                @Override public void run() {
-                                    dlg.dismiss();
-                                    clearCalibration(ctx, pkg, true);
-                                    clearCalibration(ctx, pkg, false);
-                                    reopenConfigSoon(ctx);
-                                }
-                            }));
-                }
+                root.addView(lockedNotice(ctx, p, pkg));
             }
 
             root.addView(divider(ctx, p));
-            root.addView(optionRow(ctx, p, "清除该应用配置", "下次触发时重新询问", false,
+            root.addView(optionRow(ctx, p, "清除该应用配置",
+                    locked ? "清空后回到该应用重新触发，即可重选方式并重录轨迹"
+                           : "下次触发时重新询问", false,
                     new Runnable() {
                         @Override public void run() {
                             dlg.dismiss();
@@ -1100,15 +1099,31 @@ public final class PageTurnConfig {
         }
     }
 
+    /** Explains the lock and gives the exact way out. Body text, no affordance of its own. */
+    private static View lockedNotice(Context ctx, Palette p, String pkg) {
+        TextView t = new TextView(ctx);
+        t.setText("已记录自定义轨迹：" + calibrationDetail(ctx, pkg) + "。\n"
+                + "「水平模拟 / 垂直模拟」暂不可选 —— 改轴会让这条轨迹失效。\n"
+                + "如需重设：先点下方「清除该应用配置」，再回到该应用触发「上一页 / 下一页」，"
+                + "选模拟方式时点「自定义滑动范围」重录一次。");
+        t.setTextSize(13);
+        t.setTextColor(p.body);
+        t.setLineSpacing(dp(ctx, 4), 1f);
+        t.setPadding(dp(ctx, 2), dp(ctx, 2), dp(ctx, 2), dp(ctx, 8));
+        return t;
+    }
+
     /** The four strategy rows, reused by both the one-time chooser and the editor. */
     private static View strategyRows(Context ctx, Palette p, final String pkg, int cur,
-                                     final Dialog dlg) {
+                                     final Dialog dlg, boolean locked) {
         LinearLayout box = new LinearLayout(ctx);
         box.setOrientation(LinearLayout.VERTICAL);
         for (int i = 0; i < OPTION_NAMES.length; i++) {
             final int idx = i;
+            // Locked = a trajectory exists and this row would change the axis it was recorded on.
+            boolean enabled = !(locked && isSwipeStrategy(i));
             if (i > 0) box.addView(thinSpace(ctx));
-            box.addView(optionRow(ctx, p, OPTION_NAMES[i], OPTION_DESCS[i], i == cur,
+            box.addView(optionRow(ctx, p, OPTION_NAMES[i], OPTION_DESCS[i], i == cur, enabled,
                     new Runnable() {
                         @Override public void run() {
                             dlg.dismiss();
@@ -1390,17 +1405,36 @@ public final class PageTurnConfig {
 
     static View optionRow(Context ctx, Palette p, String name, String desc,
                                   boolean selected, final Runnable onClick) {
+        return optionRow(ctx, p, name, desc, selected, true, onClick);
+    }
+
+    /**
+     * Selectable row with an explicit {@code enabled} state.
+     *
+     * <p>Disabled rows are used by the device-center editor to lock 水平模拟 / 垂直模拟 once a
+     * custom trajectory exists for the app: switching the simulation axis would replay a path the
+     * user recorded for the other axis. A disabled row keeps its radio indicator (a locked row can
+     * still be the <i>current</i> choice, and hiding that would be worse) but loses every tappable
+     * affordance — no ripple, no click listener, no focus.</p>
+     */
+    static View optionRow(Context ctx, Palette p, String name, String desc,
+                                  boolean selected, boolean enabled, final Runnable onClick) {
         LinearLayout row = new LinearLayout(ctx);
         row.setOrientation(LinearLayout.HORIZONTAL);
         row.setGravity(Gravity.CENTER_VERTICAL);
         row.setMinimumHeight(dp(ctx, 62));
         row.setPadding(dp(ctx, 14), dp(ctx, 10), dp(ctx, 14), dp(ctx, 10));
-        row.setBackground(pressable(ctx, p.ripple, 16));
-        row.setClickable(true);
-        row.setFocusable(true);
+        if (enabled) row.setBackground(pressable(ctx, p.ripple, 16));
+        row.setClickable(enabled);
+        row.setFocusable(enabled);
+
+        int nameColor = enabled ? p.title : p.muted;
+        int descColor = enabled ? p.body : p.muted;
 
         View dot = new View(ctx);
-        dot.setBackground(radioDot(ctx, selected, p.accent, p.idle));
+        dot.setBackground(radioDot(ctx, selected,
+                enabled ? p.accent : p.muted,
+                enabled ? p.idle : p.muted));
         LinearLayout.LayoutParams dlp = new LinearLayout.LayoutParams(dp(ctx, 20), dp(ctx, 20));
         dlp.rightMargin = dp(ctx, 14);
         row.addView(dot, dlp);
@@ -1410,22 +1444,24 @@ public final class PageTurnConfig {
         TextView n = new TextView(ctx);
         n.setText(name);
         n.setTextSize(16);
-        n.setTextColor(p.title);
+        n.setTextColor(nameColor);
         n.setTypeface(null, selected ? Typeface.BOLD : Typeface.NORMAL);
         texts.addView(n);
         if (desc != null && !desc.isEmpty()) {
             TextView d = new TextView(ctx);
             d.setText(desc);
             d.setTextSize(12);
-            d.setTextColor(p.body);
+            d.setTextColor(descColor);
             d.setPadding(0, dp(ctx, 3), 0, 0);
             texts.addView(d);
         }
         row.addView(texts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
 
-        row.setOnClickListener(new View.OnClickListener() {
-            @Override public void onClick(View v) { if (onClick != null) onClick.run(); }
-        });
+        if (enabled) {
+            row.setOnClickListener(new View.OnClickListener() {
+                @Override public void onClick(View v) { if (onClick != null) onClick.run(); }
+            });
+        }
         return row;
     }
 
@@ -1594,7 +1630,7 @@ public final class PageTurnConfig {
 
     /** Night / light aware palette, ColorOS-flavoured (green accent). */
     static final class Palette {
-        final int card, title, body, ripple, divider, accent, idle, handle, warn;
+        final int card, title, body, ripple, divider, accent, idle, handle, warn, muted;
 
         private Palette(boolean night) {
             if (night) {
@@ -1609,6 +1645,8 @@ public final class PageTurnConfig {
                 // Reserved for "this is not the app you think it is" (see the recorder's chip
                 // and hint): deliberately not the accent, that one reads as a success.
                 warn    = 0xFFF08A5D;
+                // Locked/disabled rows: still legible, clearly not tappable.
+                muted   = 0x4DFFFFFF;
             } else {
                 card    = 0xFFFFFFFF;
                 title   = 0xFF191A1F;
@@ -1619,6 +1657,7 @@ public final class PageTurnConfig {
                 idle    = 0x30000000;
                 handle  = 0x33000000;
                 warn    = 0xFFC25A16;
+                muted   = 0x42000000;
             }
         }
 
