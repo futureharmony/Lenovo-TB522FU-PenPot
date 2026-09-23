@@ -114,6 +114,49 @@ APK `releases/PenBridge-Hook-tb522fu-v4.8.7.apk`（sha256 `d824a787…4169c3`）
 - 「自定义范围」一旦从设备中心进入，滑动的屏幕是面板而不是目标 App（只能靠比例换算 + 提示语引导）。
   若实测难瞄准，再加一条「先跳到该 App 再校准」的入口（`getLaunchIntentForPackage` + 延时开窗）。
 
+## P0.15 校准层挂载点审查：留在 system_server，但把爆炸半径钉死（Hook 4.8.8）
+
+**问题**（用户 2026-09-23）：「模拟滑动窗口挂在 system 下，是否会影响 system 稳定性？有没有更合理的
+挂载点（比如挂到某个 app）？」
+
+**事实核验**（不是推测，逐条对应代码）：
+- `PageTurnConfig.sMain = new Handler(Looper.getMainLooper())`，`startCalibration()` 把
+  `SwipeCalibrateOverlay.show()` post 到这个 looper；接收方 `registerPageTurnConfigReceiver` 注册在
+  **system_server** ⇒ `wm.addView()` 由 **system_server 主线程**执行。
+- `ViewRootImpl` 在**调用 `addView()` 的那个线程**上构造 ⇒ 该窗口的 measure / layout / draw /
+  `dispatchTouchEvent` / **所有行点击回调**都在 system_server 主线程上跑。这是这个挂载点的真实代价，
+  不是「有个窗口」这么轻。
+- 该窗口是**全屏 + 可触摸 + 可获焦**（无 `FLAG_NOT_FOCUSABLE`，`Surface.setFocusable(true)`）。
+  Home 键不会移除它，息屏不会移除它，底下的 App 被杀也不会移除它 ⇒ 一旦残留，**全设备触摸被吃掉**，
+  表现就是「平板卡死」，只能重启。
+
+**判决：不迁到 app 进程。** 迁到模块自己的进程只能买到「崩溃隔离」，代价却是：模块 APK 目前
+**只有 Receiver + Provider、没有任何 Activity**（`hook/source/resources/AndroidManifest.xml`）⇒ 要新加
+组件 + 启动入口；要 `SYSTEM_ALERT_WINDOW` 且要用户手动授权「显示在其他应用上层」（ROM 还可能回收）；
+轨迹要经 IPC 回 system_server 才能落盘（而 `Settings.Global` 只有 system uid 能写）；注入本身也仍必须
+留在 system_server。同一个功能两套代码路径，换来的是稳定性边际收益 —— 不划算。
+
+**做法：把三类风险就地钉死（4.8.8）**：
+1. **异常防火墙**。`Surface.dispatchTouchEvent` / `dispatchKeyEvent`、`TrailView.onDraw`
+   （拆出 `drawTrail`）、帧循环 `previewTick`、`heartbeat` 全部 try/catch 到底。理由：行点击回调是在
+   `dispatchTouchEvent` 里跑的，漏出去的异常不是「overlay 坏了」，而是**框架重启**。
+   （`onDraw` 另有依仗：framework 的软件绘制路径只 log 不中断，但不能赌这个。）
+2. **空闲看门狗 + 息屏自关**。新增 `heartbeat`（1 秒一条消息）：`PowerManager.isInteractive()` 为假
+   → `finish()`；连续无输入 `WATCHDOG_MS = 90s` → `finish()`。任何触摸/按键都会重置计时
+   （`lastInputRt`，在 `dispatchTouchEvent` 里打点，这样被行消费掉的点击也计入）。这是「窗口绝不会
+   残留」的兜底 —— 之前的实现**只**靠用户主动点取消/完成/返回。
+3. **主线程开销封顶**。结果态预览动画 `MAX_ANIM_CYCLES = 4` 圈后停在完成帧、不再 post（之前是 16ms
+   无限循环）；`FRAME_MS` 16 → 24；记录态实时轨迹 `invalidateTrail()` 节流到 `TRAIL_MIN_FRAME_MS = 24ms`
+   （≈40fps，**只影响画面刷新率，不影响采样** —— 采样仍是逐事件的）。`attach()` 失败时补 `detach()`
+   （原来只清 `sCurrent`，半挂载状态会让 `isVisible()` 永远为真、静默废掉整条翻页分发链路）。
+
+**构建**：`ANDROID_SDK=/tmp/android-sdk ACL_VERSION=4.8.8 python3 hook/tools/build_hook_source.py`
+→ `versionName=4.8.8 / versionCode=480008`，0 error；dex 校验含 `WATCHDOG_MS`/`heartbeat`/
+`invalidateTrail`/`drawTrail`/`dispatchTouchEvent`。APK `releases/PenBridge-Hook-tb522fu-v4.8.8.apk`。
+
+**未做（等用户定）**：把「从设备中心点自定义范围」改成**先 `getLaunchIntentForPackage(pkg)` 拉起目标 App、
+延时 ~900ms 再开窗** —— 这是真正解决「盲瞄」的做法，且不必迁进程。属交互变更，未擅自改。
+
 ## Bug-fix: xposed_scope 遗漏 `android`（system_server）（2026-09-22）
 
 - [x] **问题**：`arrays.xml` 的 `xposed_scope` 只有 `system`（SystemUI）而**缺少 `android`**

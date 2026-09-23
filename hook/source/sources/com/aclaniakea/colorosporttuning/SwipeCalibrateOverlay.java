@@ -9,6 +9,7 @@ import android.graphics.RectF;
 import android.graphics.Typeface;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.PowerManager;
 import android.os.SystemClock;
 import android.view.Gravity;
 import android.view.KeyEvent;
@@ -56,6 +57,25 @@ import java.util.List;
  * {@link PageTurnConfig#screenSize}, the exact space the replay path multiplies back out — a
  * recorded trajectory can therefore never be interpreted in a different coordinate system.</p>
  *
+ * <p><b>Why it lives in system_server, and what that costs (2026-09-23).</b> The window is added
+ * from the system context, so it needs no {@code SYSTEM_ALERT_WINDOW} grant and it covers any
+ * app; moving it into the module's own process would buy crash isolation only, at the price of a
+ * new activity/service component, a user-granted overlay app-op that the ROM may revoke, and IPC
+ * for a trajectory that system_server has to persist anyway. It stays here. The price of that
+ * choice is explicit: {@code ViewRootImpl} runs on whichever looper calls {@code addView}, which
+ * is system_server's main thread, so traversal, {@code onDraw}, touch dispatch and every click
+ * listener of this surface execute there too. Containment, all mandatory:</p>
+ * <ul>
+ *   <li>every interactive entry point is a try/catch firewall ({@code dispatchTouchEvent},
+ *       {@code dispatchKeyEvent}, {@code onDraw}, the frame loop, the heartbeat) — an escaped
+ *       throwable is not "the overlay broke", it is the framework restarting;</li>
+ *   <li>the frame loop is bounded ({@link #MAX_ANIM_CYCLES}) and the live trail is throttled, so
+ *       an open card does not sit on the main looper at 60 Hz;</li>
+ *   <li>{@link #WATCHDOG_MS} plus screen-off detection guarantees the window is removed even if
+ *       every user-facing exit is missed — without it a stuck surface swallows every touch on
+ *       the device.</li>
+ * </ul>
+ *
  * <p>The dim is kept deliberately light (0.30): calibration is usually launched from the device
  * center, and being able to see the app or panel behind the band is what lets the user place the
  * start point inside the app's scrollable region.</p>
@@ -79,9 +99,30 @@ public final class SwipeCalibrateOverlay {
     private static final float MIN_TRAVEL = 0.12f;
     private static final float MIN_STEP_FRAC = 0.004f;
     private static final long MIN_STEP_MS = 8L;
-    private static final long FRAME_MS = 16L;
+    private static final long FRAME_MS = 24L;
     private static final long PREVIEW_HOLD_MS = 650L;
     private static final long PREVIEW_GAP_MS = 220L;
+
+    /**
+     * The result preview is a hint, not an ambient animation. After this many loops the frame
+     * loop parks on the finished state, so a card left open stops consuming frames on the
+     * looper it lives on (system_server's main thread — see the class comment).
+     */
+    private static final int MAX_ANIM_CYCLES = 4;
+
+    /** Minimum spacing between live-trail repaints while recording (≈40 fps). */
+    private static final long TRAIL_MIN_FRAME_MS = 24L;
+
+    /** Housekeeping period: screen-off detection + idle watchdog. */
+    private static final long HEARTBEAT_MS = 1000L;
+
+    /**
+     * A full-screen touchable overlay owned by system_server outlives everything else: the home
+     * key does not remove it, the screen going off does not remove it, the app underneath dying
+     * does not remove it. If it were ever left attached every touch on the device would land on
+     * it and the tablet would look frozen. The watchdog is the guaranteed way out.
+     */
+    private static final long WATCHDOG_MS = 90_000L;
 
     private static SwipeCalibrateOverlay sCurrent;
 
@@ -101,6 +142,9 @@ public final class SwipeCalibrateOverlay {
             o.attach();
         } catch (Throwable th) {
             HookUtils.log(TAG + ": attach: " + th);
+            // A half-attached surface must not stay registered: isVisible() gates the whole
+            // dispatch path, so a stale sCurrent would silently disable page turning.
+            o.detach();
             sCurrent = null;
             if (onDone != null) onDone.onDone();
         }
@@ -119,6 +163,7 @@ public final class SwipeCalibrateOverlay {
     private final PageTurnConfig.Palette pal;
 
     private WindowManager wm;
+    private PowerManager pm;
     private Surface root;
     private TrailView trail;
     private LinearLayout card;
@@ -128,6 +173,9 @@ public final class SwipeCalibrateOverlay {
     private float[][] shown;
     private boolean shownIsCustom;
     private long previewStart;
+    private int animCycles;
+    private long lastInputRt;
+    private long lastTrailRt;
     private String feedbackText;
     private boolean dismissed;
 
@@ -154,6 +202,7 @@ public final class SwipeCalibrateOverlay {
     // ==================================================================
     private void attach() {
         wm = (WindowManager) ctx.getSystemService(Context.WINDOW_SERVICE);
+        pm = (PowerManager) ctx.getSystemService(Context.POWER_SERVICE);
 
         root = new Surface(ctx);
         trail = new TrailView(ctx);
@@ -184,6 +233,7 @@ public final class SwipeCalibrateOverlay {
         wm.addView(root, lp);
         refreshCard();
         startRecord();
+        armHeartbeat();
         HookUtils.log(TAG + ": shown pkg=" + pkg + " dir=" + pageWord()
                 + " vertical=" + vertical + " space=" + sw + "x" + sh
                 + " foreground=" + foregroundNow());
@@ -191,6 +241,7 @@ public final class SwipeCalibrateOverlay {
 
     private void detach() {
         h.removeCallbacks(previewTick);
+        h.removeCallbacks(heartbeat);
         try {
             if (wm != null && root != null) wm.removeView(root);
         } catch (Throwable th) {
@@ -199,6 +250,42 @@ public final class SwipeCalibrateOverlay {
         root = null;
         if (sCurrent == this) sCurrent = null;
     }
+
+    // ==================================================================
+    // Liveness: the surface must never be able to outlive its welcome
+    // ==================================================================
+    private void armHeartbeat() {
+        lastInputRt = SystemClock.elapsedRealtime();
+        h.removeCallbacks(heartbeat);
+        h.postDelayed(heartbeat, HEARTBEAT_MS);
+    }
+
+    /**
+     * One message per second, two jobs: notice that the screen went off (a dimmed recorder over
+     * a sleeping display, waking back into it, is a stuck-looking device) and enforce
+     * {@link #WATCHDOG_MS} of continuous idleness. Both paths call {@link #finish()}, which is
+     * idempotent, so a double fire is harmless.
+     */
+    private final Runnable heartbeat = new Runnable() {
+        @Override public void run() {
+            if (dismissed || root == null) return;
+            try {
+                if (pm != null && !pm.isInteractive()) {
+                    HookUtils.log(TAG + ": screen off while attached, closing");
+                    finish();
+                    return;
+                }
+                if (SystemClock.elapsedRealtime() - lastInputRt >= WATCHDOG_MS) {
+                    HookUtils.log(TAG + ": idle " + WATCHDOG_MS + "ms, closing");
+                    finish();
+                    return;
+                }
+            } catch (Throwable th) {
+                HookUtils.log(TAG + ": heartbeat: " + th);
+            }
+            h.postDelayed(this, HEARTBEAT_MS);
+        }
+    };
 
     // ==================================================================
     // Wording
@@ -354,29 +441,57 @@ public final class SwipeCalibrateOverlay {
     /** Result phase: loop the animation of the saved trajectory. */
     private void startResultAnim() {
         previewStart = SystemClock.uptimeMillis();
+        animCycles = 0;
         h.removeCallbacks(previewTick);
         h.post(previewTick);
     }
 
     private final Runnable previewTick = new Runnable() {
         @Override public void run() {
-            if (root == null || phase != PHASE_RESULT) return;
-            long dur = Math.max(140L, Math.round(shown[shown.length - 1][2]));
-            long cycle = dur + PREVIEW_HOLD_MS + PREVIEW_GAP_MS;
-            long el = SystemClock.uptimeMillis() - previewStart;
-            if (el >= cycle) {
-                previewStart = SystemClock.uptimeMillis();
-                el = 0L;
+            if (dismissed || root == null || phase != PHASE_RESULT) return;
+            try {
+                if (shown == null || shown.length < 2) return;
+                long dur = Math.max(140L, Math.round(shown[shown.length - 1][2]));
+                long cycle = dur + PREVIEW_HOLD_MS + PREVIEW_GAP_MS;
+                long el = SystemClock.uptimeMillis() - previewStart;
+                if (el >= cycle) {
+                    animCycles++;
+                    if (animCycles >= MAX_ANIM_CYCLES) {
+                        // Park on the finished state and stop posting: from here on the open
+                        // card costs nothing but the heartbeat's one message per second.
+                        trail.setProgress(1f);
+                        trail.invalidate();
+                        return;
+                    }
+                    previewStart = SystemClock.uptimeMillis();
+                    el = 0L;
+                }
+                float p;
+                if (el <= dur) p = (float) el / (float) dur;
+                else if (el <= dur + PREVIEW_HOLD_MS) p = 1f;
+                else p = 0f;
+                trail.setProgress(p);
+                trail.invalidate();
+                h.postDelayed(this, FRAME_MS);
+            } catch (Throwable th) {
+                // A draw-loop bug must not escape onto this looper (system_server's main one).
+                HookUtils.log(TAG + ": previewTick: " + th);
             }
-            float p;
-            if (el <= dur) p = (float) el / (float) dur;
-            else if (el <= dur + PREVIEW_HOLD_MS) p = 1f;
-            else p = 0f;
-            trail.setProgress(p);
-            trail.invalidate();
-            h.postDelayed(this, FRAME_MS);
         }
     };
+
+    /**
+     * Repaint the live trail, throttled. A swipe arrives at up to 120 Hz and every
+     * {@code invalidate()} schedules a traversal on this window's looper; the recorded samples are
+     * unaffected by the throttle (they are taken per event), only the painted frame rate is
+     * (~40 fps).
+     */
+    private void invalidateTrail() {
+        long now = SystemClock.uptimeMillis();
+        if (now - lastTrailRt < TRAIL_MIN_FRAME_MS) return;
+        lastTrailRt = now;
+        trail.invalidate();
+    }
 
     /** Arm the recorder. This is the initial state of the surface. */
     private void startRecord() {
@@ -436,6 +551,7 @@ public final class SwipeCalibrateOverlay {
                 downTimeMs = e.getEventTime();
                 addPoint(e.getX(), e.getY(), 0L);
                 trail.setRecording(true, rec);
+                lastTrailRt = 0L;   // first MOVE of the gesture always repaints
                 trail.invalidate();
                 return true;
 
@@ -445,7 +561,7 @@ public final class SwipeCalibrateOverlay {
                 float ny = e.getY() / (float) sh;
                 if (rec.size() < MAX_RAW_POINTS && shouldSample(nx, ny, t)) addPoint(e.getX(), e.getY(), t);
                 trail.setRecording(true, rec);
-                trail.invalidate();
+                invalidateTrail();
                 return true;
             }
 
@@ -576,11 +692,38 @@ public final class SwipeCalibrateOverlay {
         }
 
         @Override public boolean dispatchKeyEvent(KeyEvent e) {
-            if (e.getKeyCode() == KeyEvent.KEYCODE_BACK) {
-                if (e.getAction() == KeyEvent.ACTION_UP) onBack();
+            lastInputRt = SystemClock.elapsedRealtime();
+            try {
+                if (e.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+                    if (e.getAction() == KeyEvent.ACTION_UP) onBack();
+                    return true;
+                }
+                return super.dispatchKeyEvent(e);
+            } catch (Throwable th) {
+                HookUtils.log(TAG + ": dispatchKeyEvent: " + th);
                 return true;
             }
-            return super.dispatchKeyEvent(e);
+        }
+
+        /**
+         * Single funnel for every interactive event of this surface. Two jobs.
+         *
+         * <p>(1) It is the only place the idle watchdog can be rearmed for taps that a child row
+         * consumes before {@link #onTouchEvent} ever sees them.</p>
+         *
+         * <p>(2) It is the exception firewall. Row click listeners run inside this call, so an
+         * escaped throwable would unwind into the looper that owns this window — and that looper
+         * is {@code system_server}'s main thread, where an uncaught exception means the framework
+         * restarts. A broken overlay must degrade to "this tap did nothing", never to a reboot.</p>
+         */
+        @Override public boolean dispatchTouchEvent(MotionEvent e) {
+            lastInputRt = SystemClock.elapsedRealtime();
+            try {
+                return super.dispatchTouchEvent(e);
+            } catch (Throwable th) {
+                HookUtils.log(TAG + ": dispatchTouchEvent: " + th);
+                return true;
+            }
         }
 
         @Override public boolean onTouchEvent(MotionEvent e) {
@@ -697,6 +840,17 @@ public final class SwipeCalibrateOverlay {
         }
 
         @Override protected void onDraw(Canvas cv) {
+            // Contained on purpose: the framework's software-draw path logs and continues, but
+            // this is still the system main thread and this class must not be the reason a frame
+            // blows up there. A failed frame simply draws nothing.
+            try {
+                drawTrail(cv);
+            } catch (Throwable th) {
+                HookUtils.log(TAG + ": onDraw: " + th);
+            }
+        }
+
+        private void drawTrail(Canvas cv) {
             // While recording, the range currently in effect stays visible as a faint dashed
             // reference so the user can place the new gesture relative to it.
             if (recording) drawReference(cv);
