@@ -224,6 +224,13 @@ public final class SwipeCalibrateOverlay {
     private final int sh;
     private final PageTurnConfig.Palette pal;
 
+    private int step = 1;
+    private float[][] ptsNext;
+    private float[][] ptsPrev;
+    private String firstDirWord;
+    private String neededDirWord;
+    private String neededActionWord;
+
     private WindowManager wm;
     private PowerManager pm;
     private WindowManager.LayoutParams lp;
@@ -584,21 +591,32 @@ public final class SwipeCalibrateOverlay {
     // Wording
     // ==================================================================
     private String pageWord() {
-        return next ? "下一页" : "上一页";
+        return (step == 1) ? "翻页下" : "翻页上";
     }
 
     private String modeWord() {
-        if (vertical) return next ? "上滑" : "下滑";
-        return next ? "左滑" : "右滑";
+        if (step == 1) return vertical ? "向上" : "向左";
+        return neededDirWord != null ? neededDirWord : (vertical ? "向下" : "向右");
     }
 
     private void reloadShown() {
-        float[][] stored = PageTurnConfig.getCalibration(ui, pkg, next);
-        if (stored != null) {
-            shown = stored;
+        float[][] storedNext = PageTurnConfig.getCalibration(ui, pkg, true);
+        float[][] storedPrev = PageTurnConfig.getCalibration(ui, pkg, false);
+        if (storedNext != null && storedPrev != null) {
+            ptsNext = storedNext;
+            ptsPrev = storedPrev;
+            shown = storedNext;
+            shownIsCustom = true;
+        } else if (storedNext != null) {
+            ptsNext = storedNext;
+            shown = storedNext;
+            shownIsCustom = true;
+        } else if (storedPrev != null) {
+            ptsPrev = storedPrev;
+            shown = storedPrev;
             shownIsCustom = true;
         } else {
-            shown = PageTurnConfig.defaultPath(vertical, next);
+            shown = PageTurnConfig.defaultPath(vertical, true);
             shownIsCustom = false;
         }
     }
@@ -615,19 +633,15 @@ public final class SwipeCalibrateOverlay {
     private String subtitleText() {
         String app = PageTurnConfig.appLabel(ui, pkg);
         if (phase == PHASE_RECORD) {
-            return app + " · 在「" + app + "」上按你习惯的方式" + modeWord() + "一次，"
-                    + "轨迹与速度都会被记录。";
+            return app + " · 依次录入向上与向下两个动作";
         }
-        String current = shownIsCustom
-                ? ("自定义 · " + PageTurnConfig.describeCalibration(shown))
-                : "默认范围";
-        return app + " · 当前：" + current;
+        return app + " · " + (shownIsCustom ? "已自定义双向轨迹" : "默认范围");
     }
 
     private String titleText() {
         return phase == PHASE_RECORD
-                ? ("自定义" + modeWord() + "范围")
-                : "已保存滑动范围";
+                ? ("自定义翻页滑动范围 (" + step + "/2)")
+                : "已保存翻页滑动范围";
     }
 
     /**
@@ -639,10 +653,24 @@ public final class SwipeCalibrateOverlay {
      */
     private String[] recordHint() {
         String target = PageTurnConfig.appLabel(ui, pkg);
+        String currentMode = (step == 1)
+                ? (vertical ? "向上" : "向左")
+                : (neededDirWord != null ? neededDirWord : (vertical ? "向下" : "向右"));
+        String currentAct = (step == 1)
+                ? "翻页下（下一页）"
+                : (neededActionWord != null ? neededActionWord : "翻页上（上一页）");
+
+        String mainHint;
+        if (step == 1) {
+            mainHint = "第 1/2 步：录入「" + currentAct + "」轨迹";
+        } else {
+            mainHint = "已录入" + firstDirWord + " · 第 2/2 步：录入「" + currentAct + "」";
+        }
+
         if (!passThrough) {
             return new String[] {
-                    "在屏幕上按你习惯的方式" + modeWord() + "一次",
-                    "本机未提供手势旁路，录制期间应用不会响应 · 点左上角卡片可取消",
+                    mainHint,
+                    "在屏幕上按习惯「" + currentMode + "滑动」一次 · 本机未提供旁路，录制期间应用不响应 · 点左上角卡片取消",
                     "0"};
         }
         String fg = chipPkg != null ? chipPkg : foregroundNow();
@@ -650,13 +678,12 @@ public final class SwipeCalibrateOverlay {
         if (away) {
             return new String[] {
                     "当前前台是「" + PageTurnConfig.appLabel(ui, fg) + "」",
-                    "请切回「" + target + "」再" + modeWord() + " —— 轨迹记给该应用的「"
-                            + pageWord() + "」· 点左上角卡片可取消",
+                    "请切回「" + target + "」再「" + currentMode + "滑动」—— 录制「" + currentAct + "」· 点左上角卡片取消",
                     "1"};
         }
         return new String[] {
-                "在「" + target + "」上按你习惯的方式" + modeWord() + "一次",
-                "应用会照常响应，这一整条轨迹与速度都会被记录 · 点左上角卡片可取消",
+                mainHint,
+                "在「" + target + "」上按习惯「" + currentMode + "滑动」一次 · 应用会照常响应 · 点左上角卡片取消",
                 "0"};
     }
 
@@ -700,7 +727,28 @@ public final class SwipeCalibrateOverlay {
         sub.setPadding(0, PageTurnConfig.dp(ui, 4), 0, PageTurnConfig.dp(ui, 10));
         card.addView(sub);
 
-        if (feedbackText != null && !feedbackText.isEmpty()) {
+        if (shownIsCustom && ptsNext != null && ptsPrev != null) {
+            LinearLayout details = new LinearLayout(ui);
+            details.setOrientation(LinearLayout.VERTICAL);
+            details.setPadding(PageTurnConfig.dp(ui, 2), 0, PageTurnConfig.dp(ui, 2), PageTurnConfig.dp(ui, 8));
+
+            TextView rowNext = new TextView(ui);
+            rowNext.setText("翻页下（下一页）：" + PageTurnConfig.describeCalibration(ptsNext));
+            rowNext.setTextSize(13);
+            rowNext.setTextColor(pal.accent);
+            rowNext.setTypeface(null, Typeface.BOLD);
+            details.addView(rowNext);
+
+            TextView rowPrev = new TextView(ui);
+            rowPrev.setText("翻页上（上一页）：" + PageTurnConfig.describeCalibration(ptsPrev));
+            rowPrev.setTextSize(13);
+            rowPrev.setTextColor(pal.accent);
+            rowPrev.setTypeface(null, Typeface.BOLD);
+            rowPrev.setPadding(0, PageTurnConfig.dp(ui, 4), 0, 0);
+            details.addView(rowPrev);
+
+            card.addView(details);
+        } else if (feedbackText != null && !feedbackText.isEmpty()) {
             TextView fb = new TextView(ui);
             fb.setText(feedbackText);
             fb.setTextSize(13);
@@ -720,14 +768,14 @@ public final class SwipeCalibrateOverlay {
         }
 
         card.addView(PageTurnConfig.optionRow(ui, pal, "重新记录",
-                "再滑一次，覆盖当前记录", false,
+                "再录入一次向上/向下两个滑动动作", false,
                 new Runnable() {
                     @Override public void run() { startRecord(); }
                 }));
 
         if (shownIsCustom) {
             card.addView(PageTurnConfig.optionRow(ui, pal, "恢复默认范围",
-                    "清除本应用该方向的自定义轨迹", false,
+                    "清除本应用的自定义轨迹", false,
                     new Runnable() {
                         @Override public void run() { clearCustom(); }
                     }));
@@ -768,7 +816,7 @@ public final class SwipeCalibrateOverlay {
                 long el = SystemClock.uptimeMillis() - previewStart;
                 if (el >= cycle) {
                     animCycles++;
-                    if (animCycles >= MAX_ANIM_CYCLES) {
+                    if (animCycles >= MAX_ANIM_CYCLES * 2) {
                         // Park on the finished state and stop posting: from here on the open
                         // card costs nothing but the heartbeat's one message per second.
                         trail.setProgress(1f);
@@ -777,6 +825,9 @@ public final class SwipeCalibrateOverlay {
                     }
                     previewStart = SystemClock.uptimeMillis();
                     el = 0L;
+                    if (ptsNext != null && ptsPrev != null) {
+                        shown = (animCycles % 2 == 0) ? ptsNext : ptsPrev;
+                    }
                 }
                 float p;
                 if (el <= dur) p = (float) el / (float) dur;
@@ -819,6 +870,14 @@ public final class SwipeCalibrateOverlay {
 
     /** Arm the recorder. This is the initial state of the surface. */
     private void startRecord() {
+        step = 1;
+        ptsNext = null;
+        ptsPrev = null;
+        firstDirWord = null;
+        neededDirWord = null;
+        neededActionWord = null;
+        shown = PageTurnConfig.defaultPath(vertical, true);
+        shownIsCustom = false;
         h.removeCallbacks(previewTick);
         synchronized (recLock) {
             rec.clear();
@@ -847,7 +906,7 @@ public final class SwipeCalibrateOverlay {
         trail.setRecording(true, null);
         applyRecordHint();
         trail.invalidate();
-        HookUtils.log(TAG + ": recording started for " + pkg + " dir=" + pageWord()
+        HookUtils.log(TAG + ": recording started for " + pkg + " vertical=" + vertical
                 + " passthrough=" + passThrough);
     }
 
@@ -864,13 +923,16 @@ public final class SwipeCalibrateOverlay {
         if (card != null) card.setVisibility(View.VISIBLE);
         refreshCard();
         startResultAnim();
-        HookUtils.log(TAG + ": result pkg=" + pkg + " dir=" + pageWord()
-                + " custom=" + shownIsCustom);
+        HookUtils.log(TAG + ": result pkg=" + pkg + " custom=" + shownIsCustom);
     }
 
     private void clearCustom() {
-        PageTurnConfig.clearCalibration(ui, pkg, next);
-        reloadShown();
+        PageTurnConfig.clearCalibration(ui, pkg, true);
+        PageTurnConfig.clearCalibration(ui, pkg, false);
+        ptsNext = null;
+        ptsPrev = null;
+        shown = PageTurnConfig.defaultPath(vertical, true);
+        shownIsCustom = false;
         feedbackText = "已恢复默认范围";
         phase = PHASE_RESULT;
         refreshCard();
@@ -1120,10 +1182,7 @@ public final class SwipeCalibrateOverlay {
         long dur = Math.round(b[2]);
         float travel = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
 
-        // Three outcomes of a swipe — no events, rejected, accepted — and only one of them shows a
-        // card, so the attempt has to be identifiable from the log alone. A rejection whose reason
-        // is not on screen is indistinguishable from "the recorder was dead".
-        HookUtils.log(TAG + ": commit raw=" + raw.length + " dur=" + dur
+        HookUtils.log(TAG + ": commit step=" + step + " raw=" + raw.length + " dur=" + dur
                 + "ms travel=" + (Math.round(travel * 1000f) / 1000f));
 
         if (dur < MIN_DURATION_MS) {
@@ -1139,33 +1198,77 @@ public final class SwipeCalibrateOverlay {
             return;
         }
 
+        float dx = b[0] - a[0];
+        float dy = b[1] - a[1];
+        if (vertical) {
+            if (Math.abs(dy) < Math.abs(dx)) {
+                setFeedback("检测到横向滑动，当前策略为垂直模拟，请上下滑动");
+                return;
+            }
+        } else {
+            if (Math.abs(dx) < Math.abs(dy)) {
+                setFeedback("检测到纵向滑动，当前策略为水平模拟，请左右滑动");
+                return;
+            }
+        }
+
         float[][] pts = resample(raw);
         if (pts == null) {
             setFeedback("轨迹无效，请再试一次");
             return;
         }
-        String fg = foregroundNow();
-        boolean away = fg != null && !fg.equals(pkg);
-        PageTurnConfig.saveCalibration(ui, pkg, next, pts,
-                ui.getResources().getConfiguration().orientation);
-        reloadShown();
-        feedbackText = "已保存：" + PageTurnConfig.describeCalibration(pts) + oppositeHint(pts)
-                + (away ? "　（记录时前台是「" + PageTurnConfig.appLabel(ui, fg)
-                        + "」，轨迹可能不适用）" : "");
-        enterResult();
-    }
 
-    /** Say so when the recorded direction is the opposite of the mode's default. */
-    private String oppositeHint(float[][] pts) {
-        float[] a = pts[0];
-        float[] b = pts[pts.length - 1];
-        float dx = b[0] - a[0];
-        float dy = b[1] - a[1];
-        boolean opposite;
-        if (vertical) opposite = (dy < 0) != next;
-        else opposite = (dx < 0) != next;
-        if (!opposite) return "";
-        return "（注：方向与「" + pageWord() + "」的默认相反）";
+        boolean isNext = vertical ? (dy < 0) : (dx < 0);
+        String dirWord = vertical ? (isNext ? "向上" : "向下") : (isNext ? "向左" : "向右");
+        String actWord = isNext ? "翻页下（下一页）" : "翻页上（上一页）";
+
+        if (step == 1) {
+            if (isNext) {
+                ptsNext = pts;
+                firstDirWord = dirWord;
+                neededDirWord = vertical ? "向下" : "向右";
+                neededActionWord = "翻页上（上一页）";
+                shown = PageTurnConfig.defaultPath(vertical, false);
+            } else {
+                ptsPrev = pts;
+                firstDirWord = dirWord;
+                neededDirWord = vertical ? "向上" : "向左";
+                neededActionWord = "翻页下（下一页）";
+                shown = PageTurnConfig.defaultPath(vertical, true);
+            }
+            step = 2;
+            feedbackText = null;
+            HookUtils.log(TAG + ": step 1 recorded: " + firstDirWord + " -> " + actWord);
+            synchronized (recLock) { rec.clear(); }
+            trail.setRecording(true, null);
+            applyRecordHint();
+            trail.invalidate();
+            return;
+        }
+
+        // step == 2
+        if (isNext && ptsNext != null) {
+            ptsNext = pts;
+            setFeedback("刚才已录入" + firstDirWord + "滑动，请「" + neededDirWord + "滑动」录入「" + neededActionWord + "」");
+            return;
+        } else if (!isNext && ptsPrev != null) {
+            ptsPrev = pts;
+            setFeedback("刚才已录入" + firstDirWord + "滑动，请「" + neededDirWord + "滑动」录入「" + neededActionWord + "」");
+            return;
+        } else {
+            if (isNext) ptsNext = pts;
+            else ptsPrev = pts;
+        }
+
+        int orient = ui.getResources().getConfiguration().orientation;
+        PageTurnConfig.saveCalibration(ui, pkg, true, ptsNext, orient);
+        PageTurnConfig.saveCalibration(ui, pkg, false, ptsPrev, orient);
+        shown = ptsNext;
+        shownIsCustom = true;
+        feedbackText = "已完成双向翻页滑动录制！";
+        HookUtils.log(TAG + ": both steps recorded: next=" + PageTurnConfig.describeCalibration(ptsNext)
+                + " prev=" + PageTurnConfig.describeCalibration(ptsPrev));
+        enterResult();
     }
 
     /** Thin the raw samples down to {@link #MAX_POINTS} while keeping first / last / timing. */
@@ -1357,9 +1460,8 @@ public final class SwipeCalibrateOverlay {
             for (int i = 1; i < r.length; i++) path.lineTo(r[i][0] * sw, r[i][1] * sh);
             cv.drawPath(path, refLine);
             cv.drawCircle(r[0][0] * sw, r[0][1] * sh, PageTurnConfig.dp(ui, 18), refDot);
-            cv.drawCircle(r[r.length - 1][0] * sw, r[r.length - 1][1] * sh,
-                    PageTurnConfig.dp(ui, 18), refDot);
-            cv.drawText("当前范围", r[0][0] * sw + PageTurnConfig.dp(ui, 26),
+            String refLabel = (step == 1) ? "参考范围（翻页下）" : "参考范围（翻页上）";
+            cv.drawText(refLabel, r[0][0] * sw + PageTurnConfig.dp(ui, 26),
                     r[0][1] * sh - PageTurnConfig.dp(ui, 22), refText);
         }
 

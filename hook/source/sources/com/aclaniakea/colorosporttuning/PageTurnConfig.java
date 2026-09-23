@@ -768,6 +768,12 @@ public final class PageTurnConfig {
             String p = cands.get(i);
             int s = getStrategy(ctx, p);
             if (s >= 0) {
+                if (isSwipeStrategy(s) && hasCalibration(ctx, p, !next) && !hasCalibration(ctx, p, next)) {
+                    HookUtils.log(TAG + ": partial calibration for " + p + ", prompting range for dir=" + (next ? DIR_NEXT : DIR_PREV));
+                    synchronized (sPrompting) { sPrompting.add(p); }
+                    showRangePage(ctx, p, next, s);
+                    return;
+                }
                 HookUtils.log(TAG + ": perform pkg=" + p + " strategy=" + s);
                 perform(ctx, p, next, s);
                 return;
@@ -826,7 +832,7 @@ public final class PageTurnConfig {
                                         //
                                         // KeyEvent strategies never ask: there is no range.
                                         if (isSwipeStrategy(strategy)
-                                                && getCalibration(ctx, pkg, next) == null) {
+                                                && (!hasCalibration(ctx, pkg, true) || !hasCalibration(ctx, pkg, false))) {
                                             // showChoice already dismissed and ran its onDismiss (which
                                             // released sPrompting); hold the app again so a pen
                                             // trigger cannot slip in behind the second page.
@@ -881,12 +887,13 @@ public final class PageTurnConfig {
             dlg.requestWindowFeature(Window.FEATURE_NO_TITLE);
 
             final boolean vertical = strategy != STRATEGY_HORIZONTAL;
-            final String mode = vertical ? (next ? "上滑" : "下滑") : (next ? "左滑" : "右滑");
+            final String mode1 = vertical ? "向上滑动" : "向左滑动";
+            final String mode2 = vertical ? "向下滑动" : "向右滑动";
 
             LinearLayout root = card(ctx, p);
             root.addView(headerView(ctx, p, pkg,
-                    "「" + (next ? "下一页" : "上一页") + "」的滑动范围",
-                    label(ctx, strategy) + " · 起点用内置的，还是自己滑一次？"));
+                    "翻页滑动范围",
+                    label(ctx, strategy) + " · 起点用内置的，还是自己录入？"));
 
             root.addView(optionRow(ctx, p, "用默认范围",
                     "内置比例路径 · 直接返回也是这个", true,
@@ -898,7 +905,7 @@ public final class PageTurnConfig {
                     }));
 
             root.addView(optionRow(ctx, p, "自定义滑动范围",
-                    "按你习惯的方式「" + mode + "」一次，之后该应用照此轨迹执行", false,
+                    "先后录入两个动作（" + mode1 + "与" + mode2 + "），分别对应「翻页下」与「翻页上」", false,
                     new Runnable() {
                         @Override public void run() {
                             dlg.dismiss();
