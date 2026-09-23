@@ -313,13 +313,15 @@ App 时芯片转 warn 色并显示「≠ 目标「X」」，画布首行也照�
 Hook 上载日志：`system_server stylus hooks installed (startOtherServices=1 run=1)`、
 `pageturn config receiver registered`。**观感（灰显是否够明显、提示是否可读）仍需人眼确认。**
 
-**文案定稿（4.9.3，19:06 装机 + 重启，`versionCode=490003`）**：`lockedNotice` 第三行按用户原话
-改为「重设模拟轨迹请点击重置后，到App界面，用笔翻页，触发模拟手势设置。」。提示里出现「重置」
-就必须有点得着的「重置」⇒ 两处 `optionRow` 的「清除该应用配置」统一改名为「重置」
-（`showChangeDialog` 的副行同步为「重置后到App界面用笔翻页，触发模拟手势设置」；`showChoice`
-的保留「下次触发时重新询问」）。**功能未动** —— 仍是 `clearCalibration(ctx,pkg,true/false)` ×2 +
-`setStrategy(PICK_CLEAR)`；改的只有标签与提示，避免「提示指着一个界面上不存在的名字」。
-dex 校验：新文案各命中 1 次，「清除该应用配置」命中 0 次，289 类、xposed/UEventObserver 定义 0。
+**文案定稿（4.9.4，19:11 装机 + 重启，`versionCode=490004`）**：`lockedNotice` 按用户最终原话定为
+两行 —— `已应用自定义轨迹：<detail>。` / `「水平模拟 / 垂直模拟」暂不可选 —— 重设模拟轨迹请点击
+清除该应用配置后，到App界面，用笔翻页，触发模拟手势设置。`（原三行的第二行「改轴会让这条轨迹失效」
+被并入，不再单独成句）。**按钮名以提示为准**：4.9.3 曾把两处 `optionRow` 改名「重置」，但用户定稿的
+提示指向的是「清除该应用配置」，故 4.9.4 全部回退原名（`showChangeDialog` 副行「清空后到App界面用笔
+翻页，重新触发模拟手势设置」；`showChoice` 保留「下次触发时重新询问」）。**功能全程未动** —— 仍是
+`clearCalibration(ctx,pkg,true/false)` ×2 + `setStrategy(PICK_CLEAR)`。
+**规矩（写进注释）**：提示语里出现的按钮名，必须在界面上逐字存在；两侧任一侧改动时一起改。
+dex 校验：新文案命中 1 次、旧「重置」行文案 0 次，289 类、xposed/UEventObserver 定义 0。
 
 ## Bug-fix: xposed_scope 遗漏 `android`（system_server）（2026-09-22）
 

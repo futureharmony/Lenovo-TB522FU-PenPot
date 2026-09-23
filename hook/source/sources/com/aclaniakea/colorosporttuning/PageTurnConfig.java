@@ -1076,8 +1076,8 @@ public final class PageTurnConfig {
             }
 
             root.addView(divider(ctx, p));
-            root.addView(optionRow(ctx, p, "重置",
-                    locked ? "重置后到App界面用笔翻页，触发模拟手势设置"
+            root.addView(optionRow(ctx, p, "清除该应用配置",
+                    locked ? "清空后到App界面用笔翻页，重新触发模拟手势设置"
                            : "下次触发时重新询问", false,
                     new Runnable() {
                         @Override public void run() {
@@ -1099,12 +1099,20 @@ public final class PageTurnConfig {
         }
     }
 
-    /** Explains the lock and gives the exact way out. Body text, no affordance of its own. */
+    /**
+     * Explains the lock and gives the exact way out. Body text, no affordance of its own.
+     *
+     * <p>The button name quoted here («清除该应用配置») must match the {@code optionRow} label below
+     * <b>verbatim</b>. 4.9.3 briefly renamed that row to 「重置」 to follow a draft of this copy; the
+     * final copy the user settled on still says 「清除该应用配置」, so 4.9.4 reverted the row. A notice
+     * that points at a name the UI does not have is worse than no notice — change both sides or
+     * neither.</p>
+     */
     private static View lockedNotice(Context ctx, Palette p, String pkg) {
         TextView t = new TextView(ctx);
-        t.setText("已记录自定义轨迹：" + calibrationDetail(ctx, pkg) + "。\n"
-                + "「水平模拟 / 垂直模拟」暂不可选 —— 改轴会让这条轨迹失效。\n"
-                + "重设模拟轨迹请点击重置后，到App界面，用笔翻页，触发模拟手势设置。");
+        t.setText("已应用自定义轨迹：" + calibrationDetail(ctx, pkg) + "。\n"
+                + "「水平模拟 / 垂直模拟」暂不可选 —— 重设模拟轨迹请点击清除该应用配置后，"
+                + "到App界面，用笔翻页，触发模拟手势设置。");
         t.setTextSize(13);
         t.setTextColor(p.body);
         t.setLineSpacing(dp(ctx, 4), 1f);
@@ -1270,7 +1278,7 @@ public final class PageTurnConfig {
 
         if (allowClear) {
             root.addView(divider(ctx, p));
-            root.addView(optionRow(ctx, p, "重置", "下次触发时重新询问", false,
+            root.addView(optionRow(ctx, p, "清除该应用配置", "下次触发时重新询问", false,
                     new Runnable() {
                         @Override public void run() {
                             dlg.dismiss();
