@@ -957,6 +957,7 @@ final class SystemStylusHooks {
             registerStateSync(context);
             registerBridgeSettingsWriter(context);
             registerDebugActionRunner(context);
+            registerPageTurnConfigReceiver(context);
             registerMagneticAttachListener(context);
             registerHallObserver(context);
             LenovoConsumerGestureReader.start(context);
@@ -1900,6 +1901,37 @@ final class SystemStylusHooks {
             HookUtils.log("debug action runner registered");
         } catch (Throwable th) {
             HookUtils.log("debug action runner: " + th);
+        }
+    }
+
+    /** Persist a per-app page-turn strategy. Sent by the device-center panel (ipemanager,
+     *  which cannot write Settings.Global durably) so the choice survives reboot. */
+    private static void registerPageTurnConfigReceiver(Context context) {
+        try {
+            BroadcastReceiver rcv = new BroadcastReceiver() {
+                @Override
+                public void onReceive(Context ctx, Intent intent) {
+                    try {
+                        String pkg = intent.getStringExtra("pkg");
+                        int strategy = intent.getIntExtra("strategy", -1);
+                        if (pkg == null || pkg.isEmpty()) return;
+                        // Unconditional direct write: this receiver always runs under the
+                        // persisting uid, and never re-broadcasts (no loop possible).
+                        PageTurnConfig.persist(ctx, pkg, strategy);
+                    } catch (Throwable th) {
+                        HookUtils.log("pageturn config receiver: " + th);
+                    }
+                }
+            };
+            IntentFilter filter = new IntentFilter(PenBridgeConstants.PAGETURN_CONFIG);
+            if (Build.VERSION.SDK_INT >= 33) {
+                context.registerReceiver(rcv, filter, 2);
+            } else {
+                context.registerReceiver(rcv, filter);
+            }
+            HookUtils.log("pageturn config receiver registered");
+        } catch (Throwable th) {
+            HookUtils.log("pageturn config receiver: " + th);
         }
     }
 

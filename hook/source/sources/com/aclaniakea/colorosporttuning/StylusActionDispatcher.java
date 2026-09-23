@@ -11,6 +11,7 @@ import android.view.InputDevice;
 import android.view.InputEvent;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
+import android.view.MotionEvent;
 
 import java.lang.reflect.Method;
 import java.util.Arrays;
@@ -156,65 +157,153 @@ public final class StylusActionDispatcher {
     }
 
     public static void pageTurn(Context context, boolean next) {
-        injectSwipe(context, next);
+        // Per-app strategy: resolve foreground package, prompt once if unconfigured,
+        // persist the choice, then perform. See PageTurnConfig.
+        PageTurnConfig.performWithPrompt(context, next);
+    }
+
+    // ------------------------------------------------------------------
+    // Synthetic swipe injection (2026-09-23 rewrite)
+    //
+    // Measured on device (OPD2409 / ColorOS, 小红书 com.xingin.xhs):
+    //   * `adb shell input swipe` switches the video feed reliably.
+    //   * the previous implementation here did nothing at all, even though the
+    //     dispatcher did deliver the events to the app window (proven with a held
+    //     touch + dumpsys input showing touchingPointers=[FINGER] on the app).
+    // The three construction differences that made the app ignore our gesture:
+    //   1. deviceId 0 (no device) instead of a genuine touchscreen device id;
+    //   2. all 12 events injected within ~1 ms while their eventTime spanned
+    //      120 ms into the FUTURE (the app sees a gesture whose timestamps do not
+    //      correspond to when it was received);
+    //   3. injectInputEvent(..., ASYNC) instead of WAIT_FOR_FINISH.
+    // This implementation mirrors `input`: real deviceId, real-time pacing (each
+    // event's timestamp IS the wall clock at send time), and WAIT_FOR_FINISH.
+    // ------------------------------------------------------------------
+
+    /** Wait until the target app has consumed each injected event (what `input` uses). */
+    private static final int INJECT_WAIT_FOR_FINISH = 2;
+
+    private static final Object sInjectLock = new Object();
+    private static volatile boolean sInjecting = false;
+    private static volatile int sTouchDeviceId = Integer.MIN_VALUE;
+
+    /** A real touchscreen device id; 0 means "no device" and gets gestures ignored. */
+    private static int touchDeviceId() {
+        int cached = sTouchDeviceId;
+        if (cached != Integer.MIN_VALUE) return cached;
+        int found = 0;
         try {
-            injectKey(next ? KeyEvent.KEYCODE_PAGE_DOWN : KeyEvent.KEYCODE_PAGE_UP);
-        } catch (Throwable ignored) {
+            for (int id : InputDevice.getDeviceIds()) {
+                InputDevice dev = InputDevice.getDevice(id);
+                if (dev == null) continue;
+                if ((dev.getSources() & InputDevice.SOURCE_TOUCHSCREEN) != 0) {
+                    found = id;
+                    break;
+                }
+            }
+        } catch (Throwable th) {
+            HookUtils.log(TAG + ": touchDeviceId: " + th);
+        }
+        HookUtils.log(TAG + ": touchscreen deviceId=" + found);
+        sTouchDeviceId = found;
+        return found;
+    }
+
+    private static void expectInjected(Object result, String what) {
+        if (result instanceof Boolean && !((Boolean) result)) {
+            HookUtils.log(TAG + ": injection rejected: " + what);
         }
     }
 
-    public static void injectSwipe(Context context, boolean next) {
-        try {
-            android.util.DisplayMetrics dm = context.getResources().getDisplayMetrics();
-            int w = dm.widthPixels;
-            int h = dm.heightPixels;
-            if (w <= 0 || h <= 0) {
-                w = 3840;
-                h = 2560;
+    private static void injectMotion(Method inject, Object im, int deviceId, long downTime,
+                                     int action, float x, float y) throws Exception {
+        MotionEvent e = MotionEvent.obtain(downTime, SystemClock.uptimeMillis(), action,
+                x, y, 1.0f, 1.0f, 0, 1.0f, 1.0f, deviceId, 0);
+        e.setSource(InputDevice.SOURCE_TOUCHSCREEN);
+        Object ok = inject.invoke(im, e, INJECT_WAIT_FOR_FINISH);
+        e.recycle();
+        expectInjected(ok, "action=" + action + " x=" + x + " y=" + y);
+    }
+
+    /** Fire a swipe off the main thread (WAIT_FOR_FINISH blocks until the app consumes). */
+    private static void swipeAsync(final Context context, final boolean vertical, final boolean next) {
+        synchronized (sInjectLock) {
+            if (sInjecting) {
+                HookUtils.log(TAG + ": swipe skipped, previous gesture still in flight");
+                return;
             }
-            // Next page: swipe from right to left (75% -> 25%)
-            // Prev page: swipe from left to right (25% -> 75%)
-            float startX = next ? (w * 0.75f) : (w * 0.25f);
-            float endX = next ? (w * 0.25f) : (w * 0.75f);
-            float y = h * 0.50f;
-
-            long downTime = SystemClock.uptimeMillis();
-            Object im = Class.forName("android.hardware.input.InputManager")
-                    .getMethod("getInstance").invoke(null);
-            Method inject = im.getClass().getMethod("injectInputEvent",
-                    InputEvent.class, Integer.TYPE);
-
-            android.view.MotionEvent down = android.view.MotionEvent.obtain(
-                    downTime, downTime, android.view.MotionEvent.ACTION_DOWN,
-                    startX, y, 0);
-            down.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-            inject.invoke(im, down, 0);
-            down.recycle();
-
-            int steps = 10;
-            for (int i = 1; i <= steps; i++) {
-                float curX = startX + (endX - startX) * ((float) i / steps);
-                long curTime = downTime + (i * 12);
-                android.view.MotionEvent move = android.view.MotionEvent.obtain(
-                        downTime, curTime, android.view.MotionEvent.ACTION_MOVE,
-                        curX, y, 0);
-                move.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-                inject.invoke(im, move, 0);
-                move.recycle();
-            }
-
-            long upTime = downTime + (steps * 12) + 15;
-            android.view.MotionEvent up = android.view.MotionEvent.obtain(
-                    downTime, upTime, android.view.MotionEvent.ACTION_UP,
-                    endX, y, 0);
-            up.setSource(InputDevice.SOURCE_TOUCHSCREEN);
-            inject.invoke(im, up, 0);
-            up.recycle();
-
-            HookUtils.log(TAG + ": injected touch swipe next=" + next + " (" + startX + " -> " + endX + ")");
-        } catch (Throwable th) {
-            HookUtils.log(TAG + ": injectSwipe failed: " + th);
+            sInjecting = true;
         }
+        Thread t = new Thread(new Runnable() {
+            @Override public void run() {
+                try {
+                    swipeInternal(context, vertical, next);
+                } catch (Throwable th) {
+                    HookUtils.log(TAG + ": swipe failed: " + th);
+                } finally {
+                    sInjecting = false;
+                }
+            }
+        }, "pen-swipe");
+        t.start();
+    }
+
+    private static void swipeInternal(Context context, boolean vertical, boolean next)
+            throws Exception {
+        android.util.DisplayMetrics dm = context.getResources().getDisplayMetrics();
+        int w = dm.widthPixels;
+        int h = dm.heightPixels;
+        if (w <= 0 || h <= 0) {
+            w = 3840;
+            h = 2560;
+        }
+
+        float x1, y1, x2, y2;
+        if (vertical) {
+            // Next page: swipe up (bottom -> top); Prev page: swipe down (top -> bottom).
+            float x = w * 0.50f;
+            x1 = x;
+            x2 = x;
+            y1 = next ? (h * 0.75f) : (h * 0.25f);
+            y2 = next ? (h * 0.25f) : (h * 0.75f);
+        } else {
+            // Next page: swipe right -> left; Prev page: left -> right.
+            float y = h * 0.50f;
+            y1 = y;
+            y2 = y;
+            x1 = next ? (w * 0.75f) : (w * 0.25f);
+            x2 = next ? (w * 0.25f) : (w * 0.75f);
+        }
+
+        int deviceId = touchDeviceId();
+        Object im = Class.forName("android.hardware.input.InputManager")
+                .getMethod("getInstance").invoke(null);
+        Method inject = im.getClass().getMethod("injectInputEvent", InputEvent.class, Integer.TYPE);
+
+        final int steps = 16;
+        final long stepMs = 16; // ~256 ms total: a human-paced flick with real timestamps
+        long downTime = SystemClock.uptimeMillis();
+        injectMotion(inject, im, deviceId, downTime, MotionEvent.ACTION_DOWN, x1, y1);
+        for (int i = 1; i <= steps; i++) {
+            Thread.sleep(stepMs);
+            float f = (float) i / steps;
+            injectMotion(inject, im, deviceId, downTime, MotionEvent.ACTION_MOVE,
+                    x1 + (x2 - x1) * f, y1 + (y2 - y1) * f);
+        }
+        Thread.sleep(stepMs);
+        injectMotion(inject, im, deviceId, downTime, MotionEvent.ACTION_UP, x2, y2);
+
+        HookUtils.log(TAG + ": injected " + (vertical ? "vertical" : "horizontal")
+                + " swipe next=" + next + " dev=" + deviceId
+                + " (" + x1 + "," + y1 + ") -> (" + x2 + "," + y2 + ")");
+    }
+
+    public static void injectSwipe(Context context, boolean next) {
+        swipeAsync(context, false, next);
+    }
+
+    public static void injectVerticalSwipe(Context context, boolean next) {
+        swipeAsync(context, true, next);
     }
 
     public static void undo(Context context) {

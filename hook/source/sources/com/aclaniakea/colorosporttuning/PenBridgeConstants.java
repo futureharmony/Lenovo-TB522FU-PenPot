@@ -44,6 +44,12 @@ final class PenBridgeConstants {
     static final String DISMISS_CAPSULE_LEGACY = "com.aclaniakea.lenovopenbridge.action.DISMISS_PENCIL_CAPSULE";
     static final String WRITE_GESTURE_KEY = "com.futureharmony.lenovopenbridge.WRITE_GESTURE_KEY";
     static final String WRITE_GESTURE_KEY_LEGACY = "com.aclaniakea.lenovopenbridge.WRITE_GESTURE_KEY";
+    /* Per-app page-turn trigger strategy. ipemanager (device-center panel) sends this
+       to ask system_server to persist a choice (system uid write survives reboot; an
+       app-process Settings.Global write does not, see TODO 1018). system_server also
+       writes directly when the runtime prompt resolves. Extra: "pkg" (String),
+       "strategy" (int, <0 = clear). */
+    static final String PAGETURN_CONFIG = "com.futureharmony.lenovopenbridge.PAGETURN_CONFIG";
     static final String RUN_ACTION = "com.futureharmony.lenovopenbridge.RUN_ACTION";
     static final String RUN_ACTION_LEGACY = "com.aclaniakea.lenovopenbridge.RUN_ACTION";
     static final String HAPTIC_TRANSPORT = "com.futureharmony.lenovopenbridge.action.HAPTIC_TRANSPORT";

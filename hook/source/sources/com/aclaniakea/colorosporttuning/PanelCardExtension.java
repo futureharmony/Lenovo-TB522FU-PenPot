@@ -224,8 +224,9 @@ public final class PanelCardExtension {
                 for (int i = 1; i < rows.size(); i++) {
                     if (centerY(rows.get(i)) > centerY(rows.get(lastIdx))) lastIdx = i;
                 }
-                return addExtraPanelRows(ctx, rows.get(lastIdx));
+                addExtraPanelRows(ctx, rows.get(lastIdx));
             }
+            return true;
         } catch (Throwable th) {
             HookUtils.log(TAG + ": assignments walk error: " + th);
         }
@@ -251,12 +252,14 @@ public final class PanelCardExtension {
                 card = parent;
             }
 
+            final boolean wantPageturn = shouldAddPageTurnRow(ctx);
             View extra = card.findViewWithTag("lenovo_panel_extra");
             if (extra != null) {
-                for (String t : new String[]{"long_press", "squeeze"}) {
+                for (String t : extraRowTypes(wantPageturn)) {
                     View vt = card.findViewWithTag("lenovo_extra_value_" + t);
                     if (vt instanceof TextView) {
-                        ((TextView) vt).setText(extraGestureLabel(ctx, t));
+                        ((TextView) vt).setText("pageturn".equals(t)
+                                ? pageturnSummary(ctx) : extraGestureLabel(ctx, t));
                     }
                 }
                 return true;
@@ -398,8 +401,12 @@ public final class PanelCardExtension {
             rowCard.addView(row0, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-            for (final String gestureType : new String[]{"long_press", "squeeze"}) {
-                final boolean lastRow = "squeeze".equals(gestureType);
+            final String[] extraTypes = extraRowTypes(wantPageturn);
+            HookUtils.log(TAG + ": extra rows: ctx=" + ctxClassName(ctx) + " host="
+                    + hostActivityName(ctx) + " pageturnRow=" + wantPageturn);
+            for (int ei = 0; ei < extraTypes.length; ei++) {
+                final String gestureType = extraTypes[ei];
+                final boolean lastRow = (ei == extraTypes.length - 1);
                 final int contentInL = padL + insetL;
                 final int contentInR = padR + insetR;
 
@@ -424,7 +431,7 @@ public final class PanelCardExtension {
 
                 TextView title = new TextView(tctx);
                 copyTextStyle(title, srcTitle);
-                title.setText("long_press".equals(gestureType) ? "长按" : "捏握");
+                title.setText(rowTitle(gestureType));
                 LinearLayout.LayoutParams tlp = new LinearLayout.LayoutParams(
                         0, ViewGroup.LayoutParams.WRAP_CONTENT, 1.0f);
                 row.addView(title, tlp);
@@ -437,7 +444,8 @@ public final class PanelCardExtension {
                     value.setTextColor(0x8AFFFFFF);
                 }
                 value.setTag("lenovo_extra_value_" + gestureType);
-                value.setText(extraGestureLabel(ctx, gestureType));
+                value.setText("pageturn".equals(gestureType)
+                        ? pageturnSummary(ctx) : extraGestureLabel(ctx, gestureType));
                 LinearLayout.LayoutParams vlp = new LinearLayout.LayoutParams(
                         ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
                 vlp.setMargins(0, 0, (int) (6 * tctx.getResources().getDisplayMetrics().density), 0);
@@ -448,7 +456,11 @@ public final class PanelCardExtension {
 
                 row.setOnClickListener(new View.OnClickListener() {
                     @Override public void onClick(View v) {
-                        showExtraGestureDialog(ctx, gestureType, value);
+                        if ("pageturn".equals(gestureType)) {
+                            PageTurnConfig.showConfigDialog(ctx);
+                        } else {
+                            showExtraGestureDialog(ctx, gestureType, value);
+                        }
                     }
                 });
 
@@ -628,5 +640,49 @@ public final class PanelCardExtension {
             ctx = ((ContextWrapper) ctx).getBaseContext();
         }
         return null;
+    }
+
+    // ------------------------------------------------------------------
+    // Per-app page-turn trigger row (device-center pen panel)
+    //
+    // History: the row used to be injected through a SEPARATE path that required ctx to be an
+    // Activity of class PencilPanelActivity. But the visible stylus panel is a
+    // COUIBottomSheetDialog (a Dialog) whose Context is a ContextThemeWrapper, not the Activity,
+    // and the Activity's own decor view contains no panel content at all — so the old gate could
+    // never match the real panel and the row was silently skipped (logcat:
+    // "pageturn: gesture card not found"). Meanwhile 长按/捏握 injected fine because they ride the
+    // in-card path below.
+    //
+    // Fix: append 翻页 through that SAME in-card path, so wherever 长按/捏握 render, the page-turn
+    // row renders too — no dependency on host-Activity guessing.
+    // ------------------------------------------------------------------
+    private static boolean shouldAddPageTurnRow(Context ctx) {
+        return true;
+    }
+
+    private static String ctxClassName(Context ctx) {
+        return ctx == null ? "null" : ctx.getClass().getName();
+    }
+
+    private static String hostActivityName(Context ctx) {
+        Activity a = activityOf(ctx);
+        return a == null ? "none" : a.getClass().getName();
+    }
+
+    /** Row types appended under the gesture card: 长按 / 捏握, plus 翻页 on the pen panel only. */
+    private static String[] extraRowTypes(boolean wantPageturn) {
+        return wantPageturn
+                ? new String[]{"long_press", "squeeze", "pageturn"}
+                : new String[]{"long_press", "squeeze"};
+    }
+
+    private static String rowTitle(String rowType) {
+        if ("pageturn".equals(rowType)) return "翻页功能触发方式";
+        return "long_press".equals(rowType) ? "长按" : "捏握";
+    }
+
+    private static String pageturnSummary(Context ctx) {
+        int n = PageTurnConfig.allConfigured(ctx).size();
+        return n == 0 ? "点击配置" : ("已配置 " + n + " 个应用");
     }
 }

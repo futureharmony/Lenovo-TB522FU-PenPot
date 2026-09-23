@@ -5,6 +5,71 @@
 > **框架是 Vector（JingMatrix，`zygisk_vector`），不是 LSPosed。** 安装与验证步骤见
 > [`docs/install-vector-route.md`](docs/install-vector-route.md)。
 
+## P0.13 按应用翻页策略 + 触摸注入重写（Hook 4.8.1–4.8.6，2026-09-23 实机闭环）
+
+**需求**（用户 2026-09-23）：109/110 在抖音 / 小红书这类垂直信息流里不生效。要求：进入某 App
+首次触发翻页时弹窗让用户选「水平模拟 / 垂直模拟 / KeyEvent 上下 / KeyEvent 左右」，选择持久化，
+同一 App 后续直接生效、不再弹；设备中心**笔面板主界面**（弹窗，非 Activity）新增一栏
+「翻页功能触发方式」，可查看 / 修改 / 清除已配置 App。
+
+**新增** `hook/source/sources/com/aclaniakea/colorosporttuning/PageTurnConfig.java`：
+- 策略 `0 水平模拟 / 1 垂直模拟 / 2 KeyEvent 上下 / 3 KeyEvent 左右`；
+- 持久化：`Settings.Global` 单键 JSON map `lenovo_pen_pageturn_map`（`{包名:策略}`），
+  **system_server uid 写入**（跨重启保留；app 进程直写会被 provider 丢弃）；
+- 面板写入双通道：直写 + `PAGETURN_CONFIG` 广播
+  （`SystemStylusHooks.registerPageTurnConfigReceiver` → `PageTurnConfig.persist()` 无条件落盘，
+  避免「上下文判定失手 → 广播自环」）；
+- 设备中心入口：`PanelCardExtension` 把「翻页功能触发方式」并进**已验证可渲染的 in-card 通道**
+  （与「长按 / 捏握」同一张卡片），view tag 防重复注入，不动 OEM 卡片。
+
+**四个实机 bug 与修法**：
+1. **弹窗出现但四个选项不可见 / 不可点** —— `AlertDialog.Builder(systemCtx).setItems()` 的 items 走
+   framework 内部布局 `select_dialog_item`，文字色取自宿主系统主题，而原实现又把窗口背景设为
+   `TRANSPARENT` ⇒ 文字与底同色。**修**：彻底弃用 `AlertDialog`，改为**完全自绘 `android.app.Dialog`**
+   （自绘圆角卡片 + 显式文字色 + 自建可点选项行 + 按压态 + 应用图标），按 `uiMode` 走深 / 浅两套
+   调色板（ColorOS 绿 accent：浅 `#00A863` / 深 `#43D17F`）。顺带修：`sPrompting` 清理挪到
+   `OnDismissListener`（原实现在用户点「取消」后会让该 App **整个会话不再弹窗**）。
+2. **设备中心笔面板看不到那一栏** —— 面板是 `COUIBottomSheetDialog`（宿主 `PencilPanelActivity`），
+   `Dialog.show` hook 收到的 `ctx` 是 `ContextThemeWrapper`，`instanceof Activity` 恒为假
+   ⇒ 早期的宿主判定永远不命中。**修**：不再判定宿主，并入「长按 / 捏握」那条已验证通道。
+3. **改了配置仍反复弹初始化窗** —— `getForegroundPackage()` 用
+   `queryUsageStats(INTERVAL_DAILY, now-5s, now)` 取 `lastTimeUsed` 最大者。DAILY 桶是「今天用过的
+   **所有** App」聚合，胜出者常是 systemui / 桌面 / ipemanager ⇒ 写进 map 的**键就是错的**，
+   配置永远匹配不上真实前台。**修**：分层检测 `foregroundCandidates()` ——
+   L1 `getRunningTasks(1)` topActivity → L2 `UsageEvents` 正序回放取「最后一个仍 RESUMED 且未被
+   PAUSED / STOPPED」的包 → L3 旧 API 仅兜底；「已配置」判定只用 L1/L2；浮层宿主黑名单
+   （systemui / launcher / ipemanager / android）不作为写入目标；无可用候选则退回横向且**不弹窗**
+   （不写脏键）。
+4. **模拟滑动 / KeyEvent 在小红书里完全无效**（本段核心）—— 配置、检测、分发**全部正常**：
+   日志 `perform pkg=com.xingin.xhs strategy=1` + `injected vertical swipe (1920.0 -> 640.0)`；
+   按住 `(1920,1920)` 6s 期间 `dumpsys input` 的 `TouchStatesByDisplay` 显示
+   `name='com.xingin.xhs/.index.v2.IndexActivityV2' ... touchingPointers=[Pointer(id=0,FINGER)]`
+   ⇒ **事件确实送达 App 窗口，是 App 主动丢弃**。与 `adb shell input swipe`（同机 100% 能切视频）
+   逐项对照出三处构造差异：`deviceId=0`（无设备）／12 个事件在 1~3ms 内灌完且 `eventTime`
+   **落在未来 120ms**／`injectInputEvent(..., ASYNC)`。
+   **修**（`StylusActionDispatcher.java`）：新增 `touchDeviceId()`（取真实 `SOURCE_TOUCHSCREEN`
+   设备 id，本机 = 6）、12 参 `MotionEvent.obtain(..., pressure, size, deviceId, edgeFlags)`、
+   **逐帧 `Thread.sleep(16)` 使 `eventTime` = 真实墙钟**、`INJECT_WAIT_FOR_FINISH(2)`；因
+   WAIT_FOR_FINISH 阻塞，整条手势移入 `pen-swipe` 工作线程 + `sInjecting` 互斥。
+   **横 / 纵两条路径合并为 `swipeInternal(vertical)`**，`injectSwipe` / `injectVerticalSwipe`
+   对外签名不变 ⇒ **水平滑动同样吃到本次修复**。
+   `injectKey` **故意未改**（仍是 ASYNC + deviceId 0）：它被 BACK / HOME / APP_SWITCH 复用，
+   且系统键事件不做 hit-test，`deviceId` 无影响。
+
+**实机验证**（v4.8.6，2026-09-23 14:0x）：装包 → `su -c 'setprop ctl.restart zygote'` 软重启
+（system_server pid 2273 → 10844，Vector 重载模块）→ 小红书前台连按两次 110，截图比对笔记作者：
+**诗卿（便利店）→ Meyers时尚笔记（Prada）→ 一舰大白菜（高速救援）**，连续前向翻页生效；
+日志 `injected vertical swipe next=true dev=6 (1920.0,1920.0) -> (1920.0,640.0)`。
+编译 `ACL_VERSION=4.8.6` 走 `hook/tools/build_hook_source.py`（`ANDROID_SDK=/tmp/android-sdk`，
+build-tools 必须 `35.0.0`），`versionName=4.8.6 / versionCode=480006`。
+
+**遗留**：
+- `KeyEvent上下 / KeyEvent左右` 依赖目标 App 自己挂 `onKeyDown`；抖音 / 小红书都不吃键 ⇒ 对它们
+  只有模拟滑动有效。这是 **App 侧语义**，不是模块缺陷。
+- 旧版本检测器可能已写入**错误键**的条目：升级后建议在面板逐条清除，或
+  `adb shell settings delete global lenovo_pen_pageturn_map` 后重新配置一次。
+- 设备中心那栏的布局对齐仍需真机核对（本机无法复现面板渲染）。
+
 ## Bug-fix: xposed_scope 遗漏 `android`（system_server）（2026-09-22）
 
 - [x] **问题**：`arrays.xml` 的 `xposed_scope` 只有 `system`（SystemUI）而**缺少 `android`**
@@ -984,7 +1049,7 @@ code-101，别破坏）：
 | 码 | 功能 | 执行 |
 |---|---|---|
 | 107/108 | 撤销/重做 | system_server 注入 Ctrl+Z / Ctrl+Y（`injectCombo`：CTRL down → key down/up → CTRL up） |
-| 109/110 | 翻页上/下 | 注入 PAGE_UP / PAGE_DOWN |
+| 109/110 | 翻页上/下 | **按前台 App 策略**（`PageTurnConfig`，v4.8.6）：水平模拟 / 垂直模拟 / KeyEvent 上下 / KeyEvent 左右；首次在某 App 触发时弹窗选一次并持久化到 `Settings.Global#lenovo_pen_pageturn_map` |
 | 111 | 手写便签 | `HandwrittenNoteOverlay`：system_server 直接 addView 的 TYPE_APPLICATION_OVERLAY 全屏手写层（工具条：关闭/撤销/橡皮/清空/4 色/保存），保存走 `HookUtils.publishPng` → `PenShareProvider` → Pictures/PenBridge |
 | 112/113 | 圈选识别/翻译 | `LassoSelectOverlay`：透明覆盖层框选 → `android.window.ScreenCapture`（反射，DisplayCaptureArgs.Builder.setSourceCrop）裁剪 → 保存 PNG + 剪贴板（图片）；翻译再弹分享/`ACTION_TRANSLATE`。**OCR 引擎未接**（`tryRecognize` 留 null），DeepThinker 探测未完成 |
 
@@ -1644,7 +1709,9 @@ com.nearme.note.paint.NewPaintEditPresenter   (PUBLIC FINAL, implements oplus...
 
 ### 已知边界
 
-- 只解决 **107 / 108**。109/110（翻页）在画布里仍是「滑动 + PAGE_UP/DOWN」，画布同样不吃键 —— 未处理。
+- ~~只解决 **107 / 108**。109/110（翻页）在画布里仍是「滑动 + PAGE_UP/DOWN」，画布同样不吃键 —— 未处理。~~
+  **（2026-09-23 已处理）** 109/110 改为按前台 App 策略：画布类 App 可为其单独选「KeyEvent 上下/左右」
+  或保持模拟滑动，不再写死。见顶部「P0.13 按应用翻页策略」段。
 - 画布内的**取消语义**依赖画布自身 undo 栈；栈空时 `PaintView.undo()` 自己 no-op（应用会打
   `mUndoList is empty, cannot to previous step`），模块不额外拦截。
 
@@ -1694,7 +1761,9 @@ sub  proc  : CanvasPaintHooks: no resumed canvas on screen, undo left to the key
   一次广播会投递到两个进程，但只有真正持有前台画布的主进程会动作，子进程走 `no resumed canvas` 静默返回，
   **净效果仍是 1 次撤销**（上面实测：1 次广播 → 主进程 1 次 `invoked` + 子进程 1 次 no-op）。
   若要消掉这条无谓投递，可在注册前判断进程名，只留主进程 —— 但当前行为正确，未改。
-- 只解决 **107 / 108**。109/110（翻页）在画布里仍是「滑动 + PAGE_UP/DOWN」，画布同样不吃键 —— 未处理。
+- ~~只解决 **107 / 108**。109/110（翻页）在画布里仍是「滑动 + PAGE_UP/DOWN」，画布同样不吃键 —— 未处理。~~
+  **（2026-09-23 已处理）** 109/110 改为按前台 App 策略：画布类 App 可为其单独选「KeyEvent 上下/左右」
+  或保持模拟滑动，不再写死。见顶部「P0.13 按应用翻页策略」段。
 - 画布内的**取消语义**依赖画布自身 undo 栈；栈空时 `PaintView.undo()` 自己 no-op（应用会打
   `mUndoList is empty, cannot to previous step`），模块不额外拦截。
 
