@@ -115,7 +115,17 @@ public final class SwipeCalibrateOverlay {
 
     private static final int MAX_POINTS = 32;
     private static final int MAX_RAW_POINTS = 400;
-    private static final long MIN_DURATION_MS = 60L;
+    /**
+     * Rejections are about the gesture being meaningless, not about it being quick.
+     *
+     * <p>This used to be 60 ms, which is above the duration of a natural pen flick — measured on
+     * this device at 66 ms for an accepted recording, with rejected attempts presumably just under.
+     * The floor now sits low enough that a real flick always passes; accidental contact is still
+     * caught by {@link #MIN_TRAVEL}, which a tap cannot satisfy at any speed. A rejected swipe is
+     * indistinguishable from "nothing happened" unless the reason is on screen, so the wording of
+     * every rejection is generated from these constants (see {@link #commitRecord}).</p>
+     */
+    private static final long MIN_DURATION_MS = 25L;
     private static final long MAX_DURATION_MS = 4000L;
     private static final float MIN_TRAVEL = 0.12f;
     private static final float MIN_STEP_FRAC = 0.004f;
@@ -160,6 +170,20 @@ public final class SwipeCalibrateOverlay {
      * tablet would look frozen. The watchdog is the guaranteed way out.
      */
     private static final long WATCHDOG_MS = 90_000L;
+
+    /**
+     * Held on the recorder's own window for as long as it is up, so the display timeout cannot
+     * close the surface out from under a user who is still lining up a swipe.
+     */
+    private static final int KEEP_AWAKE = WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON;
+
+    /**
+     * Heartbeats in a row that must report a dead display before the surface is torn down.
+     * {@code PowerManager.isInteractive()} is a single sample of a machine that has a standby
+     * display, a pen that wakes it and a cover sensor: one bad read must not throw away a
+     * recording that is half done.
+     */
+    private static final int SCREEN_OFF_BEATS = 2;
 
     private static SwipeCalibrateOverlay sCurrent;
 
@@ -213,7 +237,12 @@ public final class SwipeCalibrateOverlay {
     private long chipPollRt;
     private boolean sizeLogged;
 
-    private int phase = PHASE_RECORD;
+    /**
+     * Phase and lifetime flags are written on the main thread and read on the spy thread
+     * ({@link #onSpyEvent} bails out on either). Plain fields would make "the recorder is already
+     * over" a hint rather than a fact.
+     */
+    private volatile int phase = PHASE_RECORD;
     private float[][] shown;
     private boolean shownIsCustom;
     private long previewStart;
@@ -221,14 +250,16 @@ public final class SwipeCalibrateOverlay {
     private volatile long lastInputRt;
     private long lastTrailRt;
     private String feedbackText;
-    private boolean dismissed;
+    private volatile boolean dismissed;
+    /** Consecutive heartbeats that reported a non-interactive display. See {@link #heartbeat}. */
+    private int screenOffBeats;
 
     /** Guards {@link #rec} and {@link #downTimeMs}: written by the spy thread, read by main. */
     private final Object recLock = new Object();
     private final List<float[]> rec = new ArrayList<>();
     private long downTimeMs;
     /** Spy-thread gesture state (only meaningful in pass-through mode). */
-    private boolean gestureActive;
+    private volatile boolean gestureActive;
 
     private SwipeCalibrateOverlay(Context ctx, String pkg, boolean next, Listener listener) {
         this.pkg = pkg;
@@ -316,18 +347,26 @@ public final class SwipeCalibrateOverlay {
      * focus flag, no dim — the app must look and behave exactly as it does without us. Blocking
      * mode keeps the old behaviour (dim so the frozen app is still readable, focusable so back
      * works).
+     *
+     * <p>{@link #KEEP_AWAKE} is set in every phase. The surface lives at most {@link #WATCHDOG_MS},
+     * and without it the display can reach its timeout while the user is still lining up a swipe —
+     * measured on 2026-09-23, where the recorder closed itself with {@code why=screen off} mid-flow
+     * and the following swipe landed on nothing at all. A deliberate power press still sleeps the
+     * device: this flag only suppresses the timeout.</p>
      */
     private void applyRecordWindowStyle() {
         if (passThrough) {
             lp.flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                     | WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
                     | WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE
-                    | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL;
+                    | WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL
+                    | KEEP_AWAKE;
             lp.dimAmount = 0f;
         } else {
             lp.flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                     | WindowManager.LayoutParams.FLAG_DIM_BEHIND
-                    | WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM;
+                    | WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
+                    | KEEP_AWAKE;
             lp.dimAmount = 0.30f;
         }
     }
@@ -336,7 +375,8 @@ public final class SwipeCalibrateOverlay {
     private void applyResultWindowStyle() {
         lp.flags = WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN
                 | WindowManager.LayoutParams.FLAG_DIM_BEHIND
-                | WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM;
+                | WindowManager.LayoutParams.FLAG_ALT_FOCUSABLE_IM
+                | KEEP_AWAKE;
         lp.dimAmount = 0.30f;
     }
 
@@ -513,8 +553,13 @@ public final class SwipeCalibrateOverlay {
             if (dismissed || root == null) return;
             try {
                 if (pm != null && !pm.isInteractive()) {
-                    autoClose("screen off");
-                    return;
+                    // Two consecutive beats, not one: see SCREEN_OFF_BEATS.
+                    if (++screenOffBeats >= SCREEN_OFF_BEATS) {
+                        autoClose("screen off");
+                        return;
+                    }
+                } else {
+                    screenOffBeats = 0;
                 }
                 if (SystemClock.elapsedRealtime() - lastInputRt >= WATCHDOG_MS) {
                     autoClose("idle " + WATCHDOG_MS + "ms");
@@ -694,7 +739,9 @@ public final class SwipeCalibrateOverlay {
         }));
     }
 
+    /** Single funnel for every reason the recorder shows the user — so it logs them all too. */
     private void setFeedback(String text) {
+        HookUtils.log(TAG + ": feedback: " + text);
         feedbackText = text;
         if (phase == PHASE_RESULT) refreshCard();
         else applyRecordHint();
@@ -927,7 +974,14 @@ public final class SwipeCalibrateOverlay {
                 }
                 case MotionEvent.ACTION_UP:
                 case MotionEvent.ACTION_CANCEL: {
-                    if (!gestureActive) return;
+                    if (!gestureActive) {
+                        // A stream whose DOWN we never observed. Nothing can be recorded from it,
+                        // and the user is left with no card — the one failure mode that looks
+                        // exactly like a dead channel, so it says so out loud.
+                        HookUtils.log(TAG + ": spy action=" + action
+                                + " without DOWN, dropped (rec=" + rec.size() + ")");
+                        return;
+                    }
                     gestureActive = false;
                     final int a = action;
                     float nx = x / (float) sw;
@@ -1057,6 +1111,7 @@ public final class SwipeCalibrateOverlay {
     private void commitRecord() {
         float[][] raw = snapshot();
         if (raw.length < 2) {
+            HookUtils.log(TAG + ": commit rejected: raw=" + raw.length + ", no movement captured");
             setFeedback("没有捕捉到滑动，请再试一次");
             return;
         }
@@ -1065,12 +1120,18 @@ public final class SwipeCalibrateOverlay {
         long dur = Math.round(b[2]);
         float travel = Math.max(Math.abs(b[0] - a[0]), Math.abs(b[1] - a[1]));
 
+        // Three outcomes of a swipe — no events, rejected, accepted — and only one of them shows a
+        // card, so the attempt has to be identifiable from the log alone. A rejection whose reason
+        // is not on screen is indistinguishable from "the recorder was dead".
+        HookUtils.log(TAG + ": commit raw=" + raw.length + " dur=" + dur
+                + "ms travel=" + (Math.round(travel * 1000f) / 1000f));
+
         if (dur < MIN_DURATION_MS) {
-            setFeedback("滑动太快了（<60ms），请用正常速度再试一次");
+            setFeedback("滑动太快了（<" + MIN_DURATION_MS + "ms），请用正常速度再试一次");
             return;
         }
         if (dur > MAX_DURATION_MS) {
-            setFeedback("滑动太慢（>4 秒），请再试一次");
+            setFeedback("滑动太慢（>" + (MAX_DURATION_MS / 1000L) + " 秒），请再试一次");
             return;
         }
         if (travel < MIN_TRAVEL) {
@@ -1415,6 +1476,15 @@ public final class SwipeCalibrateOverlay {
                 cv.drawCircle(tipX, tipY, PageTurnConfig.dp(ui, 14), halo);
                 cv.drawCircle(tipX, tipY, PageTurnConfig.dp(ui, 8), solid);
             }
+
+            // -------- hint, last so it sits above the band and the trail --------
+            // It used to be drawn only when there was no trajectory to draw at all, which made every
+            // rejection message (太快了 / 距离太短 / 没有捕捉到滑动) disappear the moment the first
+            // gesture had been sampled: the user saw their own line, no card, and nothing saying why
+            // — the report of 2026-09-23 that looked like "the second swipe works, the first and
+            // third do not". Hidden only while a gesture is in flight, when the band would cover the
+            // very trail the user is looking at.
+            if (recording && !gestureActive) drawHint(cv);
         }
 
         /**

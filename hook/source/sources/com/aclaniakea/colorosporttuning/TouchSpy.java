@@ -72,13 +72,16 @@ final class TouchSpy {
     private final InputChannel channel;
     private final InputEventReceiver receiver;
     private final HandlerThread thread;
+    /** {@code {eventsDelivered}} — a one-element counter, readable at teardown. */
+    private final int[] seen;
 
     private TouchSpy(Object handle, InputChannel channel, InputEventReceiver receiver,
-                     HandlerThread thread) {
+                     HandlerThread thread, int[] seen) {
         this.handle = handle;
         this.channel = channel;
         this.receiver = receiver;
         this.thread = thread;
+        this.seen = seen;
     }
 
     /** @return an armed spy, or {@code null} if this build of Android will not hand one out. */
@@ -95,20 +98,26 @@ final class TouchSpy {
         }
         final Object handle = found[0];
         final InputChannel ch = (InputChannel) found[1];
+        // The count decides which of two very different bugs is happening when a recording ends
+        // with no card: a channel that never delivered anything, or a gesture that arrived and was
+        // rejected. Both look identical on screen.
+        final int[] seen = new int[1];
         HandlerThread t = null;
         try {
             t = new HandlerThread("pen-calib-spy");
             t.start();
             InputEventReceiver r = new InputEventReceiver(ch, t.getLooper()) {
                 @Override public void onInputEvent(InputEvent event) {
+                    probe(event, seen);
                     deliver(this, event, listener);
                 }
                 @Override public void onInputEvent(InputEvent event, int displayId) {
+                    probe(event, seen);
                     deliver(this, event, listener);
                 }
             };
             HookUtils.log(TAG + ": spy armed (" + CHANNEL_NAME + ")");
-            return new TouchSpy(handle, ch, r, t);
+            return new TouchSpy(handle, ch, r, t, seen);
         } catch (Throwable th) {
             HookUtils.log(TAG + ": cannot arm spy: " + th);
             // If a monitor wrapper owns the channel, closing the wrapper releases both.
@@ -136,10 +145,31 @@ final class TouchSpy {
         } catch (Throwable th) {
             HookUtils.log(TAG + ": thread.quit: " + th);
         }
-        HookUtils.log(TAG + ": spy disarmed");
+        HookUtils.log(TAG + ": spy disarmed, saw " + (seen == null ? 0 : seen[0]) + " events");
     }
 
     // ------------------------------------------------------------------
+
+    /**
+     * Logs the first few events of a freshly armed channel and nothing afterwards.
+     *
+     * <p>This is the "is the channel alive at all" answer. Three events from the first gesture prove
+     * the monitor is wired up and that anything missing later is a rejected gesture rather than a
+     * dead observer; zero events at disarmed-time is the one failure that is not the recorder's
+     * fault. Without it, "the swipe did nothing" has two indistinguishable causes.</p>
+     */
+    private static void probe(InputEvent event, int[] seen) {
+        try {
+            seen[0]++;
+            if (seen[0] > 3 || !(event instanceof MotionEvent)) return;
+            MotionEvent m = (MotionEvent) event;
+            HookUtils.log(TAG + ": event#" + seen[0] + " action=" + m.getActionMasked()
+                    + " tool=" + m.getToolType(0) + " src=0x" + Integer.toHexString(m.getSource())
+                    + " at " + (int) m.getX() + "," + (int) m.getY());
+        } catch (Throwable ignored) {
+            // The probe must never be able to break the channel it is measuring.
+        }
+    }
 
     /**
      * Runs on the spy thread. The event is released in a {@code finally} regardless of what the

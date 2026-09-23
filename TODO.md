@@ -399,6 +399,69 @@ hidHost=false`。
 `drawRoundRect`、290 类、xposed/UEventObserver 定义 0。**待用户验证**：① 结果卡点「重新记录」后，
 第二次滑动能正常保存并弹结果卡、画布实时显示新轨迹；② hint 在浅色 / 花哨界面上可读。
 
+## P0.21 「第一次滑动不弹结果卡、第二次才弹」= 拒绝理由画不出来 + 60ms 阈值太高（Hook 4.9.9）
+
+**用户报告（2026-09-23 19:43）**：App 内选模拟 → 第一次滑动**不弹**「已保存滑动范围」→ 第二次才弹 →
+点「重新记录」第三次**又不弹**。看起来像奇偶交替的玄学。
+
+**取证**（设备日志 + 远端注入复现，见下"复现手法"）：
+
+1. 用户那次会话的日志里，三次 commit **全部成功**（`persistCalibration … 149ms / 113ms / 66ms`），
+   唯一异常是第三次之后 `closing … why=screen off`。⇒ "不弹"的尝试**没有留下任何痕迹** ——
+   提交成功会打日志，被拒绝不会（`setFeedback` 当时不写日志）。
+2. 远端注入 `input swipe … 50`（50ms 快划）复现：**没有任何 persist、没有结果卡**，录制层停在 RECORD。
+   ⇒ 命中 `commitRecord()` 的 `dur < MIN_DURATION_MS`（当时 **60ms**）拒绝分支。
+   用户自然笔划的实测值是 **66ms**（19:43:32 那条成功记录，只比阈值高 6ms）⇒ 随手一快就落在阈值下，
+   这就是"奇偶交替"的真相：**不是交替，是手速在阈值两侧摆动**。
+
+**根因（真正的缺陷，比阈值严重）**：`drawTrail()` 只在**没有轨迹可画**时才 `drawHint()`：
+
+```java
+float[][] pts = current();
+if (pts == null || pts.length < 2) { if (recording) drawHint(cv); return; }   // ← 唯一调用点
+... 画 band / 轨迹 / 手柄 ...
+```
+
+⇒ **只要录制过一次手势（哪怕是被拒绝的那次），`live` 就不为空，hint 从此再也不画**。
+而所有拒绝理由（`滑动太快了 / 距离太短 / 没有捕捉到滑动 / 滑动被中断`）**只走 hint 这一条通道**。
+用户看到的是：自己那条线画出来了、没有卡片、**没有任何原因**。这正是"不弹窗"的完整体感。
+
+**修（4.9.9）**：
+
+| # | 改动 | 理由 |
+|---|---|---|
+| 1 | `drawTrail()` 尾部补 `if (recording && !gestureActive) drawHint(cv)` | 拒绝理由必须画得出来；只在手势进行中隐藏（那时用户看的是轨迹，不是文字） |
+| 2 | `MIN_DURATION_MS` 60 → **25**；拒绝文案由常量拼出 | 自然快划不该被拒；误触由 `MIN_TRAVEL`（0.12 屏幅）兜底，不靠时长。硬编码的 `（<60ms）` 文案与常量同源，避免再次漂移 |
+| 3 | 窗口加 `FLAG_KEEP_SCREEN_ON`（录制 + 结果两态）；`screen off` 自关需要**连续 2 次**心跳确认 | 实测**两次**录制层被 `why=screen off` 自杀式关闭，其中一次发生在用户操作中途（19:43:34，距结果卡出现 1.8s）⇒ 之后的滑动落在空气上。`isInteractive()` 是单次采样，而这台机器有待机屏 / 笔唤醒 / 皮套传感器 |
+| 4 | 诊断日志：`commit raw=N dur=Xms travel=Y`、`feedback: <原文>`、`spy disarmed, saw N events`、`event#1..3 action/tool/src`、`UP without DOWN, dropped` | **"滑了没反应"有三种可能：通道没事件 / 手势被拒 / 会话被外力关掉**，画面上一模一样。日志必须能一次分清 |
+| 5 | `phase` / `dismissed` / `gestureActive` 加 `volatile` | 主线程写、spy 线程读，"会话已结束"应当是事实而不是提示 |
+
+**复现手法（本机可用，不需要人操作设备）**：录制层只需要一次广播 + 注入事件即可全流程驱动：
+
+```sh
+adb shell am broadcast -a com.futureharmony.lenovopenbridge.PAGETURN_CONFIG \
+    --es pkg <任意包名> --es op calibrate --es dir next      # 打开录制层（不存在启动器也行）
+adb shell input swipe 1000 1300 3000 1300 250                # 注入滑动（monitor 收得到，已实测）
+adb shell input tap <x> <y>                                   # 点结果卡上的「重新记录」
+adb exec-out screencap -p > s.png && sips -c 700 3840 s.png   # 截图看画布/hint
+adb shell am broadcast … --es op clear_calib --es pkg <spy包>  # 清理测试写入
+```
+
+**验证（4.9.9，19:53 装机 + 重启，`versionCode=490009`）**：
+
+- 注入 40ms 快划 → `commit raw=6 dur=47ms travel=0.521` → `persistCalibration … 47ms` —— **旧阈值下会被静默拒绝**
+- 注入 200px 短划 → `commit raw=12 dur=307ms travel=0.052` → `feedback: 滑动距离太短，请滑得长一些`
+  → **截图确认该行文字与副行都画在轨迹之上**（旧代码下这一行根本不存在）
+- 窗口旗标实测 `fl=NOT_FOCUSABLE NOT_TOUCHABLE NOT_TOUCH_MODAL KEEP_SCREEN_ON LAYOUT_IN_SCREEN`；
+  录制层挂起 25s 屏幕仍 `mWakefulness=Awake`（此前同等条件下 9~10s 就被 `screen off` 关掉）
+- dex：290 类、stub 定义 0、`（<60ms）` 旧文案命中 0
+- 测试写入 `zz.test.calib` 已用 `op=clear_calib` 清除并复核；用户自有配置（readest、gallery3d）未动
+
+**教训（已进 skill）**：① **一条反馈只有一个渲染分支 = 隐藏缺陷**：只要画布上有别的可画，
+理由就永远说不出口 —— 凡是"失败必须解释自己"的 UI，绘制路径要保证在**所有**状态下都经过它。
+② **拒绝阈值要和真实输入量级对齐**：66ms 的样本说明阈值贴着用户手速，等于随机拒绝。
+③ "看起来像交替 / 像玄学"的现象，先怀疑**两个不同的失败模式各占一半**，而不是同一个 bug 的奇偶性。
+
 ## Bug-fix: xposed_scope 遗漏 `android`（system_server）（2026-09-22）
 
 - [x] **问题**：`arrays.xml` 的 `xposed_scope` 只有 `system`（SystemUI）而**缺少 `android`**
