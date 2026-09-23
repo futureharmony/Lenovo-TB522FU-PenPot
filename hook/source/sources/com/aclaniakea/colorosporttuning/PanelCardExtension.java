@@ -150,6 +150,27 @@ public final class PanelCardExtension {
                 fixPanelAssignments(root, ctx, allowExtraRows);
             }
         }, 400L);
+
+        // Availability is not a one-shot fact. The panel settles its own enabled state
+        // asynchronously (it waits on the BT stack), and the pen can drop while the panel is
+        // open. Re-evaluate a bounded number of times: each tick is a tree walk plus a few
+        // property reads, and the loop stops on its own (or as soon as the panel detaches).
+        final Handler ticker = new Handler(Looper.getMainLooper());
+        ticker.postDelayed(new Runnable() {
+            private int ticks = 0;
+
+            @Override public void run() {
+                ticks++;
+                if (ticks > 20 || !root.isAttachedToWindow()) return;
+                try {
+                    fixPanelAssignments(root, ctx, allowExtraRows, false);
+                } catch (Throwable th) {
+                    HookUtils.log(TAG + ": availability tick error: " + th);
+                    return;
+                }
+                ticker.postDelayed(this, 600L);
+            }
+        }, 600L);
     }
 
     private static void fallbackDelayedPass(final View root, final Context ctx,
@@ -170,6 +191,11 @@ public final class PanelCardExtension {
      * @return true if extra rows were found or successfully injected
      */
     public static boolean fixPanelAssignments(View root, Context ctx, boolean allowExtraRows) {
+        return fixPanelAssignments(root, ctx, allowExtraRows, true);
+    }
+
+    private static boolean fixPanelAssignments(View root, Context ctx, boolean allowExtraRows,
+            boolean verbose) {
         try {
             List<ViewGroup> rows = new ArrayList<>();
             List<TextView> titles = new ArrayList<>();
@@ -196,8 +222,10 @@ public final class PanelCardExtension {
                 }
             }
 
-            HookUtils.log(TAG + ": assignments pass: titles=" + titles.size()
-                    + " assigns=" + assigns.size());
+            if (verbose) {
+                HookUtils.log(TAG + ": assignments pass: titles=" + titles.size()
+                        + " assigns=" + assigns.size());
+            }
 
             for (TextView a : assigns) {
                 int best = -1, bestDist = Integer.MAX_VALUE;
@@ -224,7 +252,16 @@ public final class PanelCardExtension {
                 for (int i = 1; i < rows.size(); i++) {
                     if (centerY(rows.get(i)) > centerY(rows.get(lastIdx))) lastIdx = i;
                 }
-                addExtraPanelRows(ctx, rows.get(lastIdx));
+                boolean usable = panelUsable(ctx, rows);
+                float dim = stockDimAlpha(rows);
+                if (verbose || usable != sLastPanelUsable) {
+                    HookUtils.log(TAG + ": panel usability stockRows=" + rows.size()
+                            + " verdict=" + (usable ? "enabled" : "DISABLED")
+                            + " dim=" + dim + " stockEnabled=" + describeStockRows(rows)
+                            + " hidHost=" + hidHostConnected(ctx));
+                }
+                sLastPanelUsable = usable;
+                addExtraPanelRows(ctx, rows.get(lastIdx), usable, dim);
             }
             return true;
         } catch (Throwable th) {
@@ -233,7 +270,91 @@ public final class PanelCardExtension {
         return false;
     }
 
-    private static boolean addExtraPanelRows(Context ctx, ViewGroup refInner) {
+    // ------------------------------------------------------------------
+    // Availability mirror (2026-09-23, by request)
+    //
+    // The OEM rows (下滑 / 双击 / 上滑触控条) are owned by the panel and grey out once the pen
+    // link drops. The rows injected here are ours — nothing on the OEM side knows about them — so
+    // they stayed tappable with the pen disconnected. The fix is deliberately NOT a new notion of
+    // "is the pen connected": we mirror what the OEM rows are already saying, and take the HID
+    // Host profile state as a second opinion.
+    //
+    // Verdict rules:
+    //   OEM rows grey  -> disabled (this is the whole point: mirror, do not re-derive)
+    //   OEM rows live  -> enabled, no matter what the BT stack says
+    //   no OEM rows    -> fall back to the HID Host profile; unknown means enabled
+    // A row that is greyed out while the pen actually works is a worse bug than the
+    // inconsistency being fixed here, so every rule errs towards "enabled".
+    // ------------------------------------------------------------------
+
+    /** Flipped from false to true once a panel has been seen with a verdict. */
+    private static boolean sLastPanelUsable = true;
+
+    /** {@code BluetoothProfile.HID_HOST_PROFILE} — hidden from the public SDK (HookUtils has it too). */
+    private static final int HID_HOST_PROFILE = 4;
+
+    private static boolean panelUsable(Context ctx, List<ViewGroup> stockRows) {
+        Boolean stock = stockRowsUsable(stockRows);
+        if (stock != null && !stock) return false;      // OEM rows are grey -> we are grey
+        if (stock != null) return true;                 // OEM rows are live -> stay live, whatever
+                                                        // the BT stack says (a misread profile
+                                                        // must never grey out a working row)
+        Boolean link = hidHostConnected(ctx);           // no OEM rows to mirror: best effort
+        return link == null || link;
+    }
+
+    /** False only when every OEM gesture row looks disabled — never true-because-of-a-guess. */
+    private static Boolean stockRowsUsable(List<ViewGroup> stockRows) {
+        if (stockRows == null || stockRows.isEmpty()) return null;
+        for (ViewGroup r : stockRows) {
+            if (r == null) continue;
+            if (r.isEnabled() && r.getAlpha() > 0.95f) return true;
+        }
+        return false;
+    }
+
+    /**
+     * HID Host profile state, or null when it cannot be read.
+     *
+     * <p>Deliberately stricter than {@code HookUtils.bluetoothConnected}: that one reports
+     * "connected" whenever the HID profile and the live uhid link disagree, which is the right
+     * call for "should we let the user use the pen" and the wrong one for "should this row look
+     * grey". No reconciliation here — unknown stays unknown.</p>
+     */
+    private static Boolean hidHostConnected(Context ctx) {
+        try {
+            android.bluetooth.BluetoothAdapter a = android.bluetooth.BluetoothAdapter.getDefaultAdapter();
+            if (a == null) return null;
+            if (!a.isEnabled()) return false;
+            return a.getProfileConnectionState(HID_HOST_PROFILE)
+                    == android.bluetooth.BluetoothProfile.STATE_CONNECTED;
+        } catch (Throwable th) {
+            return null;
+        }
+    }
+
+    /** Alpha the OEM uses for its own greyed-out rows, so ours dims by the same amount. */
+    private static float stockDimAlpha(List<ViewGroup> stockRows) {
+        float min = 1f;
+        for (ViewGroup r : stockRows) {
+            if (r != null && r.getAlpha() < min) min = r.getAlpha();
+        }
+        return min < 0.95f ? min : 0.4f;
+    }
+
+    private static String describeStockRows(List<ViewGroup> stockRows) {
+        StringBuilder sb = new StringBuilder("[");
+        for (int i = 0; i < stockRows.size(); i++) {
+            ViewGroup r = stockRows.get(i);
+            if (i > 0) sb.append(',');
+            sb.append(r == null ? "null"
+                    : (r.isEnabled() ? "on" : "off") + "@" + r.getAlpha());
+        }
+        return sb.append(']').toString();
+    }
+
+    private static boolean addExtraPanelRows(Context ctx, ViewGroup refInner, boolean usable,
+            float dim) {
         try {
             ViewGroup card = refInner;
             while (true) {
@@ -261,6 +382,8 @@ public final class PanelCardExtension {
                         ((TextView) vt).setText("pageturn".equals(t)
                                 ? pageturnSummary(ctx) : extraGestureLabel(ctx, t));
                     }
+                    View row = card.findViewWithTag("lenovo_extra_row_" + t);
+                    if (row != null) applyRowUsable(row, usable, dim);
                 }
                 return true;
             }
@@ -456,6 +579,7 @@ public final class PanelCardExtension {
 
                 row.setOnClickListener(new View.OnClickListener() {
                     @Override public void onClick(View v) {
+                        if (!v.isEnabled()) return;   // belt and braces; clickable is already off
                         if ("pageturn".equals(gestureType)) {
                             PageTurnConfig.showConfigDialog(ctx);
                         } else {
@@ -464,6 +588,8 @@ public final class PanelCardExtension {
                     }
                 });
 
+                row.setTag("lenovo_extra_row_" + gestureType);
+                applyRowUsable(row, usable, dim);
                 rowCard.addView(row);
             }
 
@@ -474,6 +600,21 @@ public final class PanelCardExtension {
             HookUtils.log(TAG + ": addExtraPanelRows error: " + th);
             return false;
         }
+    }
+
+    /**
+     * Grey out (or restore) one injected row, the way the OEM greys its own.
+     *
+     * <p>Alpha on the row carries down to the title, the value text and the chevron, so a single
+     * call dims the whole thing; {@code clickable=false} also disarms the press StateListDrawable
+     * that would otherwise still flash on touch.</p>
+     */
+    private static void applyRowUsable(View row, boolean usable, float dim) {
+        if (row == null) return;
+        row.setEnabled(usable);
+        row.setClickable(usable);
+        row.setFocusable(usable);
+        row.setAlpha(usable ? 1f : dim);
     }
 
     private static Drawable createRowPressDrawable(int pressColor) {

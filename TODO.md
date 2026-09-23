@@ -323,6 +323,42 @@ Hook 上载日志：`system_server stylus hooks installed (startOtherServices=1 
 **规矩（写进注释）**：提示语里出现的按钮名，必须在界面上逐字存在；两侧任一侧改动时一起改。
 dex 校验：新文案命中 1 次、旧「重置」行文案 0 次，289 类、xposed/UEventObserver 定义 0。
 
+## P0.19 笔断开后，「长按 / 捏握 / 翻页」三行与原始选项同步置灰（Hook 4.9.6）
+
+**需求**（用户 2026-09-23）：笔断开连接后，捏握和长按两个设置项**仍可选**；要求与其它原始选项
+（下滑 / 双击 / 上滑触控条）同步，断开时置为不可选。
+
+**为什么不能自己造一个「笔是否连接」判据**：这三行是我们注入的，ipemanager 不认识它们，所以
+**没有任何原厂逻辑会去禁用它们** —— 这是缺失功能，不是判据错误。最贴近需求的做法是**照抄原厂行
+此刻的状态**：同一屏、同一时刻，原厂灰我们就灰，原厂亮我们就亮。
+
+**判据（三层，全部朝「可用」一侧容错）**：
+1. 原厂三行（`titleToGestureType` 命中的那些）容器 `isEnabled()==false` 或 `alpha<=0.95`
+   ⇒ 若**全部**如此则禁用。Android 原生灰显（`setEnabled(false)` + color selector）必然伴随
+   `isEnabled=false`，所以这个信号是充分的；原厂若改用 textColor 灰显也一定同时 setEnabled(false)，
+   否则点了还有反应、逻辑不成立。
+2. 原厂行可用 ⇒ **启用**，不理会 BT 栈怎么说。读错 profile 把**本来可用**的行灰掉，比现在的视觉
+   不一致更糟 —— 功能不可用 > 观感不统一。
+3. 只有拿不到原厂行（`stock==null`）才回退 `BluetoothAdapter.getProfileConnectionState(4)`
+   （`HID_HOST_PROFILE` 是 hidden，本地常量 4）；读不到（无权限/异常）⇒ 未知 ⇒ 启用。
+
+⚠️ **不复用 `HookUtils.bluetoothConnected`**：它在 HID profile 与 live uhid link 不一致时**乐观返回
+true** —— 那是回答「能不能用笔」的正确取值，却是回答「要不要灰」的错误取值。灰显要的是悲观值。
+
+**观感**：`setEnabled/setClickable/setFocusable(false)` + 整行 `setAlpha(原厂灰显 alpha)`
+（取原厂最小 alpha；拿不到用 0.4）。alpha 向下传递给 title / 值文本 / 箭头，一次调用整行变灰；
+`clickable=false` 同时让按压态 StateListDrawable 不再闪。点击回调里再加一道 `if (!v.isEnabled()) return;`。
+
+**刷新**：可用性不是一次性事实 —— 面板等 BT 栈是异步的，笔也可能在面板开着时断。在原 0/400ms 安全
+pass 之后追加 **600ms × 最多 20 次**的轮询（每次一次树遍历 + 几次属性读），面板 detach 或次数用尽即停；
+只在状态变化时打日志：`panel usability stockRows=3 verdict=DISABLED dim=0.4 stockEnabled=[off@1.0,…]
+hidHost=false`。
+
+**构建与验证（4.9.6，19:21 装机 + 重启，`versionCode=490006`）**：0 error；dex 含 `lenovo_extra_row_`
+与可用性日志串，290 类定义、xposed/UEventObserver 定义 0。**待用户断笔后打开面板目视确认三行变灰
+且点不动、连笔时恢复正常**；诊断看 logcat 的 `PanelCardExtension: panel usability …`。
+中间产物 **4.9.5（双判据 AND 版，存在误灰风险）已删、不提交**。
+
 ## Bug-fix: xposed_scope 遗漏 `android`（system_server）（2026-09-22）
 
 - [x] **问题**：`arrays.xml` 的 `xposed_scope` 只有 `system`（SystemUI）而**缺少 `android`**
