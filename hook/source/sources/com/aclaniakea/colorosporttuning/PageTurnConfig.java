@@ -1076,8 +1076,8 @@ public final class PageTurnConfig {
             }
 
             root.addView(divider(ctx, p));
-            root.addView(optionRow(ctx, p, "清除该应用配置",
-                    locked ? "清空后回到该应用重新触发，即可重选方式并重录轨迹"
+            root.addView(optionRow(ctx, p, "重置",
+                    locked ? "重置后到App界面用笔翻页，触发模拟手势设置"
                            : "下次触发时重新询问", false,
                     new Runnable() {
                         @Override public void run() {
@@ -1104,8 +1104,7 @@ public final class PageTurnConfig {
         TextView t = new TextView(ctx);
         t.setText("已记录自定义轨迹：" + calibrationDetail(ctx, pkg) + "。\n"
                 + "「水平模拟 / 垂直模拟」暂不可选 —— 改轴会让这条轨迹失效。\n"
-                + "如需重设：先点下方「清除该应用配置」，再回到该应用触发「上一页 / 下一页」，"
-                + "选模拟方式时点「自定义滑动范围」重录一次。");
+                + "重设模拟轨迹请点击重置后，到App界面，用笔翻页，触发模拟手势设置。");
         t.setTextSize(13);
         t.setTextColor(p.body);
         t.setLineSpacing(dp(ctx, 4), 1f);
@@ -1271,7 +1270,7 @@ public final class PageTurnConfig {
 
         if (allowClear) {
             root.addView(divider(ctx, p));
-            root.addView(optionRow(ctx, p, "清除该应用配置", "下次触发时重新询问", false,
+            root.addView(optionRow(ctx, p, "重置", "下次触发时重新询问", false,
                     new Runnable() {
                         @Override public void run() {
                             dlg.dismiss();

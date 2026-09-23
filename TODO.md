@@ -313,6 +313,14 @@ App 时芯片转 warn 色并显示「≠ 目标「X」」，画布首行也照�
 Hook 上载日志：`system_server stylus hooks installed (startOtherServices=1 run=1)`、
 `pageturn config receiver registered`。**观感（灰显是否够明显、提示是否可读）仍需人眼确认。**
 
+**文案定稿（4.9.3，19:06 装机 + 重启，`versionCode=490003`）**：`lockedNotice` 第三行按用户原话
+改为「重设模拟轨迹请点击重置后，到App界面，用笔翻页，触发模拟手势设置。」。提示里出现「重置」
+就必须有点得着的「重置」⇒ 两处 `optionRow` 的「清除该应用配置」统一改名为「重置」
+（`showChangeDialog` 的副行同步为「重置后到App界面用笔翻页，触发模拟手势设置」；`showChoice`
+的保留「下次触发时重新询问」）。**功能未动** —— 仍是 `clearCalibration(ctx,pkg,true/false)` ×2 +
+`setStrategy(PICK_CLEAR)`；改的只有标签与提示，避免「提示指着一个界面上不存在的名字」。
+dex 校验：新文案各命中 1 次，「清除该应用配置」命中 0 次，289 类、xposed/UEventObserver 定义 0。
+
 ## Bug-fix: xposed_scope 遗漏 `android`（system_server）（2026-09-22）
 
 - [x] **问题**：`arrays.xml` 的 `xposed_scope` 只有 `system`（SystemUI）而**缺少 `android`**
