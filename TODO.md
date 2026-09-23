@@ -359,6 +359,16 @@ hidHost=false`。
 且点不动、连笔时恢复正常**；诊断看 logcat 的 `PanelCardExtension: panel usability …`。
 中间产物 **4.9.5（双判据 AND 版，存在误灰风险）已删、不提交**。
 
+**补修（4.9.7，`versionCode=490007`）—— 刷新窗口太短**：用户清光所有翻页配置后，面板那行右侧仍显示
+「已配置 3 个应用」，**重开面板才变**。根因是上面那个轮询的 **12 秒上限**（600ms × 20）：用户清除时
+面板已开了十几分钟，tick 早停了，而面板自身的生命周期**不会**因为在其上方弹 dialog 再关掉而重走
+`onResume`。改成**跟随面板生命周期长驻**：`TICK_MS=1000`、`TICK_LIMIT=900`，`!root.isAttachedToWindow()`
+即停；面板不可见时只花一次 `isShown()` 跳过工作。顺带把 tick 变幂等（值文本仅在变化时 setText、
+`applyRowUsable` 仅在状态变化时 set*），否则每秒一次无条件 `setText` 会让面板每秒 requestLayout。
+这同时修掉同一类缺陷的另一面：**面板开着时断笔，12 秒后可用性也不再刷新**。
+⚠️ 教训记账：**"限时轮询"是错误形态** —— 只要刷新目标是随时间变化的外部状态，生命周期就该跟宿主走，
+上限只做防泄漏兜底，不做功能窗口。
+
 ## Bug-fix: xposed_scope 遗漏 `android`（system_server）（2026-09-22）
 
 - [x] **问题**：`arrays.xml` 的 `xposed_scope` 只有 `system`（SystemUI）而**缺少 `android`**
