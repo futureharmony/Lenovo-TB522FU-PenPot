@@ -151,27 +151,42 @@ public final class PanelCardExtension {
             }
         }, 400L);
 
-        // Availability is not a one-shot fact. The panel settles its own enabled state
-        // asynchronously (it waits on the BT stack), and the pen can drop while the panel is
-        // open. Re-evaluate a bounded number of times: each tick is a tree walk plus a few
-        // property reads, and the loop stops on its own (or as soon as the panel detaches).
+        // Everything this pass renders is a function of time, not a one-shot read:
+        //   - the OEM settles its own enabled state asynchronously (it waits on the BT stack);
+        //   - the pen can drop while the panel is open;
+        //   - the 翻页 summary counts Settings entries that the user edits *in a dialog above this
+        //     very panel*, so nothing in the panel's own lifecycle re-reads them.
+        // A fixed 12 s window was wrong twice (user report 2026-09-23: cleared every app, the row
+        // still said 「已配置 3 个应用」 until the panel was reopened). So keep ticking for as long
+        // as the surface is attached, at a rate that costs nothing (one tree walk per second).
         final Handler ticker = new Handler(Looper.getMainLooper());
         ticker.postDelayed(new Runnable() {
             private int ticks = 0;
 
             @Override public void run() {
                 ticks++;
-                if (ticks > 20 || !root.isAttachedToWindow()) return;
+                if (ticks > TICK_LIMIT || !root.isAttachedToWindow()) return;
+                // Hidden (sheet collapsed, activity stopped) — nothing to refresh, and while it
+                // stays hidden the tick costs one isShown() call.
+                if (!root.isShown()) {
+                    ticker.postDelayed(this, TICK_MS);
+                    return;
+                }
                 try {
                     fixPanelAssignments(root, ctx, allowExtraRows, false);
                 } catch (Throwable th) {
-                    HookUtils.log(TAG + ": availability tick error: " + th);
+                    HookUtils.log(TAG + ": refresh tick error: " + th);
                     return;
                 }
-                ticker.postDelayed(this, 600L);
+                ticker.postDelayed(this, TICK_MS);
             }
-        }, 600L);
+        }, TICK_MS);
     }
+
+    /** Refresh cadence while a panel is on screen. Cheap, and the panel is a transient surface. */
+    private static final long TICK_MS = 1000L;
+    /** Hard stop so a surface that somehow never detaches cannot tick forever. */
+    private static final int TICK_LIMIT = 900;
 
     private static void fallbackDelayedPass(final View root, final Context ctx,
             final boolean allowExtraRows) {
@@ -379,8 +394,14 @@ public final class PanelCardExtension {
                 for (String t : extraRowTypes(wantPageturn)) {
                     View vt = card.findViewWithTag("lenovo_extra_value_" + t);
                     if (vt instanceof TextView) {
-                        ((TextView) vt).setText("pageturn".equals(t)
-                                ? pageturnSummary(ctx) : extraGestureLabel(ctx, t));
+                        // Write only on change: this runs once a second for as long as the panel is
+                        // up, and an unconditional setText would re-request layout every tick.
+                        CharSequence want = "pageturn".equals(t)
+                                ? pageturnSummary(ctx) : extraGestureLabel(ctx, t);
+                        TextView tv = (TextView) vt;
+                        if (!want.toString().contentEquals(tv.getText())) {
+                            tv.setText(want);
+                        }
                     }
                     View row = card.findViewWithTag("lenovo_extra_row_" + t);
                     if (row != null) applyRowUsable(row, usable, dim);
@@ -611,10 +632,14 @@ public final class PanelCardExtension {
      */
     private static void applyRowUsable(View row, boolean usable, float dim) {
         if (row == null) return;
-        row.setEnabled(usable);
-        row.setClickable(usable);
-        row.setFocusable(usable);
-        row.setAlpha(usable ? 1f : dim);
+        float wantAlpha = usable ? 1f : dim;
+        if (row.isEnabled() != usable) {
+            row.setEnabled(usable);
+            row.setClickable(usable);
+            row.setFocusable(usable);
+        }
+        // Idempotent on purpose: this is called on every refresh tick.
+        if (Math.abs(row.getAlpha() - wantAlpha) > 0.001f) row.setAlpha(wantAlpha);
     }
 
     private static Drawable createRowPressDrawable(int pressColor) {
