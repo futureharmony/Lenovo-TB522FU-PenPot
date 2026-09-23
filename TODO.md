@@ -369,6 +369,36 @@ hidHost=false`。
 ⚠️ 教训记账：**"限时轮询"是错误形态** —— 只要刷新目标是随时间变化的外部状态，生命周期就该跟宿主走，
 上限只做防泄漏兜底，不做功能窗口。
 
+## P0.20 「重新记录」未重新武装手势旁路；录制 hint 加半透明底（Hook 4.9.8）
+
+**问题 1**（用户 2026-09-23）：App 内选模拟 → 第一次录制保存 → 点「重新记录」→ 第二次滑动
+**能响应**（底层 App 照常动），但**结束不弹「已保存滑动范围」**，画布也仍显示第一次的轨迹。
+
+**根因**：`enterResult()` 里 `stopSpy()` 把 `spy` 置 null 并释放 monitor，而 `startRecord()`
+**没有重新武装**。于是第二次录制时 `passThrough` 还是上一次的 `true` ⇒ 窗口依旧
+`FLAG_NOT_TOUCHABLE` ⇒ 手势照常落到底层 App（所以"能响应"），但**没有任何监听者** ⇒ 收不到
+`ACTION_UP` ⇒ `commitRecord()` 永不执行 ⇒ 不保存、不弹结果卡；`trail.live` 一直是 `startRecord()`
+写进去的 `null` ⇒ 画布只剩参考虚线（上一次保存的轨迹），看起来就是"第二次的轨迹没被展示"。
+
+**修**：`startRecord()` 里补
+`if (spy == null) { spy = TouchSpy.start(ui, spyListener); passThrough = spy != null; }`，
+且**必须放在 `applyRecordWindowStyle()` 之前** —— 窗口样式取决于新的 `passThrough`，拿不到旁路时
+要正确降级回 blocking 模式（而不是留着一个透传但没有监听的窗口）。
+⚠️ 形态教训：**结束态释放的资源，回到起始态时必须重新申请**。这类 bug 症状极具误导性 ——
+功能"半活"：输入通了、输出没了，用户看到的现象（"手势能响应"）恰好把最可能的方向带偏。
+
+**问题 2**：录制时画布上的提示（"在「xx」上按你习惯的方式上滑一次"）只有 shadow，浅色 / 花哨背景上
+看不清（用户要求加带透明度的背景）。
+**修**：新增 `Paint hintBg` 给两行提示垫一块圆角半透明底 ——
+颜色 `(pal.card & 0xFFFFFF) | (HINT_BG_ALPHA << 24)`，`HINT_BG_ALPHA = 0xE6`（≈90%）；
+宽度取两行最宽者 + 左右各 `dp(16)`，并夹到 `sw - dp(24)` 以免整条跑出屏幕；高度从 main 基线上方
+一行覆盖到 sub 基线下方。shadow 保留作第二道保险。**半透明是刻意的**：录制的全部意义就是能看见
+底层 App，不透明底会把这件事抹掉。
+
+**构建与验证（4.9.8，19:32 装机 + 重启，`versionCode=490008`）**：0 error；dex 字符串池含
+`drawRoundRect`、290 类、xposed/UEventObserver 定义 0。**待用户验证**：① 结果卡点「重新记录」后，
+第二次滑动能正常保存并弹结果卡、画布实时显示新轨迹；② hint 在浅色 / 花哨界面上可读。
+
 ## Bug-fix: xposed_scope 遗漏 `android`（system_server）（2026-09-22）
 
 - [x] **问题**：`arrays.xml` 的 `xposed_scope` 只有 `system`（SystemUI）而**缺少 `android`**

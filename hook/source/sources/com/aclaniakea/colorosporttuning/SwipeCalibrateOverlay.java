@@ -127,6 +127,17 @@ public final class SwipeCalibrateOverlay {
     private static final String WAITING = "等待滑动…";
 
     /**
+     * Opacity of the band drawn behind the on-canvas recording hint.
+     *
+     * <p>Deliberately translucent — the app underneath has to stay recognisable, which is the whole
+     * reason the recorder passes touches through instead of freezing the screen — but opaque enough
+     * that the hint still reads over a white document, a photo or a mid-tone video frame. The
+     * shadow it used to rely on alone vanished on exactly those backdrops (user report,
+     * 2026-09-23).</p>
+     */
+    private static final int HINT_BG_ALPHA = 0xE6;
+
+    /**
      * The result preview is a hint, not an ambient animation. After this many loops the frame
      * loop parks on the finished state, so a card left open stops consuming frames on the
      * looper it lives on (system_server's main thread — see the class comment).
@@ -769,6 +780,16 @@ public final class SwipeCalibrateOverlay {
         phase = PHASE_RECORD;
         feedbackText = WAITING;
         chipPollRt = 0L;
+        // Re-arm the spy channel. enterResult() disposes it, and the 重新记录 action comes back
+        // through here — without this the second recording has no listener at all: the window is
+        // still NOT_TOUCHABLE (passThrough is a stale true), so the gesture really reaches the app
+        // and *looks* accepted, but nothing is captured, so no ACTION_UP ever arrives, no result
+        // card appears, and the canvas keeps showing the trajectory saved the first time.
+        // Exactly the report of 2026-09-23.
+        if (spy == null) {
+            spy = TouchSpy.start(ui, spyListener);
+            passThrough = spy != null;
+        }
         if (card != null) card.setVisibility(View.GONE);
         applyRecordWindowStyle();
         updateWindow();
@@ -1190,6 +1211,7 @@ public final class SwipeCalibrateOverlay {
         private final Paint text = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint hint = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint hintSub = new Paint(Paint.ANTI_ALIAS_FLAG);
+        private final Paint hintBg = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint refLine = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint refDot = new Paint(Paint.ANTI_ALIAS_FLAG);
         private final Paint refText = new Paint(Paint.ANTI_ALIAS_FLAG);
@@ -1237,13 +1259,18 @@ public final class SwipeCalibrateOverlay {
             hint.setTextAlign(Paint.Align.CENTER);
             hint.setTypeface(Typeface.DEFAULT_BOLD);
 
-            // The hint is drawn over whatever the app happens to show, so it needs its own
-            // contrast: a soft shadow instead of a background band, which would hide the app.
+            // The hint is drawn over whatever the app happens to show. A shadow alone is not
+            // enough: on a white page or a busy photo the text disappears. So it gets a
+            // translucent band of Palette.card — the same surface its text colour was chosen
+            // against. The shadow stays as a second line of defence for the band's own edge.
             hint.setShadowLayer(PageTurnConfig.dp(ui, 6), 0f, 0f, 0xCCFFFFFF);
             hintSub.setColor(pal.title);
             hintSub.setTextSize(PageTurnConfig.dp(ui, 13));
             hintSub.setTextAlign(Paint.Align.CENTER);
             hintSub.setShadowLayer(PageTurnConfig.dp(ui, 6), 0f, 0f, 0xCCFFFFFF);
+
+            hintBg.setStyle(Paint.Style.FILL);
+            hintBg.setColor((pal.card & 0x00FFFFFF) | (HINT_BG_ALPHA << 24));
 
             // Reference (the range currently in effect) shown behind the live recording.
             refLine.setStyle(Paint.Style.STROKE);
@@ -1395,11 +1422,26 @@ public final class SwipeCalibrateOverlay {
          * bottom of the screen is where the user's own gesture and the app's response are.
          */
         private void drawHint(Canvas cv) {
-            int warnColor = pal.warn;
-            hint.setColor(hintWarn ? warnColor : pal.title);
-            cv.drawText(hintMain == null ? "" : hintMain, sw * 0.5f, sh * 0.40f, hint);
+            if (hintMain == null && hintText == null) return;
+            hint.setColor(hintWarn ? pal.warn : pal.title);
+
+            final float lineGap = PageTurnConfig.dp(ui, 26);
+            final float padH = PageTurnConfig.dp(ui, 16);
+            final float padV = PageTurnConfig.dp(ui, 10);
+            float widest = Math.max(hintMain == null ? 0f : hint.measureText(hintMain),
+                    hintText == null ? 0f : hintSub.measureText(hintText));
+            // Never wider than the display: a band running off both edges would be its own defect.
+            float band = Math.min(widest, sw - PageTurnConfig.dp(ui, 24)) + padH * 2f;
+            float cy = sh * 0.40f;
+            float top = cy - hint.getTextSize() - padV;
+            float bottom = (hintText != null ? cy + lineGap : cy) + padV * 0.6f;
+            float radius = PageTurnConfig.dp(ui, 14);
+            cv.drawRoundRect(new RectF(sw * 0.5f - band * 0.5f, top,
+                    sw * 0.5f + band * 0.5f, bottom), radius, radius, hintBg);
+
+            cv.drawText(hintMain == null ? "" : hintMain, sw * 0.5f, cy, hint);
             if (hintText != null) {
-                cv.drawText(hintText, sw * 0.5f, sh * 0.40f + PageTurnConfig.dp(ui, 26), hintSub);
+                cv.drawText(hintText, sw * 0.5f, cy + lineGap, hintSub);
             }
         }
 
